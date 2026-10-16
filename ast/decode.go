@@ -42,9 +42,11 @@ const (
 
 //go:nocheckptr
 func skipBlank(src string, pos int) int {
+	// Keep scan addresses as integers. A pointer at or past the end of the
+	// allocation may be shared across calls after inlining and scanned by GC.
 	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	se := base + uintptr(len(src))
 	sp := base + uintptr(pos)
+	se := base + uintptr(len(src))
 
 	for sp < se {
 		if !utils.IsSpace(*(*byte)(unsafe.Pointer(sp))) {
@@ -135,10 +137,11 @@ func isDigit(c byte) bool {
 
 //go:nocheckptr
 func decodeInt64(src string, pos int) (ret int, v int64, err error) {
-	sp := uintptr(rt.IndexChar(src, pos))
-	ss := uintptr(sp)
-	se := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr) + uintptr(len(src))
-	if uintptr(sp) >= se {
+	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
+	sp := base + uintptr(pos)
+	ss := sp
+	se := base + uintptr(len(src))
+	if sp >= se {
 		return -int(types.ERR_EOF), 0, nil
 	}
 
@@ -185,10 +188,11 @@ func isNumberChars(c byte) bool {
 
 //go:nocheckptr
 func decodeFloat64(src string, pos int) (ret int, v float64, err error) {
-	sp := uintptr(rt.IndexChar(src, pos))
-	ss := uintptr(sp)
-	se := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr) + uintptr(len(src))
-	if uintptr(sp) >= se {
+	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
+	sp := base + uintptr(pos)
+	ss := sp
+	se := base + uintptr(len(src))
+	if sp >= se {
 		return -int(types.ERR_EOF), 0, nil
 	}
 
