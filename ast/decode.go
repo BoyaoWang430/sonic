@@ -137,7 +137,7 @@ func isDigit(c byte) bool {
 func decodeInt64(src string, pos int) (ret int, v int64, err error) {
 	sp := uintptr(rt.IndexChar(src, pos))
 	ss := uintptr(sp)
-	se := uintptr(rt.IndexChar(src, len(src)))
+	se := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr) + uintptr(len(src))
 	if uintptr(sp) >= se {
 		return -int(types.ERR_EOF), 0, nil
 	}
@@ -187,7 +187,7 @@ func isNumberChars(c byte) bool {
 func decodeFloat64(src string, pos int) (ret int, v float64, err error) {
 	sp := uintptr(rt.IndexChar(src, pos))
 	ss := uintptr(sp)
-	se := uintptr(rt.IndexChar(src, len(src)))
+	se := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr) + uintptr(len(src))
 	if uintptr(sp) >= se {
 		return -int(types.ERR_EOF), 0, nil
 	}
