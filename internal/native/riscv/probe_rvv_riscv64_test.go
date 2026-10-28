@@ -2,5 +2,8 @@
 
 package riscv
 
+func quoteVectorBytes() (n int)
 func spaceVectorBytes() (n int)
+func stringDecodeVectorBytes() (n int)
 func stringScanVectorBytes() (n int)
+func utf8VectorBytes() (n int)

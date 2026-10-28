@@ -3,5 +3,8 @@
 package riscv
 
 // Use each scalar kernel's block width in the shared boundary tests.
-func spaceVectorBytes() (n int)      { return 8 }
-func stringScanVectorBytes() (n int) { return 8 }
+func quoteVectorBytes() (n int)        { return 8 }
+func spaceVectorBytes() (n int)        { return 8 }
+func stringDecodeVectorBytes() (n int) { return 8 }
+func stringScanVectorBytes() (n int)   { return 8 }
+func utf8VectorBytes() (n int)         { return 32 }
