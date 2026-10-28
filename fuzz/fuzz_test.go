@@ -55,7 +55,12 @@ func testJson(t *testing.T, data []byte, newf func() interface{}) {
 	serr := sonic.Unmarshal(data, sv)
 	require.Equal(t, jerr == nil, serr == nil)
 	spew.Dump(jv, sv)
-	require.Equal(t, jv, sv)
+	// Failed decodes need not leave identical partial destinations. In
+	// particular, jsonv2 can retain +Inf after range failure while optdec
+	// rejects the document before FromDom writes any values.
+	if jerr == nil {
+		require.Equal(t, jv, sv)
+	}
 }
 
 var testFuzzCases = []testFuzzCase{
