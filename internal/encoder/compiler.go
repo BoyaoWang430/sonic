@@ -454,6 +454,8 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 
 	/* compile each field */
 	fvs := resolver.ResolveStruct(vt)
+	hasPreviousField := false
+	hasGuaranteedField := false
 	for i, fv := range fvs {
 		var s []int
 		var o resolver.Offset
@@ -492,15 +494,25 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 			p.VField(ir.OP_is_zero, &fvs[i])
 		}
 
-		/* add the comma if not the first element */
-		i := p.PC()
-		p.Add(ir.OP_cond_testc)
-		p.Int(ir.OP_byte, ',')
-		p.Pin(i)
+		/* A non-skippable field guarantees a comma before every later field. */
+		key := Quote(fv.Name) + ":"
+		if hasGuaranteedField {
+			key = "," + key
+		} else if hasPreviousField || len(s) != 0 {
+			/* Earlier fields may all have been omitted. */
+			j := p.PC()
+			p.Add(ir.OP_cond_testc)
+			p.Int(ir.OP_byte, ',')
+			p.Pin(j)
+		}
+		hasPreviousField = true
+		if len(s) == 0 {
+			hasGuaranteedField = true
+		}
 
 		/* compile the key and value */
 		ft := fv.Type
-		p.Str(ir.OP_text, Quote(fv.Name)+":")
+		p.Str(ir.OP_text, key)
 
 		/* check for "stringnize" option */
 		if (fv.Opts & resolver.F_stringize) == 0 {
