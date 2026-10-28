@@ -35,7 +35,8 @@ type _MapPair struct {
 
 type MapIterator struct {
 	It rt.GoMapIterator // must be the first field
-	kv rt.GoSlice       // slice of _MapPair
+	platformMapOrder
+	kv rt.GoSlice // slice of _MapPair
 	ki int
 }
 
@@ -207,8 +208,9 @@ func IteratorNext(p *MapIterator) {
 	}
 
 	/* update the key-value pair, and increase the pointer */
-	t.K = unsafe.Pointer(&p.at(p.ki).k)
-	t.V = p.at(p.ki).v
+	pair := p.orderedMapPair(p.ki)
+	t.K = unsafe.Pointer(&pair.k)
+	t.V = pair.v
 	p.ki++
 }
 
@@ -236,14 +238,14 @@ func IteratorStart(t *rt.GoMapType, m unsafe.Pointer, fv uint64) (*MapIterator, 
 		}
 	}
 
-	/* sort the keys, map with only 1 item don't need sorting */
-	if it.ki = 1; count > 1 {
-		radixQsort(it.data(), 0, maxDepth(it.kv.Len))
-	}
+	/* prepare the sorted key order */
+	it.ki = 1
+	it.sortMapPairs()
 
 	/* load the first pair into iterator */
-	it.It.V = it.at(0).v
-	it.It.K = unsafe.Pointer(&it.at(0).k)
+	pair := it.orderedMapPair(0)
+	it.It.V = pair.v
+	it.It.K = unsafe.Pointer(&pair.k)
 	return it, nil
 }
 
