@@ -31,7 +31,7 @@ import (
 func ForceUseJit() {
 	x86.SetCompiler(makeEncoderX86)
 	pretouchType = pretouchTypeX86
-	encodeTypedPointer = x86.EncodeTypedPointer
+	encodeValuePointer = x86.EncodeValuePointer
 	vars.UseVM = false
 }
 

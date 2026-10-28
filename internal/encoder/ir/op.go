@@ -83,6 +83,8 @@ const (
 	OP_cond_testc
 	OP_unsupported
 	OP_is_zero
+	OP_f32_slice
+	OP_f64_slice
 )
 
 const (
@@ -145,6 +147,8 @@ var OpNames = [256]string{
 	OP_cond_set:       "cond_set",
 	OP_cond_testc:     "cond_testc",
 	OP_unsupported:    "unsupported type",
+	OP_f32_slice:      "f32_slice",
+	OP_f64_slice:      "f64_slice",
 }
 
 func (self Op) String() string {

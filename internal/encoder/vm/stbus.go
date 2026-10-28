@@ -44,3 +44,15 @@ var compiler func(*rt.GoType, ...interface{}) (interface{}, error)
 func SetCompiler(c func(*rt.GoType, ...interface{}) (interface{}, error)) {
 	compiler = c
 }
+
+// EncodeValuePointer encodes the value stored at p.
+func EncodeValuePointer(buf *[]byte, vt *rt.GoType, p unsafe.Pointer, sb *vars.Stack, fv uint64) error {
+	if vt == nil {
+		return prim.EncodeNil(buf)
+	}
+	pp, err := vars.FindOrCompile(vt, (fv&(1<<alg.BitPointerValue)) != 0, compiler)
+	if err != nil {
+		return err
+	}
+	return Execute(buf, p, sb, fv, pp.(*ir.Program))
+}

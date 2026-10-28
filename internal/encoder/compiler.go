@@ -31,11 +31,11 @@ import (
 func ForceUseVM() {
 	vm.SetCompiler(makeEncoderVM)
 	pretouchType = pretouchTypeVM
-	encodeTypedPointer = vm.EncodeTypedPointer
+	encodeValuePointer = vm.EncodeValuePointer
 	vars.UseVM = true
 }
 
-var encodeTypedPointer func(buf *[]byte, vt *rt.GoType, vp *unsafe.Pointer, sb *vars.Stack, fv uint64) error
+var encodeValuePointer func(buf *[]byte, vt *rt.GoType, p unsafe.Pointer, sb *vars.Stack, fv uint64) error
 
 func makeEncoderVM(vt *rt.GoType, ex ...interface{}) (interface{}, error) {
 	pp, err := NewCompiler().Compile(vt.Pack(), ex[0].(bool))
@@ -378,6 +378,9 @@ func (self *Compiler) compileSliceBody(p *ir.Program, sp int, vt reflect.Type) {
 }
 
 func (self *Compiler) compileSliceArray(p *ir.Program, sp int, vt reflect.Type) {
+	if compileFloatSlice(p, sp, vt) {
+		return
+	}
 	p.Tag(sp)
 	p.Int(ir.OP_byte, '[')
 	e := p.PC()

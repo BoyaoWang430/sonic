@@ -174,6 +174,18 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				return vars.ERR_nan_or_infinite
 			}
 			buf = alg.F64toa(buf, v)
+		case ir.OP_f32_slice:
+			var err error
+			buf, err = appendFloat32Slice(buf, *(*[]float32)(p), flags)
+			if err != nil {
+				return err
+			}
+		case ir.OP_f64_slice:
+			var err error
+			buf, err = appendFloat64Slice(buf, *(*[]float64)(p), flags)
+			if err != nil {
+				return err
+			}
 		case ir.OP_bin:
 			v := *(*[]byte)(p)
 			buf = rt.EncodeBase64(buf, v)

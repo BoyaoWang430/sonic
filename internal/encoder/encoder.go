@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"runtime"
+	"unsafe"
 
 	"github.com/bytedance/gopkg/lang/dirtmake"
 	"github.com/bytedance/sonic/internal/encoder/alg"
@@ -208,7 +209,13 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 func encodeInto(buf *[]byte, val interface{}, opts Options) error {
 	stk := vars.NewStack()
 	efv := rt.UnpackEface(val)
-	err := encodeTypedPointer(buf, efv.Type, &efv.Value, stk, uint64(opts))
+	var err error
+	if efv.Type == nil || efv.Type.Indirect() {
+		err = encodeValuePointer(buf, efv.Type, efv.Value, stk, uint64(opts))
+	} else {
+		data := efv.Value
+		err = encodeValuePointer(buf, efv.Type, unsafe.Pointer(&data), stk, uint64(opts))
+	}
 
 	/* return the stack into pool */
 	if err != nil {
