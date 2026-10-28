@@ -24,6 +24,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -789,7 +790,8 @@ func TestCase_TEXT_APPEND(t *testing.T) {
 
 // Case F64-LONG-OVF: a mantissa longer than the 800-digit fallback buffer
 // exposes a historical range-detection bug. Go 1.27 reports the mathematical
-// overflow; Sonic still truncates the mantissa and returns a finite value.
+// overflow; the C parser truncates the mantissa and returns a finite value.
+// The RISC-V Go parser follows the selected toolchain's strconv instead.
 func TestCase_F64_LONG_OVF(t *testing.T) {
 	number := "5" + strings.Repeat("3", 383) + "5" + strings.Repeat("3", 1327) + "e-913"
 	data := []byte("[" + number + "]")
@@ -798,11 +800,16 @@ func TestCase_F64_LONG_OVF(t *testing.T) {
 	se := sonic.ConfigStd.Unmarshal(data, &s)
 	je := json.Unmarshal(data, &j)
 
-	require.NoError(t, se)
-	require.Len(t, s, 1)
-	require.Equal(t, 5.3333333333333336e-114, s[0])
-
 	_, parseErr := strconv.ParseFloat(number, 64)
+	if runtime.GOARCH == "riscv64" && sonic.APIKind == sonic.UseSonicJSON && errors.Is(parseErr, strconv.ErrRange) {
+		require.Error(t, se)
+		require.Nil(t, s) // Parsing failed before FromDom modified the destination.
+	} else {
+		require.NoError(t, se)
+		require.Len(t, s, 1)
+		require.Equal(t, 5.3333333333333336e-114, s[0])
+	}
+
 	if errors.Is(parseErr, strconv.ErrRange) {
 		require.Error(t, je)
 		require.Len(t, j, 1)
