@@ -48,9 +48,35 @@ func (f *FieldCache) Get(name string, caseSensitive bool) int {
 		return idx
 	}
 	if !caseSensitive {
-		if idx, ok := f.caseInsensitive[strings.ToLower(name)]; ok {
+		return f.getCaseInsensitive(name)
+	}
+	return -1
+}
+
+func (f *FieldCache) getCaseInsensitive(name string) int {
+	// Fold short ASCII names without allocating. Keep the buffer off Get's fast path.
+	var lower [64]byte
+	if len(name) <= len(lower) {
+		for i := 0; i < len(name); i++ {
+			c := name[i]
+			if c >= 0x80 {
+				goto unicode
+			}
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			lower[i] = c
+		}
+		if idx, ok := f.caseInsensitive[string(lower[:len(name)])]; ok {
 			return idx
 		}
+		return -1
+	}
+
+unicode:
+	// Preserve strings.ToLower's Unicode and invalid-UTF-8 behavior.
+	if idx, ok := f.caseInsensitive[strings.ToLower(name)]; ok {
+		return idx
 	}
 	return -1
 }
