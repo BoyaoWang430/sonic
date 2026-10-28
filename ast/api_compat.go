@@ -44,6 +44,28 @@ func (self *Parser) decodeValue() (val types.JsonState) {
 	return v
 }
 
+// decodeKey returns the key's content start and first escape position.
+// A negative start means that the next value is not a complete string.
+func (self *Parser) decodeKey() (start int, ep int) {
+	start = self.p
+	if uint(start) >= uint(len(self.s)) || self.s[start] != '"' {
+		start = skipBlank(self.s, start)
+		if start < 0 || self.s[start] != '"' {
+			// A non-string value can advance the cursor before the caller rejects
+			// it as a key. Keep decodeValue's behavior on this uncommon path.
+			self.decodeValue()
+			return -1, -1
+		}
+	}
+
+	end, ep := skipString(self.s, start)
+	if end < 0 {
+		return -1, -1
+	}
+	self.p = end
+	return start + 1, ep
+}
+
 func (self *Parser) skip() (int, types.ParsingError) {
 	e, s := skipValue(self.s, self.p)
 	if e < 0 {

@@ -210,20 +210,20 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 	/* decode each pair */
 	for {
 		var val Node
-		var njs types.JsonState
 		var err types.ParsingError
 
 		/* decode the key */
-		if njs = self.decodeValue(); njs.Vt != types.V_STRING {
+		start, ep := self.decodeKey()
+		if start < 0 {
 			return Node{}, types.ERR_INVALID_CHAR
 		}
 
 		/* extract the key */
 		idx := self.p - 1
-		key := self.s[njs.Iv:idx]
+		key := self.s[start:idx]
 
 		/* check for escape sequence */
-		if njs.Ep != -1 {
+		if ep != -1 {
 			if key, err = unquote.String(key); err != 0 {
 				return Node{}, err
 			}
@@ -392,22 +392,22 @@ func (self *Parser) searchKey(match string) types.ParsingError {
 		return _ERR_NOT_FOUND
 	}
 
-	var njs types.JsonState
 	var err types.ParsingError
 	/* decode each pair */
 	for {
 
 		/* decode the key */
-		if njs = self.decodeValue(); njs.Vt != types.V_STRING {
+		start, ep := self.decodeKey()
+		if start < 0 {
 			return types.ERR_INVALID_CHAR
 		}
 
 		/* extract the key */
 		idx := self.p - 1
-		key := self.s[njs.Iv:idx]
+		key := self.s[start:idx]
 
 		/* check for escape sequence */
-		if njs.Ep != -1 {
+		if ep != -1 {
 			if key, err = unquote.String(key); err != 0 {
 				return err
 			}
@@ -575,20 +575,20 @@ func (self *Node) skipNextPair() *Pair {
 
 	/* decode one pair */
 	var val Node
-	var njs types.JsonState
 	var err types.ParsingError
 
 	/* decode the key */
-	if njs = parser.decodeValue(); njs.Vt != types.V_STRING {
+	start, ep := parser.decodeKey()
+	if start < 0 {
 		return newErrorPair(parser.syntaxError(types.ERR_INVALID_CHAR))
 	}
 
 	/* extract the key */
 	idx := parser.p - 1
-	key := parser.s[njs.Iv:idx]
+	key := parser.s[start:idx]
 
 	/* check for escape sequence */
-	if njs.Ep != -1 {
+	if ep != -1 {
 		if key, err = unquote.String(key); err != 0 {
 			return newErrorPair(parser.syntaxError(err))
 		}

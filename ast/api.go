@@ -49,6 +49,15 @@ func (self *Parser) decodeValue() (val types.JsonState) {
 	return
 }
 
+// decodeKey retains native string validation and cursor handling.
+func (self *Parser) decodeKey() (start int, ep int) {
+	val := self.decodeValue()
+	if val.Vt != types.V_STRING {
+		return -1, -1
+	}
+	return int(val.Iv), val.Ep
+}
+
 func (self *Parser) skip() (int, types.ParsingError) {
 	fsm := types.NewStateMachine()
 	start := native.SkipOne(&self.s, &self.p, fsm, 0)
