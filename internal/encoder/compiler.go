@@ -263,6 +263,14 @@ func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
 	e := p.PC()
 	p.Add(ir.OP_is_zero_map)
 	p.Add(ir.OP_save)
+	if vars.UseVM && vt == vars.StringAnyMapType {
+		p.Add(ir.OP_save)
+		p.Add(ir.OP_map_string_any)
+		p.Add(ir.OP_drop_2)
+		p.Pin(e)
+		p.Int(ir.OP_byte, '}')
+		return
+	}
 	p.Rtt(ir.OP_map_iter, vt)
 	p.Add(ir.OP_save)
 	i := p.PC()

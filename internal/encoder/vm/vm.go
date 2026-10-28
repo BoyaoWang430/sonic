@@ -219,6 +219,12 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				pc = ins.Vi()
 				continue
 			}
+		case ir.OP_map_string_any:
+			*b = buf
+			if err := encodeStringAnyMap(b, *(*map[string]any)(p), s, flags); err != nil {
+				return err
+			}
+			buf = *b
 		case ir.OP_map_iter:
 			v := *(*unsafe.Pointer)(p)
 			vt := ins.Vr()

@@ -85,6 +85,7 @@ const (
 	OP_is_zero
 	OP_f32_slice
 	OP_f64_slice
+	OP_map_string_any
 )
 
 const (
@@ -149,6 +150,7 @@ var OpNames = [256]string{
 	OP_unsupported:    "unsupported type",
 	OP_f32_slice:      "f32_slice",
 	OP_f64_slice:      "f64_slice",
+	OP_map_string_any: "map_string_any",
 }
 
 func (self Op) String() string {

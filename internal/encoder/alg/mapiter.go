@@ -36,13 +36,15 @@ type _MapPair struct {
 type MapIterator struct {
 	It rt.GoMapIterator // must be the first field
 	platformMapOrder
-	kv rt.GoSlice // slice of _MapPair
-	ki int
+	kv     rt.GoSlice // slice of _MapPair
+	ki     int
+	values []any
 }
 
 var (
-	iteratorPool = sync.Pool{}
-	iteratorPair = rt.UnpackType(reflect.TypeOf(_MapPair{}))
+	iteratorPool     = sync.Pool{}
+	iteratorPair     = rt.UnpackType(reflect.TypeOf(_MapPair{}))
+	stringAnyMapType = rt.MapType(rt.UnpackType(vars.StringAnyMapType))
 )
 
 func init() {
@@ -187,6 +189,14 @@ func (self *MapIterator) appendInterface(p *_MapPair, t *rt.GoType, k unsafe.Poi
 }
 
 func IteratorStop(p *MapIterator) {
+	if len(p.values) != 0 {
+		for i := range p.values {
+			p.values[i] = nil
+			*p.at(i) = _MapPair{}
+		}
+		p.values = p.values[:0]
+		p.It = rt.GoMapIterator{}
+	}
 	iteratorPool.Put(p)
 }
 
@@ -216,6 +226,11 @@ func IteratorNext(p *MapIterator) {
 
 func IteratorStart(t *rt.GoMapType, m unsafe.Pointer, fv uint64) (*MapIterator, error) {
 	it := newIterator()
+	if t == stringAnyMapType && fv&(1<<BitSortMapKeys) != 0 {
+		value := (rt.GoEface{Type: &t.GoType, Value: m}).Pack().(map[string]any)
+		it.startStringAnyMap(value)
+		return it, nil
+	}
 	rt.Mapiterinit(t, m, &it.It)
 	count := rt.Maplen(m)
 
@@ -247,6 +262,32 @@ func IteratorStart(t *rt.GoMapType, m unsafe.Pointer, fv uint64) (*MapIterator, 
 	it.It.V = pair.v
 	it.It.K = unsafe.Pointer(&pair.k)
 	return it, nil
+}
+
+func (p *MapIterator) startStringAnyMap(m map[string]any) {
+	n := len(m)
+	if n == 0 {
+		return
+	}
+	if n > p.kv.Cap {
+		p.kv = rt.GrowSlice(iteratorPair, p.kv, n)
+	}
+	if n > cap(p.values) {
+		p.values = make([]any, n)
+	} else {
+		p.values = p.values[:n]
+	}
+	// Keep value snapshots in typed storage while pairs are sorted.
+	for key, value := range m {
+		i := p.kv.Len
+		p.values[i] = value
+		pair := p.add()
+		pair.k = key
+		pair.v = unsafe.Pointer(&p.values[i])
+	}
+	p.sortMapPairs()
+	p.ki = 0
+	IteratorNext(p)
 }
 
 func asText(v unsafe.Pointer) (string, error) {
