@@ -17,18 +17,7 @@
 #ifndef NATIVE_H
 #define NATIVE_H
 
-#ifdef __aarch64__
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#include <x86/sse.h>
-#include <x86/sse2.h>
-#include <x86/sse4.1.h>
-#include <x86/sse4.2.h>
-#include <x86/ssse3.h>
-#include <x86/clmul.h>
-#include <x86/avx2.h>
-#else
 #include <immintrin.h>
-#endif
 
 
 #if defined(__clang__)

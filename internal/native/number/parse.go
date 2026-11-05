@@ -32,10 +32,10 @@ type Result struct {
 // delimiter. Floating-point overflow returns the consumed end position, a
 // Float result containing signed infinity, and ERR_FLOAT_INFINITY.
 //
-// Integer syntax and accumulation share a single bounded pass. Fractions,
-// exponents, and integers beyond uint64 use the existing scanner and strconv's
-// correctly rounded float conversion, without a second validation scan or a
-// separate search for number-kind markers.
+// Integer syntax and accumulation share a single bounded pass. Common decimal
+// suffixes continue that pass and use one correctly rounded multiplication or
+// division. Other fractions, exponents, and integers beyond uint64 use the
+// existing scanner and strconv's correctly rounded float conversion.
 func ParsePrefix(s string, start int) (Result, int, types.ParsingError) {
 	if start < 0 || start > len(s) {
 		return Result{}, start, types.ERR_INVALID_CHAR
@@ -89,7 +89,7 @@ func ParsePrefix(s string, start int) (Result, int, types.ParsingError) {
 	}
 integerEnd:
 	if i < len(s) && (s[i] == '.' || s[i]|0x20 == 'e') {
-		return parseFloatPrefix(s, start)
+		return parseFloatSuffix(s, start, i, value, negative)
 	}
 	if negative {
 		if value <= 1<<63 {
@@ -99,6 +99,22 @@ integerEnd:
 		return result, i, err
 	}
 	return Result{Kind: Unsigned, Uint64: value}, i, 0
+}
+
+// Keep both suffix outcomes behind one call so integer-only parsing does not
+// retain the original token arguments across a speculative conversion call.
+func parseFloatSuffix(s string, start, suffix int, mantissa uint64, negative bool) (Result, int, types.ParsingError) {
+	v, end, ok := exactFloatSuffix(s, suffix, mantissa, negative)
+	if ok {
+		return Result{Kind: Float, Float64: v}, end, 0
+	}
+	if end != 0 {
+		// The exact path already validated the entire token; only conversion
+		// needs the general implementation.
+		result, err := parseFloat(s[start:end])
+		return result, end, err
+	}
+	return parseFloatPrefix(s, start)
 }
 
 func parseFloatPrefix(s string, start int) (Result, int, types.ParsingError) {

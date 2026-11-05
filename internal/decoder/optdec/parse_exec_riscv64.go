@@ -8,7 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/number"
-	"github.com/bytedance/sonic/internal/native/riscv"
+	"github.com/bytedance/sonic/internal/native/kernels"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/utf8"
@@ -128,7 +128,7 @@ func (r *rvParser) spaceSlow() {
 			var width int
 			// Classify immutable input so unescaping cannot invalidate the mask.
 			r.spaceBase = r.pos
-			r.spaceMask, width = riscv.NonSpaceMask(r.src, r.pos)
+			r.spaceMask, width = kernels.NonSpaceMask(r.src[r.pos:])
 			r.spaceEnd = r.pos + width
 		}
 		mask := r.spaceMask >> uint(r.pos-r.spaceBase)
@@ -185,7 +185,7 @@ func (r *rvParser) literal(word string, kind uint64) ErrorCode {
 
 func (r *rvParser) text(key bool) ErrorCode {
 	start := r.pos
-	end, size, escaped, at, code := riscv.ParseString(r.data, start,
+	end, size, escaped, at, code := kernels.ParseString(r.data, start,
 		r.p.options&(1<<_F_validate_string) != 0,
 		r.p.options&(1<<_F_disable_urc) != 0)
 	if code != 0 {

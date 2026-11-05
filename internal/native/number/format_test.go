@@ -86,6 +86,34 @@ func TestAppendFloatAgainstCompatibility(t *testing.T) {
 	}
 }
 
+func TestAppendFloatIntegerBoundaries(t *testing.T) {
+	for i := -512; i <= 512; i++ {
+		compareFloatWithJSON(t, float64(i), 64)
+		compareFloatWithJSON(t, float64(i), 32)
+	}
+	// Fractions next to integers must retain shortest-float formatting.
+	// Beyond each precision's exact-integer range, even an integral float can
+	// have a shorter rounded decimal, for example float64(1<<60).
+	for _, v := range []float64{1, 2, 1e6, 1<<24 - 1, 1 << 24, 1<<53 - 1, 1 << 53, 1 << 60, 1e20, 1e21} {
+		for _, neighbor := range []float64{math.Nextafter(v, 0), v, math.Nextafter(v, math.Inf(1))} {
+			compareFloatWithJSON(t, neighbor, 64)
+			compareFloatWithJSON(t, -neighbor, 64)
+		}
+		v32 := float32(v)
+		for _, neighbor := range []float32{math.Nextafter32(v32, 0), v32, math.Nextafter32(v32, float32(math.Inf(1)))} {
+			compareFloatWithJSON(t, float64(neighbor), 32)
+			compareFloatWithJSON(t, -float64(neighbor), 32)
+		}
+	}
+	rng := rand.New(rand.NewSource(2))
+	for i := 0; i < 10000; i++ {
+		integer64 := int64(rng.Uint64()>>10) - 1<<53
+		integer32 := int64(rng.Uint32()>>7) - 1<<24
+		compareFloatWithJSON(t, float64(integer64), 64)
+		compareFloatWithJSON(t, float64(integer32), 32)
+	}
+}
+
 func compareFloatWithJSON(t *testing.T, v float64, bits int) {
 	t.Helper()
 	var value interface{} = v
