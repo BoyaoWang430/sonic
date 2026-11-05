@@ -1,4 +1,4 @@
-//go:build riscv64 && go1.26 && !go1.28 && riscv64.rva22u64
+//go:build (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
 
 package optdec
 
@@ -108,7 +108,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 		// and cursors outside timing, once per batch of up to 32 documents.
 		// Timed work includes parser-owned allocations, but excludes pooled
 		// input preparation and these cache-warming restoration copies.
-		batch := min(32, b.N)
+		batch := minBenchInt(32, b.N)
 		parsers := make([]*Parser, batch)
 		codes := make([]ErrorCode, batch)
 		for i := range parsers {
@@ -124,7 +124,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 		b.ResetTimer()
 		b.StopTimer()
 		for done := 0; done < b.N; {
-			n := min(batch, b.N-done)
+			n := minBenchInt(batch, b.N-done)
 			for _, p := range parsers[:n] {
 				copy(p.padded, src)
 				p.cur = p.start
@@ -198,4 +198,11 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 			b.Fatal("total decode differs from the standard library")
 		}
 	})
+}
+
+func minBenchInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

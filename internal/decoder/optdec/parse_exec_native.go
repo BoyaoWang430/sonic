@@ -1,4 +1,4 @@
-//go:build !riscv64 || !riscv64.rva22u64 || !go1.26 || go1.28
+//go:build !arm64 && (!riscv64 || !riscv64.rva22u64 || !go1.26 || go1.28)
 
 package optdec
 

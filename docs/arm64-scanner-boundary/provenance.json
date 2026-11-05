@@ -1,0 +1,86 @@
+{
+  "baseline_revision": "8e580e0459c76716d4f019b2951cc9d8e9471d17",
+  "compiler_version": "go version go1.26.4 linux/arm64",
+  "compiler_distribution": "Tango 1.0.0.1153",
+  "compiler_archive_sha256": "47f628192a2bcf626433463d21f8ff31195fc921195f18ab96c6ad30e7c613ce",
+  "cpu": "Neoverse-N2",
+  "cpu_affinity": 16,
+  "rounds": 8,
+  "benchtime": "150ms",
+  "comparison": "Median paired ns/op change; negative is faster. Ranges are observed pairs, not confidence intervals.",
+  "environment": {
+    "GODEBUG": null,
+    "GOGC": null,
+    "GOMAXPROCS": "1",
+    "GOMEMLIMIT": null,
+    "SONIC_ENCODER_USE_VM": null,
+    "SONIC_NO_ASYNC_GC": "1",
+    "SONIC_SYNC_GC": null,
+    "SONIC_USE_FASTMAP": null,
+    "SONIC_USE_OPTDEC": null
+  },
+  "binaries": {
+    "baseline-kernels": {
+      "path": "output/arm-scanner-boundary/baseline-kernels.test",
+      "sha256": "6c905d7df414e5b18513de430ae2143dc97731a8073ee06317837113209ec2d1"
+    },
+    "baseline-ast": {
+      "path": "output/arm-scanner-boundary/baseline-ast.test",
+      "sha256": "886207dc49ffe06551662a97cd7fd46b2c20650bd9e3485aaf9c90a96717439a"
+    },
+    "baseline-public-final": {
+      "path": "output/arm-scanner-boundary/baseline-public-final.test",
+      "sha256": "292a7d80c93b115d3c4756a63a2574da67fd43ed7db1db735da094c5828594b7"
+    },
+    "v4-kernels": {
+      "path": "output/arm-scanner-boundary/v4-kernels.test",
+      "sha256": "d22b46f7e3803dd13fcb08b7f3e8e442f5d8d4fff5287fb480bd652f901a8a80"
+    },
+    "v4-public": {
+      "path": "output/arm-scanner-boundary/v4-public.test",
+      "sha256": "ddcd2ec764b7844af87a048fff73f0fe01de602dbf108d8f05d541c3ab8730a2"
+    },
+    "v4-ast": {
+      "path": "output/arm-scanner-boundary/v4-ast.test",
+      "sha256": "d59439db4f8f80fbde1cd66c4f5b5acccb3fb40a567dcb0fd9c509f39c7f7abe"
+    }
+  },
+  "source_sha256": {
+    "arm64_scanner_boundary_bench_test.go": "75bcdb86a6883b93665b1f44b6b6618968de7ea6fca361b3896360b0e12a6876",
+    "internal/native/kernels/masks_arm64.s": "ef26da16daa33d7cdf7633e730a104b63e131908088d469c44ec99216d07af20",
+    "internal/native/kernels/number_scan_arm64.go": "7b604252c5b5e2dc3eeccbac4376672013af517d785097ac695fedbbb7412f5f",
+    "internal/native/kernels/number_scan_arm64.s": "47668d67f49c08dead98f534503ad88ae469dc17b7c85725df6fd27054e9883f",
+    "internal/native/kernels/number_scan_arm64_test.go": "10500cbf18732d285af2973bd0d152519c720a782379a7c581e8c7c557bd2279",
+    "internal/native/kernels/number_word_arm64_test.go": "a56c492baecf013d3e4fd404e2e0e8cefb025935c9e75c962bc94e3d80c5b234",
+    "internal/native/kernels/runs_arm64.s": "311ce1952c055b63a3f44fe6892d482cff7a9c6764cd5f4f03f6bf6d74f1bb78",
+    "internal/native/kernels/scanning_arm64.go": "cf1edc8741e8ca2b4c5d5b6ebe225a0806a9fb28a38f96d7e305c7f1b59262cb",
+    "internal/native/kernels/string_scan_strict_arm64.h": "4f04f22da83e35a388db53284e784481fe83c8154e5af5defb37cec6d2d8a2b8",
+    "internal/native/kernels/string_scan_strict_arm64.s": "d381a3f82f8b324d0303c188ab37c0aac632a62d2fc0582bdb32bffda02fc7fc",
+    "internal/native/kernels/string_scan_strict_bench_native_test.go": "e285032f60f537bdae6e12adf22b028743a7a52756143d804c01c7c51065e0a2",
+    "internal/native/kernels/string_scan_strict_native_test.go": "3224e12ea33db7998a063f66205a48ba4d9c36e8a9280f1072f44f9a71e6ce4e"
+  },
+  "removed_sources": [
+    "internal/native/kernels/number_skip_arm64.s",
+    "internal/native/kernels/string_prefix_arm64.s"
+  ],
+  "groups": {
+    "kernels": {
+      "started_utc": "2026-11-04T08:19:15.784025+00:00",
+      "bench": "^BenchmarkNative(ScanStringMasks|ScanStringStrictTransitions|ScanNumber|ScanNumberStrict|SkipNumber)$",
+      "expected_rows": 47
+    },
+    "public": {
+      "started_utc": "2026-11-04T08:17:05.741061+00:00",
+      "bench": "^Benchmark(ARMPublicAPI|ARMASTMaterialize|ARMPublicShapeCoverage|ARMScannerBoundary)$",
+      "expected_rows": 35
+    },
+    "ast": {
+      "started_utc": "2026-11-04T08:21:59.809103+00:00",
+      "bench": "^Benchmark(GetOne_Sonic|GetFull_Sonic|Parser_Sonic|ParseSeven_Sonic|GetWithManyCompare_Sonic|GetFullFlowCoverage|GetScanArrayIndex|PathCacheLongQueries|GetManyShortEscapedFields)$",
+      "expected_rows": 39
+    }
+  },
+  "local_artifacts": "output/arm-scanner-boundary/v4-{kernels,public,ast}, instructions-v4",
+  "instruction_method": "Median of three slopes (user-mode PMU count at 2N minus count at N)/N; includes benchmark loop and wrappers; startup/setup mostly cancels, not function-only retired instructions.",
+  "path_base": "repository root; binaries are local ignored measurement artifacts"
+}

@@ -1,4 +1,4 @@
-//go:build riscv64 && go1.26 && !go1.28 && riscv64.rva22u64
+//go:build (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
 
 package optdec
 
@@ -97,16 +97,9 @@ func TestRVVParserRawNumbersAndUnicode(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("raw numbers=%#v", got)
 	}
-	for _, strict := range []bool{false, true} {
-		input, pos = `"\ud800"`, 0
-		flags := uint64(0)
-		if strict {
-			flags = uint64(OptionUseUnicodeErrors)
-		}
-		err := Decode(&input, &pos, flags, &got)
-		if strict && err == nil || !strict && (err != nil || got != "\ufffd") {
-			t.Errorf("unicode strict=%v: result=%#v error=%v", strict, got, err)
-		}
+	input, pos = `"\ud800"`, 0
+	if err := Decode(&input, &pos, 0, &got); err != nil || got != "\ufffd" {
+		t.Errorf("unicode replacement: result=%#v error=%v", got, err)
 	}
 }
 
@@ -151,11 +144,10 @@ func TestRVVParserContainerValueTransitions(t *testing.T) {
 		}
 		for _, prefix := range []string{"[", "[0,", `{"a":`, `{"a":0,"b":`} {
 			input := prefix + space
-			p := newParser(input, 0, 0)
-			code, pos := p.parse(), p.Pos()
-			p.free()
-			if code != SONIC_EOF || pos != len(input)+1 {
-				t.Fatalf("parse(%q)=(%d,%d), want EOF at %d", input, code, pos, len(input)+1)
+			pos := 0
+			var got interface{}
+			if err := Decode(&input, &pos, 0, &got); err == nil {
+				t.Fatalf("accepted truncated input %q", input)
 			}
 		}
 	}

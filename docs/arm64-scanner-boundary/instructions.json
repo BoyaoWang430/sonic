@@ -1,0 +1,462 @@
+[
+  {
+    "case": "string_dense",
+    "benchmark": "^BenchmarkNativeScanStringMasks$/^MixedEscapes$/^Validate$",
+    "iterations": 100000,
+    "variants": {
+      "before": {
+        "instructions:u": 39100.77078,
+        "cycles:u": 9056.04056
+      },
+      "after": {
+        "instructions:u": 26135.4193,
+        "cycles:u": 6963.61218
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 39100.92574,
+          "cycles:u": 9018.61489
+        },
+        {
+          "instructions:u": 39100.77078,
+          "cycles:u": 9058.3276
+        },
+        {
+          "instructions:u": 39100.70598,
+          "cycles:u": 9056.04056
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 26135.3515,
+          "cycles:u": 6963.61218
+        },
+        {
+          "instructions:u": 26135.4193,
+          "cycles:u": 6636.52753
+        },
+        {
+          "instructions:u": 26135.48648,
+          "cycles:u": 7070.03292
+        }
+      ]
+    },
+    "instruction_change_percent": -33.158813039644116
+  },
+  {
+    "case": "string_early_escape",
+    "benchmark": "^BenchmarkNativeScanStringStrictTransitions$/^EarlyEscapeLongTail$",
+    "iterations": 100000,
+    "variants": {
+      "before": {
+        "instructions:u": 12030.16266,
+        "cycles:u": 3048.66088
+      },
+      "after": {
+        "instructions:u": 5026.87127,
+        "cycles:u": 1463.18468
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 12029.85943,
+          "cycles:u": 3048.66088
+        },
+        {
+          "instructions:u": 12030.18586,
+          "cycles:u": 3050.279
+        },
+        {
+          "instructions:u": 12030.16266,
+          "cycles:u": 3044.70212
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 5026.87127,
+          "cycles:u": 1462.20206
+        },
+        {
+          "instructions:u": 5026.20381,
+          "cycles:u": 1465.12538
+        },
+        {
+          "instructions:u": 5027.62668,
+          "cycles:u": 1463.18468
+        }
+      ]
+    },
+    "instruction_change_percent": -58.21443639565884
+  },
+  {
+    "case": "string_plain7",
+    "benchmark": "^BenchmarkNativeScanStringStrictTransitions$/^Plain7$",
+    "iterations": 5000000,
+    "variants": {
+      "before": {
+        "instructions:u": 192.0106016,
+        "cycles:u": 34.1506966
+      },
+      "after": {
+        "instructions:u": 160.009584,
+        "cycles:u": 33.5194562
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 192.0175864,
+          "cycles:u": 34.1509532
+        },
+        {
+          "instructions:u": 191.9750294,
+          "cycles:u": 34.1506966
+        },
+        {
+          "instructions:u": 192.0106016,
+          "cycles:u": 34.0568188
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 160.0095856,
+          "cycles:u": 33.5489936
+        },
+        {
+          "instructions:u": 160.009584,
+          "cycles:u": 33.4074894
+        },
+        {
+          "instructions:u": 159.9842458,
+          "cycles:u": 33.5194562
+        }
+      ]
+    },
+    "instruction_change_percent": -16.66627641043754
+  },
+  {
+    "case": "number_short_float",
+    "benchmark": "^BenchmarkNativeScanNumber$/^ShortFloat$",
+    "iterations": 5000000,
+    "variants": {
+      "before": {
+        "instructions:u": 243.0036168,
+        "cycles:u": 44.971435
+      },
+      "after": {
+        "instructions:u": 197.0052094,
+        "cycles:u": 43.1375066
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 242.9827068,
+          "cycles:u": 44.971435
+        },
+        {
+          "instructions:u": 243.013027,
+          "cycles:u": 45.1880904
+        },
+        {
+          "instructions:u": 243.0036168,
+          "cycles:u": 44.9160132
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 197.0052094,
+          "cycles:u": 43.1375066
+        },
+        {
+          "instructions:u": 197.0099418,
+          "cycles:u": 43.1674772
+        },
+        {
+          "instructions:u": 196.9975174,
+          "cycles:u": 42.9233612
+        }
+      ]
+    },
+    "instruction_change_percent": -18.92910402146738
+  },
+  {
+    "case": "number_strict_float",
+    "benchmark": "^BenchmarkNativeScanNumberStrict$/^ShortFloat$",
+    "iterations": 5000000,
+    "variants": {
+      "before": {
+        "instructions:u": 312.0202444,
+        "cycles:u": 56.6217904
+      },
+      "after": {
+        "instructions:u": 230.0004386,
+        "cycles:u": 51.5612664
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 312.0078194,
+          "cycles:u": 57.162985
+        },
+        {
+          "instructions:u": 312.0234816,
+          "cycles:u": 56.5096764
+        },
+        {
+          "instructions:u": 312.0202444,
+          "cycles:u": 56.6217904
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 230.0108552,
+          "cycles:u": 50.9342058
+        },
+        {
+          "instructions:u": 230.0004386,
+          "cycles:u": 51.5612664
+        },
+        {
+          "instructions:u": 229.9978306,
+          "cycles:u": 52.4707026
+        }
+      ]
+    },
+    "instruction_change_percent": -26.286693659163106
+  },
+  {
+    "case": "number_sequential",
+    "benchmark": "^BenchmarkNativeScanNumberStrict$/^SequentialIntegers$",
+    "iterations": 10000,
+    "variants": {
+      "before": {
+        "instructions:u": 148460.9204,
+        "cycles:u": 27009.3475
+      },
+      "after": {
+        "instructions:u": 112631.5319,
+        "cycles:u": 22546.3045
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 148462.2418,
+          "cycles:u": 26983.8651
+        },
+        {
+          "instructions:u": 148460.9204,
+          "cycles:u": 27009.3475
+        },
+        {
+          "instructions:u": 148454.6802,
+          "cycles:u": 27146.7264
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 112622.3691,
+          "cycles:u": 22546.3045
+        },
+        {
+          "instructions:u": 112646.571,
+          "cycles:u": 22569.5625
+        },
+        {
+          "instructions:u": 112631.5319,
+          "cycles:u": 22543.5251
+        }
+      ]
+    },
+    "instruction_change_percent": -24.13388547199119
+  },
+  {
+    "case": "native_strict_strings",
+    "benchmark": "^BenchmarkARMScannerBoundary$/^DenseEscapes$/^NativeStrictStrings$",
+    "iterations": 50000,
+    "variants": {
+      "before": {
+        "instructions:u": 140625.2,
+        "cycles:u": 34256.18758
+      },
+      "after": {
+        "instructions:u": 89812.68854,
+        "cycles:u": 26843.41158
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 140625.66396,
+          "cycles:u": 34294.43968
+        },
+        {
+          "instructions:u": 140625.2,
+          "cycles:u": 34256.18758
+        },
+        {
+          "instructions:u": 140624.08708,
+          "cycles:u": 34093.98576
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 89816.01954,
+          "cycles:u": 27056.39516
+        },
+        {
+          "instructions:u": 89812.1187,
+          "cycles:u": 25464.44272
+        },
+        {
+          "instructions:u": 89812.68854,
+          "cycles:u": 26843.41158
+        }
+      ]
+    },
+    "instruction_change_percent": -36.13329009309854
+  },
+  {
+    "case": "native_strict_integers",
+    "benchmark": "^BenchmarkARMScannerBoundary$/^SmallIntegers$/^NativeStrictStrings$",
+    "iterations": 10000,
+    "variants": {
+      "before": {
+        "instructions:u": 118423.497,
+        "cycles:u": 22308.5814
+      },
+      "after": {
+        "instructions:u": 99060.835,
+        "cycles:u": 26591.3474
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 118418.5624,
+          "cycles:u": 22273.5957
+        },
+        {
+          "instructions:u": 118429.0118,
+          "cycles:u": 22308.5814
+        },
+        {
+          "instructions:u": 118423.497,
+          "cycles:u": 28341.6738
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 99054.5615,
+          "cycles:u": 26591.3474
+        },
+        {
+          "instructions:u": 99060.835,
+          "cycles:u": 26614.9231
+        },
+        {
+          "instructions:u": 99062.4936,
+          "cycles:u": 26553.8952
+        }
+      ]
+    },
+    "instruction_change_percent": -16.350354862430716
+  },
+  {
+    "case": "native_strict_floats",
+    "benchmark": "^BenchmarkARMScannerBoundary$/^MixedFloats$/^NativeStrictStrings$",
+    "iterations": 10000,
+    "variants": {
+      "before": {
+        "instructions:u": 145809.231,
+        "cycles:u": 28533.9323
+      },
+      "after": {
+        "instructions:u": 116469.9667,
+        "cycles:u": 32519.4342
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 145806.4496,
+          "cycles:u": 28533.9323
+        },
+        {
+          "instructions:u": 145835.4347,
+          "cycles:u": 28579.4328
+        },
+        {
+          "instructions:u": 145809.231,
+          "cycles:u": 28265.4011
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 116483.9466,
+          "cycles:u": 32519.4342
+        },
+        {
+          "instructions:u": 116468.1518,
+          "cycles:u": 32558.6366
+        },
+        {
+          "instructions:u": 116469.9667,
+          "cycles:u": 32477.7871
+        }
+      ]
+    },
+    "instruction_change_percent": -20.12167823585874
+  },
+  {
+    "case": "ast_mixed_floats",
+    "benchmark": "^BenchmarkARMScannerBoundary$/^MixedFloats$/^ASTSearch$",
+    "iterations": 10000,
+    "variants": {
+      "before": {
+        "instructions:u": 136298.1911,
+        "cycles:u": 25073.5484
+      },
+      "after": {
+        "instructions:u": 106969.5691,
+        "cycles:u": 23739.5237
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "instructions:u": 136298.1911,
+          "cycles:u": 24618.0924
+        },
+        {
+          "instructions:u": 136295.7917,
+          "cycles:u": 25073.5484
+        },
+        {
+          "instructions:u": 136301.7236,
+          "cycles:u": 25222.9606
+        }
+      ],
+      "after": [
+        {
+          "instructions:u": 106971.6763,
+          "cycles:u": 23739.5237
+        },
+        {
+          "instructions:u": 106955.9923,
+          "cycles:u": 23778.6029
+        },
+        {
+          "instructions:u": 106969.5691,
+          "cycles:u": 23612.9827
+        }
+      ]
+    },
+    "instruction_change_percent": -21.51798330066026
+  }
+]

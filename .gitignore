@@ -53,4 +53,5 @@ fuzz/testdata
 *pprof
 *coverage.txt
 .venv/
+__pycache__/
 tools/venv/*
