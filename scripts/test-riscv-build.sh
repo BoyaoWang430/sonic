@@ -211,6 +211,11 @@ for profile, native, vector in cases:
         require(all(entries[name] == 1 for name in assembly_entries),
                 f"{label}: expected exactly one implementation of each shared "
                 f"assembly entry, found {dict(entries)}")
+
+        optdec_pkg = selected[module + "/internal/decoder/optdec"]
+        optdec_assembly = optdec_pkg.get("SFiles", [])
+        require(optdec_assembly and all(name.endswith(suffix) for name in optdec_assembly),
+                f"{label}: unexpected optdec assembly implementation files {optdec_assembly}")
     print(f"PASS {label}: {'RVV' if vector else 'scalar' if native else 'fallback'}")
 
 print(f"PASS {checked} build-selection configurations")

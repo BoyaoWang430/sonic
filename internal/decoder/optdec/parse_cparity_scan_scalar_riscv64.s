@@ -1,4 +1,4 @@
-//go:build riscv64 && go1.26 && !go1.28 && riscv64.rva22u64
+//go:build riscv64 && go1.26 && !go1.28 && riscv64.rva22u64 && !riscv64.rva23u64
 
 #include "textflag.h"
 

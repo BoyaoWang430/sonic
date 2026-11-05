@@ -6,7 +6,7 @@
 // X10: input pointer, X11: bytes remaining, X12: absolute input offset.
 // X13: output pointer, X14: output slots remaining, X15: offsets written.
 // X16-X23, masks V0-V6, and data groups V8/V16/V24 are scratch.
-// X23 bounds scalar work after a bad block.
+// X23 bounds scalar work after a bad block; X24/X25 hold ASCII mask and size.
 // No calls, stack spills, or retained pointers.
 // The ordinary ABI0 frame preserves g (X27), SP, and the return address.
 TEXT ·utf8Scan(SB), $0-57
@@ -16,7 +16,96 @@ TEXT ·utf8Scan(SB), $0-57
 	MOV	positions+24(FP), X13
 	MOV	limit+32(FP), X14
 	MOV	$0, X15
+	MOV	$0x8080808080808080, X24
+	MOV	X11, X25                // original size bounds overlapping tail loads
+	JMP	utf8_ascii_loop
 
+	PCALIGN $64
+utf8_ascii_loop:
+	BEQZ	X11, utf8_done
+	MOV	$8, X16
+	BLTU	X11, X16, utf8_ascii_tail
+	MOV	0(X10), X17
+	AND	X24, X17
+	BNEZ	X17, utf8_ascii_word_nonascii
+	MOV	$32, X23
+	BGEU	X11, X23, utf8_ascii_start
+	ADD	$8, X10
+	ADD	$8, X12
+	SUB	$8, X11
+	JMP	utf8_ascii_loop
+
+utf8_ascii_word_nonascii:
+	MOV	$64, X23
+	BGEU	X11, X23, utf8_loop
+	MOV	X11, X23
+	JMP	utf8_tail_nonascii
+
+utf8_ascii_start:
+	MOV	8(X10), X18
+	AND	X24, X18, X17
+	BNEZ	X17, utf8_ascii_block_offset
+	MOV	16(X10), X19
+	MOV	24(X10), X20
+	OR	X19, X20, X16
+	AND	X24, X16
+	BNEZ	X16, utf8_ascii_upper
+	JMP	utf8_ascii_advance
+
+	PCALIGN $64
+utf8_ascii_blocks:
+	MOV	0(X10), X17
+	MOV	8(X10), X18
+	MOV	16(X10), X19
+	MOV	24(X10), X20
+	OR	X17, X18, X16
+	OR	X19, X20, X21
+	OR	X21, X16
+	AND	X24, X16
+	BNEZ	X16, utf8_ascii_block_nonascii
+utf8_ascii_advance:
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	BGEU	X11, X23, utf8_ascii_blocks
+	JMP	utf8_ascii_loop
+
+utf8_ascii_block_nonascii:
+	AND	X24, X17
+	BNEZ	X17, utf8_ascii_word_nonascii
+	AND	X24, X18, X17
+	MOV	$8, X16
+	BNEZ	X17, utf8_ascii_block_offset
+utf8_ascii_upper:
+	AND	X24, X19, X17
+	MOV	$16, X16
+	BNEZ	X17, utf8_ascii_block_offset
+	AND	X24, X20, X17
+	MOV	$24, X16
+utf8_ascii_block_offset:
+	ADD	X16, X10
+	ADD	X16, X12
+	SUB	X16, X11
+	JMP	utf8_ascii_word_nonascii
+
+utf8_ascii_tail:
+	MOV	X11, X23
+	BLTU	X25, X16, utf8_scalar
+	ADD	X11, X10, X17
+	MOV	-8(X17), X17
+	SUB	X11, X16
+	SLL	$3, X16
+	SRL	X16, X17
+	AND	X24, X17
+	BNEZ	X17, utf8_tail_nonascii
+	ADD	X11, X12
+	JMP	utf8_done
+utf8_tail_nonascii:
+	CTZ	X17, X17
+	SRL	$3, X17
+	JMP	utf8_nonascii
+
+	PCALIGN $64
 utf8_loop:
 	BEQZ	X11, utf8_done
 	// Every load uses the current remaining length, including short tails.
@@ -30,12 +119,12 @@ utf8_loop:
 	ADD	X16, X10
 	ADD	X16, X12
 	SUB	X16, X11
-	JMP	utf8_loop
+	JMP	utf8_ascii_loop
 
 utf8_multibyte:
 	// Short tails use the exact scalar decoder. Full blocks validate every
 	// byte in parallel, including non-ASCII bytes, with no table or extra ISA.
-	MOV	$16, X21
+	MOV	$64, X21
 	BLTU	X16, X21, utf8_bad_block
 
 	// Continuations are 80..BF. C0/C1 and F5..FF are illegal leading bytes.
@@ -227,6 +316,7 @@ utf8_advance:
 	ADD	X20, X10
 	ADD	X20, X12
 	SUB	X20, X11
+	BEQZ	X11, utf8_done
 	SUB	X20, X23
 	BGTZ	X23, utf8_scalar
 	JMP	utf8_loop

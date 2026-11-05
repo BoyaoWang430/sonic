@@ -67,7 +67,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 		// Includes pool get/put, the input copy and reset.
 		// No UTF-8 correction pass is requested by default options.
 		p := newParser(src, 0, 0)
-		if p.Json != src || string(p.padded) != src || p.Pos() != 0 {
+		if p.Json != src || string(p.padded[:len(src)]) != src || p.Pos() != 0 {
 			p.free()
 			b.Fatal("incorrect prepared input")
 		}
@@ -130,6 +130,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 				p.cur = p.start
 				p.nbuf = nodeBuf{}
 				p.nbuf.init(p.nodes)
+				p._nbk = _nospaceBlock{}
 			}
 			b.StartTimer()
 			for i, p := range parsers[:n] {
