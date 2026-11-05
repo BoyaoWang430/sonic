@@ -159,3 +159,37 @@ func TestQuoteVectorBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestQuoteBulkAndByteValues(t *testing.T) {
+	escapeMap := make(map[byte][2]string, len(quoteEscapes))
+	for _, e := range quoteEscapes {
+		escapeMap[e.src[0]] = [2]string{e.single, e.double}
+	}
+	for value := 0; value < 256; value++ {
+		b := byte(value)
+		src := strings.Repeat(string([]byte{b}), 129)
+		if esc, ok := escapeMap[b]; ok {
+			checkQuote(t, src, 129*len(esc[0]), 0, len(src), strings.Repeat(esc[0], 129))
+			checkQuote(t, src, 129*len(esc[1]), types.F_DOUBLE_UNQUOTE, len(src), strings.Repeat(esc[1], 129))
+		} else {
+			checkQuote(t, src, len(src), 0, len(src), src)
+			checkQuote(t, src, len(src), types.F_DOUBLE_UNQUOTE, len(src), src)
+		}
+	}
+	for pos := 0; pos <= 129; pos++ {
+		prefix := strings.Repeat("a", pos)
+		suffix := strings.Repeat("b", 40)
+		for _, tt := range []struct{ raw, escaped string }{
+			{`"`, `\"`},
+			{`\`, `\\`},
+			{"\n", `\n`},
+			{"\x00", `\u0000`},
+			{"\x1f", `\u001f`},
+		} {
+			src := prefix + tt.raw + suffix
+			want := prefix + tt.escaped + suffix
+			checkQuote(t, src, len(want), 0, len(src), want)
+			checkQuote(t, src, pos+len(tt.escaped)-1, 0, ^pos, prefix)
+		}
+	}
+}

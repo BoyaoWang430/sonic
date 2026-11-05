@@ -57,14 +57,6 @@ type node struct {
 	val uint64
 }
 
-// rvFrame is scratch state for the Go parser. Indices remain valid when the
-// node buffer grows, and frames never retain pointers into an input document.
-type rvFrame struct {
-	node  int
-	count uint32
-	state uint8
-}
-
 // should consistent with native/parser.c
 type _nospaceBlock struct {
 	_ [8]byte
@@ -108,10 +100,6 @@ type Parser struct {
 	nbuf    nodeBuf
 	Utf8Inv bool
 	isEface bool
-
-	// Go-only scratch follows the native ABI prefix. Only the RISC-V parser
-	// uses it; reuse it with the Parser instead of allocating a stack per call.
-	rvFrames []rvFrame
 }
 
 // only when parse non-empty object/array are needed.

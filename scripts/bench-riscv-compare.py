@@ -78,7 +78,7 @@ groups = {
  "decoder": ("./decoder", "^BenchmarkDecoder_(Generic|Binding)_Sonic$", 2),
  "encoder": ("./encoder", "^BenchmarkEncoder_(Generic|Binding)_Sonic$", 2),
  "ast": ("./ast", "^Benchmark(GetOne|GetFull|ParseSeven|SetOne)_Sonic$", 4),
- "kernel": ("./internal/native/riscv", "^BenchmarkNative(SkipSpace|ScanString|Unquote|ParseString|Quote|HTMLEscape|ValidUTF8|InvalidUTF8)$", 8),
+ "kernel": ("./internal/native/kernels", "^BenchmarkNative(SkipSpace|ScanString|Unquote|ParseString|Quote|HTMLEscape|ValidUTF8|InvalidUTF8)$", 8),
 }
 variants = {"old": (old, candidate_profile), "new": (root, candidate_profile), "fallback": (root, fallback_profile)}
 metadata["target_profiles"] = {name: profile for name, (_, profile) in variants.items()}
@@ -99,8 +99,13 @@ for group, (pkg, regex, expected) in groups.items():
             continue
         selected_pkg, selected_regex = pkg, regex
         if group == "kernel":
-            # Older checkouts kept these eight fixtures in the RVV package.
-            if not (path / "internal/native/riscv/bench_riscv64_test.go").is_file():
+            # The shared kernels and their fixtures were renamed during the
+            # ARM migration; preceding native and older RVV checkouts differ.
+            if (path / "internal/native/kernels/bench_native_test.go").is_file():
+                selected_pkg = "./internal/native/kernels"
+            elif (path / "internal/native/riscv/bench_riscv64_test.go").is_file():
+                selected_pkg = "./internal/native/riscv"
+            else:
                 selected_pkg = "./internal/native/rvv"
                 selected_regex = regex.replace("BenchmarkNative", "BenchmarkRVV")
             metadata["kernel_packages"][variant] = selected_pkg

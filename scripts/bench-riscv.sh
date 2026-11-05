@@ -115,7 +115,7 @@ configure_run() {
             bench_time=${BENCHTIME:-100ms}
             bench_count=${BENCHCOUNT:-3}
             if [[ "$group" == kernel ]]; then
-                pkg=./internal/native/riscv smoke='^$' bench='^BenchmarkNative'
+                pkg=./internal/native/kernels smoke='^$' bench='^BenchmarkNative'
                 expected_benchmarks=15 expected_tests=0
                 if [[ "${profile%%,*}" == rva22u64 ]]; then expected_benchmarks=17; fi
             else

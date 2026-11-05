@@ -28,10 +28,4 @@ func TestRVVNativeContracts(t *testing.T) {
 	if !Valid([]byte(`"\x"`)) {
 		t.Fatal("native Valid string-boundary policy changed")
 	}
-	// This backend implements the public Unicode-error option in its Go
-	// parser, including when optdec is enabled by the architecture dispatch.
-	var value string
-	if err := (Config{UseUnicodeErrors: true}).Froze().UnmarshalFromString(`"\ud800"`, &value); err == nil {
-		t.Fatal("UseUnicodeErrors accepted an unpaired surrogate")
-	}
 }

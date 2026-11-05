@@ -1,5 +1,5 @@
-//go:build go1.17 && !go1.28
-// +build go1.17,!go1.28
+//go:build (arm64 && go1.17 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+// +build arm64,go1.17,!go1.28 riscv64,go1.26,!go1.28,riscv64.rva22u64
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -31,7 +31,7 @@ var (
 )
 
 func init() {
-	// when in aarch64, we enable all optimization
+	// ARM64 and native RISC-V share optdec and enable all its optimizations.
 	envs.EnableOptDec()
 	envs.EnableFastMap()
 }

@@ -45,19 +45,20 @@ go = sys.argv[1]
 module = "github.com/bytedance/sonic"
 public = [".", "./ast", "./decoder", "./encoder", "./utf8", "./unquote"]
 internal = ["./internal/native/number", "./internal/decoder/optdec",
-            "./internal/encoder/alg", "./internal/native", "./internal/native/riscv"]
+            "./internal/encoder/alg", "./internal/native", "./internal/native/kernels"]
 
 # Native profiles share Go wrappers and select different assembly.
 operation_files = {
-    "html_escape_riscv64.go", "nonspace_riscv64.go", "number_scan_riscv64.go",
-    "path_masks_riscv64.go", "quote_riscv64.go", "skip_string_riscv64.go",
-    "space_riscv64.go", "string_decode_riscv64.go", "string_scan_riscv64.go",
-    "structural_riscv64.go", "traversal_masks_riscv64.go", "unquote_riscv64.go",
-    "utf8_riscv64.go",
+    "html_escape_native.go", "nonspace_native.go", "number_scan_native.go",
+    "path_masks_native.go", "quote_native.go", "skip_string_native.go",
+    "space_native.go", "string_decode_native.go", "string_scan_native.go",
+    "structural_native.go", "traversal_masks_native.go", "unquote_native.go",
+    "utf8_native.go", "min_native.go", "scanning_native.go",
 }
 assembly_entries = {
     "htmlEscape", "nonSpaceMask", "numberScan", "pathMasks", "quote", "space",
-    "stringDecode", "scanString", "scanStringBlock", "skipContainer", "traversalMasks", "utf8Scan",
+    "stringDecode", "scanStringRelaxed", "scanStringStrict", "scanStringRelaxedBlock",
+    "scanStringStrictBlock", "skipContainer", "traversalMasks", "utf8Scan",
 }
 
 # Check selected implementations independently of their build constraints.
@@ -68,9 +69,9 @@ pairs = [
     ("/encoder", "encoder_native.go", "encoder_compat.go"),
     ("/utf8", "utf8.go", "utf8_fallback.go"),
     ("/unquote", "unquote.go", "unquote_fallback.go"),
-    ("/internal/native/number", "scan_riscv64.go", "scan_generic.go"),
-    ("/internal/decoder/optdec", "parse_exec_riscv64.go", "parse_exec_native.go"),
-    ("/internal/encoder/alg", "maporder_riscv64.go", "maporder_legacy.go"),
+    ("/internal/native/number", "scan_go.go", "scan_generic.go"),
+    ("/internal/decoder/optdec", "parse_cparity_runs.go", "parse_exec_native.go"),
+    ("/internal/encoder/alg", "maporder_index.go", "maporder_legacy.go"),
     ("/internal/encoder/alg", "spec.go", "spec_compat.go"),
 ]
 cases = [
@@ -109,9 +110,20 @@ native_source_profile = None
 native_tests = None
 
 print(subprocess.check_output([go, "version"], text=True).strip())
+checked = 0
 for profile, native, vector in cases:
     env = dict(os.environ, GORISCV64=profile)
     label = f"GORISCV64={profile}"
+    # Extension-option syntax was added after the basic target profiles. Older
+    # toolchains still exercise every base profile, but cannot parse these cases.
+    if "," in profile:
+        probe = subprocess.run([go, "env", "GORISCV64"], env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if probe.returncode and "invalid GORISCV64" in probe.stderr:
+            print(f"SKIP {label}: toolchain does not support extension options")
+            continue
+        require(probe.returncode == 0, f"{label}: {probe.stderr}")
+    checked += 1
     selected = packages(env, public + internal)
     for suffix, native_file, fallback_file in pairs:
         pkg = selected[module + suffix]
@@ -125,15 +137,15 @@ for profile, native, vector in cases:
     if native:
         pkg = selected[module + "/internal/native"]
         files = pkg.get("GoFiles", [])
-        require("skip_token_riscv64.go" in files and
+        require("skip_token_go.go" in files and
                 not {"skip_scalar_riscv64.go", "skip_rvv_riscv64.go"}.intersection(files),
                 f"{label}: expected shared traversal implementation: {files}")
-        require("path_string_riscv64.go" in files and
+        require("path_string_go.go" in files and
                 not {"path_string_scalar_riscv64.go", "path_string_rvv_riscv64.go"}.intersection(files),
                 f"{label}: expected shared path string implementation: {files}")
         tests = {kind: sorted(pkg.get(kind, []))
                  for kind in ("TestGoFiles", "XTestGoFiles")}
-        require("skip_token_riscv64_test.go" in tests["TestGoFiles"],
+        require("skip_token_native_test.go" in tests["TestGoFiles"],
                 f"{label}: shared traversal parity tests are excluded")
         if native_tests is None:
             native_tests = tests
@@ -142,7 +154,7 @@ for profile, native, vector in cases:
                     f"{label}: native traversal test coverage differs across profiles: {tests}")
 
     for suffix, available in [("/internal/native", native),
-                              ("/internal/native/riscv", native)]:
+                              ("/internal/native/kernels", native)]:
         pkg = selected[module + suffix]
         if available:
             require(not pkg.get("Error") and pkg.get("GoFiles"),
@@ -155,7 +167,7 @@ for profile, native, vector in cases:
                     f"{label}: excluded {module + suffix} selected assembly")
 
     dependencies = packages(env, public, deps=True)
-    for suffix in ["/internal/native", "/internal/native/riscv", "/internal/decoder/optdec"]:
+    for suffix in ["/internal/native", "/internal/native/kernels", "/internal/decoder/optdec"]:
         require((module + suffix in dependencies) == native,
                 f"{label}: unexpected public dependency on {module + suffix}")
     for suffix in ["/internal/native/rvv", "/internal/native/scalar"]:
@@ -182,7 +194,7 @@ for profile, native, vector in cases:
                     f"{label}: production Go implementations differ from "
                     f"{native_source_profile}: {differences}")
 
-        pkg = selected[module + "/internal/native/riscv"]
+        pkg = selected[module + "/internal/native/kernels"]
         files = set(pkg["GoFiles"])
         require(files == operation_files,
                 f"{label}: shared operation wrappers differ: "
@@ -201,5 +213,5 @@ for profile, native, vector in cases:
                 f"assembly entry, found {dict(entries)}")
     print(f"PASS {label}: {'RVV' if vector else 'scalar' if native else 'fallback'}")
 
-print(f"PASS {len(cases)} build-selection configurations")
+print(f"PASS {checked} build-selection configurations")
 PY
