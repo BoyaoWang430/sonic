@@ -4,7 +4,7 @@
 
 // A bounded load supplies reusable key, whitespace and numeric-boundary masks.
 // M4 covers 64 bytes even at VLEN=128. No bytes beyond size are accessed.
-TEXT ·pathMasks(SB), $0-40
+TEXT ·pathMasks(SB), NOSPLIT, $0-40
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
 	BEQZ	X11, empty

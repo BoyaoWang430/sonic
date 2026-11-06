@@ -6,7 +6,7 @@
 // One complete relaxed structural scan. Each vector load is bounded by both the
 // remaining input and 64 bytes, so masks fit in scalar registers at any VLEN.
 // The assembler owns the ordinary Go frame; SP, RA, and g are never scratch.
-TEXT ·skipContainer(SB), $0-40
+TEXT ·skipContainer(SB), NOSPLIT, $0-40
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
 	MOV	X11, X12                // original size
@@ -73,7 +73,7 @@ structural_scan:
 structural_quotes:
 	// Prefix XOR marks every byte inside a string. Six scalar shifts avoid
 	// a carry-less multiply (Zbc) requirement.
-	BEQZ	X24, structural_quote_state
+	BEQZ	X24, structural_no_quotes
 	SLL	$1, X24, X5
 	XOR	X5, X24
 	SLL	$2, X24, X5
@@ -86,7 +86,6 @@ structural_quotes:
 	XOR	X5, X24
 	SLL	$32, X24, X5
 	XOR	X5, X24
-structural_quote_state:
 	XOR	X15, X24
 	ADD	$-1, X22, X7
 	SRL	X7, X24, X15
@@ -95,7 +94,14 @@ structural_quote_state:
 	NOT	X24, X5
 	AND	X5, X26
 	AND	X5, X28
+	JMP	structural_check_depth
 
+structural_no_quotes:
+	BNEZ	X15, structural_advance
+	OR	X26, X28, X5
+	BEQZ	X5, structural_advance
+
+structural_check_depth:
 	// If there are fewer closes than the entry depth, this block cannot
 	// finish the container. Otherwise inspect closes in position order.
 	CPOP	X28, X5
@@ -116,6 +122,7 @@ structural_count:
 	CPOP	X28, X6
 	ADD	X5, X13
 	SUB	X6, X13
+structural_advance:
 	ADD	X22, X10
 	SUB	X22, X11
 	JMP	structural_scan

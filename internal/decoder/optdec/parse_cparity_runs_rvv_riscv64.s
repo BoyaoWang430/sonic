@@ -392,6 +392,7 @@ runs_done:
 // The operations and their order match the Go fast path, so results are
 // bit-identical. Every other number, including all malformed ones, restores
 // the cursor and lets Go reproduce the complete C behavior.
+	PCALIGN $64
 TEXT runs_number<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOV X21, X16
 	MOVBU 0(X21), X14
@@ -576,6 +577,7 @@ runs_number_float_done:
 // Like C, decisions are made per 32-byte block from the string start: before
 // the first escape, a backslash ahead of the block's first quote wins even if a
 // raw control precedes it.
+	PCALIGN $64
 TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOV X21, X12
 	AND $32, X20, X13
@@ -733,6 +735,7 @@ runs_string_escape_error:
 
 // Consume the first nonspace byte. The first two scalar probes leave the
 // cached 64-byte block untouched, matching skip_space_impl in the C parser.
+	PCALIGN $64
 TEXT runs_space<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOVBU 0(X21), X10
 	ADD $1, X21

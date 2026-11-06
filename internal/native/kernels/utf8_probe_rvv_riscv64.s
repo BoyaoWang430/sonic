@@ -3,7 +3,7 @@
 #include "textflag.h"
 
 // Test-only caller: report the actual E8/M4 vector capacity.
-TEXT ·utf8VectorBytes(SB), $0-8
+TEXT ·utf8VectorBytes(SB), NOSPLIT, $0-8
 	VSETVLI	X0, E8, M4, TA, MA, X10
 	MOV	X10, n+0(FP)
 	RET

@@ -4,7 +4,7 @@
 
 // Used by the tests to record scan capacity and choose vector-boundary lengths.
 // func spaceVectorBytes() (n int)
-TEXT ·spaceVectorBytes(SB), $0-8
+TEXT ·spaceVectorBytes(SB), NOSPLIT, $0-8
 	VSETVLI	X0, E8, M4, TA, MA, X10
 	MOV	X10, n+0(FP)
 	RET

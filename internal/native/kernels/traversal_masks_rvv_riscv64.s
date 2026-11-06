@@ -4,7 +4,7 @@
 
 // One bounded load supplies reusable string-event and whitespace masks.
 // M4 covers 64 bytes at VLEN=128. Masks are truncated to the logical tail.
-TEXT ·traversalMasks(SB), $0-40
+TEXT ·traversalMasks(SB), NOSPLIT, $0-40
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
 	MOV	validate+16(FP), X12

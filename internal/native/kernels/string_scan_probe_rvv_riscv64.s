@@ -3,7 +3,7 @@
 #include "textflag.h"
 
 // Test probe: func stringScanVectorBytes() (n int)
-TEXT ·stringScanVectorBytes(SB), $0-8
+TEXT ·stringScanVectorBytes(SB), NOSPLIT, $0-8
 	// The production scanner caps each logical block at 64 bytes.
 	MOV	$64, X10
 	VSETVLI	X10, E8, M4, TA, MA, X10

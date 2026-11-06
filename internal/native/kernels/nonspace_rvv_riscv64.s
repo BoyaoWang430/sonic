@@ -4,7 +4,7 @@
 
 // func nonSpaceMask(src *byte, size int) (mask uint64)
 // size is in [0,64]. M4 holds all 64 lanes even at the minimum VLEN=128.
-TEXT ·nonSpaceMask(SB), $0-24
+TEXT ·nonSpaceMask(SB), NOSPLIT, $0-24
 	MOV src+0(FP), X10
 	MOV size+8(FP), X11
 	MOV $0, X12

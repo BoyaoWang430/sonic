@@ -5,7 +5,7 @@
 // func space(src *byte, size int) (n int)
 // Use the normal Go ABI0 stack arguments and return slot. The assembler owns
 // frame metadata. X27 (g), SP, and the return address are never modified here.
-TEXT ·space(SB), $0-24
+TEXT ·space(SB), NOSPLIT, $0-24
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
 	MOV	$0, X12
