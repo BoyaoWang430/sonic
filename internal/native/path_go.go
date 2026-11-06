@@ -30,13 +30,31 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 		} else {
 			ch, pos = block.nextSlow(src, pos)
 		}
-		value := reflect.ValueOf(component)
-		switch value.Kind() {
-		case reflect.String:
+		var key string
+		var index int64
+		var isKey bool
+		switch v := component.(type) {
+		case string:
+			key = v
+			isKey = true
+		case int:
+			index = int64(v)
+		default:
+			value := reflect.ValueOf(component)
+			switch value.Kind() {
+			case reflect.String:
+				key = value.String()
+				isKey = true
+			case reflect.Int:
+				index = value.Int()
+			default:
+				return pathError(pos, ch, types.ERR_UNSUPPORT_TYPE)
+			}
+		}
+		if isKey {
 			if ch != '{' {
 				return pathError(pos, ch, types.ERR_INVALID_CHAR)
 			}
-			key := value.String()
 			for {
 				if uint(pos) < uint(len(src)) && src[pos] > ' ' {
 					ch = src[pos]
@@ -84,11 +102,10 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 					return pathError(pos, ch, types.ERR_INVALID_CHAR)
 				}
 			}
-		case reflect.Int:
+		} else {
 			if ch != '[' {
 				return pathError(pos, ch, types.ERR_INVALID_CHAR)
 			}
-			index := value.Int()
 			if index < 0 {
 				return pathError(pos, ch, types.ERR_UNSUPPORT_TYPE)
 			}
@@ -97,8 +114,6 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 			if err != 0 {
 				return err, pos
 			}
-		default:
-			return pathError(pos, ch, types.ERR_UNSUPPORT_TYPE)
 		}
 	}
 	if m == nil {

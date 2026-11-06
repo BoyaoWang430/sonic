@@ -50,6 +50,31 @@ func (self *Parser) decodeValue() (val types.JsonState) {
 
 // decodeKey retains native string validation and cursor handling.
 func (self *Parser) decodeKey() (start int, ep int) {
+	s := self.s
+	p := self.p
+	n := len(s)
+	for p < n && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r') {
+		p++
+	}
+	if p < n && s[p] == '"' {
+		p++
+		start = p
+		limit := start + 32
+		if limit > n {
+			limit = n
+		}
+		for p < limit {
+			c := s[p]
+			if c == '"' {
+				self.p = p + 1
+				return start, -1
+			}
+			if c < 0x20 || c == '\\' {
+				break
+			}
+			p++
+		}
+	}
 	val := self.decodeValue()
 	if val.Vt != types.V_STRING {
 		return -1, -1

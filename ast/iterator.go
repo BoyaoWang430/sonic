@@ -19,7 +19,6 @@ package ast
 import (
 	"fmt"
 
-	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/native/types"
 )
 
@@ -31,7 +30,6 @@ type Pair struct {
 
 func NewPair(key string, val Node) Pair {
 	return Pair{
-		hash:  caching.StrHash(key),
 		Key:   key,
 		Value: val,
 	}

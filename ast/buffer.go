@@ -93,7 +93,13 @@ func (self *linkedNodes) Pop() {
 }
 
 func (self *linkedNodes) Push(v Node) {
-	self.Set(self.size, v)
+	i := self.size
+	if i < _DEFAULT_NODE_CAP {
+		self.head[i] = v
+		self.size = i + 1
+		return
+	}
+	self.Set(i, v)
 }
 
 func (self *linkedNodes) Set(i int, v Node) {
@@ -201,7 +207,12 @@ func (self *linkedPairs) BuildIndex() {
 	}
 	for i := 0; i < self.size; i++ {
 		p := self.At(i)
-		self.index[p.hash] = i
+		h := p.hash
+		if h == 0 {
+			h = caching.StrHash(p.Key)
+			p.hash = h
+		}
+		self.index[h] = i
 	}
 }
 
@@ -235,7 +246,22 @@ func (self *linkedPairs) At(i int) *Pair {
 }
 
 func (self *linkedPairs) Push(v Pair) {
+	if self.index == nil && self.size < _DEFAULT_NODE_CAP {
+		self.head[self.size] = v
+		self.size++
+		return
+	}
 	self.Set(self.size, v)
+}
+
+func (self *linkedPairs) push(key string, val Node) {
+	i := self.size
+	if i < _DEFAULT_NODE_CAP {
+		self.head[i] = Pair{Key: key, Value: val}
+		self.size = i + 1
+		return
+	}
+	self.set(i, Pair{Key: key, Value: val})
 }
 
 func (self *linkedPairs) Pop() {
@@ -257,6 +283,10 @@ func (self *linkedPairs) Unset(i int) {
 func (self *linkedPairs) Set(i int, v Pair) {
 	if self.index != nil {
 		h := v.hash
+		if h == 0 {
+			h = caching.StrHash(v.Key)
+			v.hash = h
+		}
 		self.index[h] = i
 	}
 	self.set(i, v)
@@ -320,9 +350,33 @@ func (self *linkedPairs) Get(key string) (*Pair, int) {
 		}
 	}
 linear_search:
-	for i := 0; i < self.size; i++ {
-		if n := self.At(i); n.Key == key {
+	if self.size <= _DEFAULT_NODE_CAP {
+		for i := 0; i < self.size; i++ {
+			if n := &self.head[i]; n.Key == key {
+				return n, i
+			}
+		}
+		return nil, -1
+	}
+	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
+		if n := &self.head[i]; n.Key == key {
 			return n, i
+		}
+	}
+	rem := self.size - _DEFAULT_NODE_CAP
+	for cIdx, chunk := range self.tail {
+		limit := _DEFAULT_NODE_CAP
+		if rem < limit {
+			limit = rem
+		}
+		for j := 0; j < limit; j++ {
+			if n := &chunk[j]; n.Key == key {
+				return n, (cIdx+1)*_DEFAULT_NODE_CAP + j
+			}
+		}
+		rem -= limit
+		if rem <= 0 {
+			break
 		}
 	}
 	return nil, -1
@@ -416,17 +470,7 @@ func (self *linkedPairs) Sort() {
 
 // Compare two strings from the pos d.
 func lessFrom(a, b string, d int) bool {
-	l := len(a)
-	if l > len(b) {
-		l = len(b)
-	}
-	for i := d; i < l; i++ {
-		if a[i] == b[i] {
-			continue
-		}
-		return a[i] < b[i]
-	}
-	return len(a) < len(b)
+	return a[d:] < b[d:]
 }
 
 type parseObjectStack struct {
