@@ -51,21 +51,28 @@
 	VCMEQ V20.B16, V1.B16, V5.B16; \
 	VCMEQ V21.B16, V0.B16, V6.B16; \
 	VCMEQ V21.B16, V1.B16, V7.B16; \
-	CP_RUNS_PACK(V4, R6); \
-	CP_RUNS_PACK(V5, R9); \
-	ORR R9<<16, R6, R6; \
-	CP_RUNS_PACK(V6, R7); \
-	CP_RUNS_PACK(V7, R9); \
-	ORR R9<<16, R7, R7
+	VAND V30.B16, V4.B16, V4.B16; \
+	VAND V30.B16, V5.B16, V5.B16; \
+	VAND V30.B16, V6.B16, V6.B16; \
+	VAND V30.B16, V7.B16, V7.B16; \
+	VADDP V5.B16, V4.B16, V4.B16; \
+	VADDP V7.B16, V6.B16, V6.B16; \
+	VADDP V6.B16, V4.B16, V4.B16; \
+	VADDP V4.B16, V4.B16, V4.B16; \
+	VMOV V4.S[0], R6; \
+	VMOV V4.S[1], R7
 
 #define CP_RUNS_CONTROL_MASK \
 	VUSHR $5, V0.B16, V8.B16; \
 	VUSHR $5, V1.B16, V9.B16; \
 	VCMEQ V22.B16, V8.B16, V8.B16; \
 	VCMEQ V22.B16, V9.B16, V9.B16; \
-	CP_RUNS_PACK(V8, R8); \
-	CP_RUNS_PACK(V9, R9); \
-	ORR R9<<16, R8, R8
+	VAND V30.B16, V8.B16, V8.B16; \
+	VAND V30.B16, V9.B16, V9.B16; \
+	VADDP V9.B16, V8.B16, V8.B16; \
+	VADDP V8.B16, V8.B16, V8.B16; \
+	VADDP V8.B16, V8.B16, V8.B16; \
+	VMOV V8.S[0], R8
 
 #define CP_RUNS_COPY_QUOTE \
 	MOVBU (R22), R9; \
@@ -448,7 +455,7 @@ runs_number_digits:
 	CMP $9, R5
 	BLS runs_number_digits
 	CMP $19, R8
-	BHI runs_number_fallback
+	BHI runs_number_20digits
 runs_number_integer_end:
 	CMP $46, R4
 	BEQ runs_number_fraction
@@ -581,7 +588,7 @@ runs_number_exponent_add:
 // cParityAtofFast: negate first, then one exact operation by 10^|R9|.
 runs_number_float:
 	LSR $52, R2, R4
-	CBNZ R4, runs_number_fallback
+	CBNZ R4, runs_number_el_0
 	UCVTFD R2, F0
 	CBZ R3, runs_number_float_sign
 	FNEGD F0, F0
@@ -592,10 +599,10 @@ runs_number_float_sign:
 	CMP $0, R9
 	BLT runs_number_float_divide
 	CMP $22, R9
-	BGT runs_number_fallback
+	BGT runs_number_el_0
 	MOVD $1000000000000000, R5
 	CMP R5, R2
-	BHI runs_number_fallback
+	BHI runs_number_el_0
 	LSL $3, R9, R9
 	ADD R9, R4, R4
 	FMOVD (R4), F1
@@ -603,7 +610,7 @@ runs_number_float_sign:
 	JMP runs_number_float_done
 runs_number_float_divide:
 	CMN $22, R9
-	BLT runs_number_fallback
+	BLT runs_number_el_0
 	NEG R9, R9
 	LSL $3, R9, R9
 	ADD R9, R4, R4
@@ -611,6 +618,99 @@ runs_number_float_divide:
 	FDIVD F1, F0, F0
 runs_number_float_done:
 	FMOVD F0, R2
+	MOVD $const_KReal, R1
+	MOVD ZR, R0
+	RET
+
+runs_number_20digits:
+	CMP $20, R8
+	BHI runs_number_fallback
+	CMP $46, R4
+	BEQ runs_number_fallback
+	ORR $32, R4, R5
+	CMP $101, R5
+	BEQ runs_number_fallback
+	MOVD ZR, R2
+	MOVD R6, R8
+	ADD $19, R6, R9
+runs_number_reacc19:
+	MOVBU (R8), R5
+	SUB $48, R5, R5
+	MADD R7, R5, R2, R2
+	ADD $1, R8
+	CMP R9, R8
+	BNE runs_number_reacc19
+	UMULH R7, R2, R10
+	CBNZ R10, runs_number_20_float
+	MUL R7, R2, R10
+	MOVBU (R9), R5
+	SUB $48, R5, R5
+	ADDS R5, R10, R10
+	BCS runs_number_20_float
+	MOVD R10, R2
+	MOVD $const_KUint, R1
+	CBZ R3, runs_number_success
+	JMP runs_number_negative_real
+runs_number_20_float:
+	MOVD $1, R9
+	MOVD $1, R0
+	JMP runs_number_eisel_lemire
+
+runs_number_el_0:
+	MOVD ZR, R0
+runs_number_eisel_lemire:
+	ADD $348, R9, R4
+	CMP $695, R4
+	BHI runs_number_fallback
+	CLZ R2, R5
+	LSL R5, R2, R8
+	MOVD $217706, R10
+	MUL R9, R10, R10
+	ASR $16, R10, R10
+	ADD $1087, R10, R10
+	SUB R5, R10, R10
+	MOVD $·cParityPow10Mantissa+8(SB), R11
+	LSL $4, R4, R4
+	MOVD (R11)(R4), R11
+	UMULH R8, R11, R4
+	MUL R8, R11, R5
+	CBZ R5, runs_number_fallback
+	AND $0x1ff, R4, R11
+	CMP $0x1ff, R11
+	BEQ runs_number_fallback
+	LSR $63, R4, R11
+	ADD $9, R11, R5
+	LSR R5, R4, R4
+	EOR $1, R11, R11
+	SUB R11, R10, R10
+	AND $1, R4, R11
+	ADD R11, R4, R4
+	LSR $1, R4, R4
+	LSR $53, R4, R11
+	CBZ R11, runs_number_el_pack
+	LSR $1, R4, R4
+	ADD $1, R10, R10
+runs_number_el_pack:
+	SUB $1, R10, R11
+	CMP $0x7fd, R11
+	BHI runs_number_fallback
+	AND $0x000fffffffffffff, R4, R4
+	LSL $52, R10, R10
+	ORR R10, R4, R4
+	LSL $63, R3, R11
+	ORR R11, R4, R4
+	CBZ R0, runs_number_el_done
+	CMP $1, R0
+	BNE runs_number_el_check_trunc
+	MOVD R4, R7
+	ADD $1, R2, R2
+	MOVD $2, R0
+	JMP runs_number_eisel_lemire
+runs_number_el_check_trunc:
+	CMP R7, R4
+	BNE runs_number_fallback
+runs_number_el_done:
+	MOVD R4, R2
 	MOVD $const_KReal, R1
 	MOVD ZR, R0
 	RET
@@ -742,6 +842,16 @@ runs_string_resume:
 	MOVBU (R22), R9
 	CMP $92, R9
 	BEQ runs_string_escape
+	TBNZ $5, R21, runs_string_move
+	MOVBU 1(R22), R11
+	CMP $92, R11
+	BNE runs_string_move
+	CMP $34, R9
+	BEQ runs_string_move
+	MOVB R9, (R1)
+	ADD $1, R1
+	ADD $1, R22
+	B runs_string_escape
 
 runs_string_move:
 	CP_RUNS_STRING_MASKS
@@ -765,29 +875,77 @@ runs_string_move_events:
 	B runs_string_move
 
 runs_string_copy_quote:
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	CP_RUNS_COPY_QUOTE
-	B runs_string_copy_quote
+	RBIT R7, R9
+	CLZ R9, R9
+	ADD R9, R22
+	ADD $1, R22
+	CBZ R9, runs_string_copy_done
+	TBZ $4, R9, runs_quote_lt16
+	VST1 [V0.B16], (R1)
+	ADD $16, R1
+	VMOV V1.D[0], R3
+	VMOV V1.D[1], R5
+	B runs_quote_8
+runs_quote_lt16:
+	VMOV V0.D[0], R3
+	VMOV V0.D[1], R5
+runs_quote_8:
+	TBZ $3, R9, runs_quote_4
+	MOVD R3, (R1)
+	ADD $8, R1
+	MOVD R5, R3
+runs_quote_4:
+	TBZ $2, R9, runs_quote_2
+	MOVW R3, (R1)
+	ADD $4, R1
+	LSR $32, R3, R3
+runs_quote_2:
+	TBZ $1, R9, runs_quote_1
+	MOVH R3, (R1)
+	ADD $2, R1
+	LSR $16, R3, R3
+runs_quote_1:
+	TBZ $0, R9, runs_string_copy_done
+	MOVB R3, (R1)
+	ADD $1, R1
 runs_string_copy_done:
 	SUB R2, R1, R9
 	B runs_string_return
 
 runs_string_copy_slash:
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	CP_RUNS_COPY_SLASH
-	B runs_string_copy_slash
+	RBIT R6, R9
+	CLZ R9, R9
+	ADD R9, R22
+	CBZ R9, runs_string_escape
+	TBZ $4, R9, runs_slash_lt16
+	VST1 [V0.B16], (R1)
+	ADD $16, R1
+	VMOV V1.D[0], R3
+	VMOV V1.D[1], R5
+	B runs_slash_8
+runs_slash_lt16:
+	VMOV V0.D[0], R3
+	VMOV V0.D[1], R5
+runs_slash_8:
+	TBZ $3, R9, runs_slash_4
+	MOVD R3, (R1)
+	ADD $8, R1
+	MOVD R5, R3
+runs_slash_4:
+	TBZ $2, R9, runs_slash_2
+	MOVW R3, (R1)
+	ADD $4, R1
+	LSR $32, R3, R3
+runs_slash_2:
+	TBZ $1, R9, runs_slash_1
+	MOVH R3, (R1)
+	ADD $2, R1
+	LSR $16, R3, R3
+runs_slash_1:
+	TBZ $0, R9, runs_string_escape
+	MOVB R3, (R1)
+	ADD $1, R1
+	B runs_string_escape
 
 // The caller publishes this output cursor before entering the Go Unicode
 // handler. The scanner itself has no dependency on Parser or its state layout.
@@ -854,13 +1012,15 @@ runs_space_scan:
 	CP_RUNS_SPACE(V1.B16, V5.B16)
 	CP_RUNS_SPACE(V2.B16, V6.B16)
 	CP_RUNS_SPACE(V3.B16, V7.B16)
-	CP_RUNS_PACK(V4, R4)
-	CP_RUNS_PACK(V5, R9)
-	CP_RUNS_PACK(V6, R10)
-	CP_RUNS_PACK(V7, R11)
-	ORR R9<<16, R4, R4
-	ORR R10<<32, R4, R4
-	ORR R11<<48, R4, R4
+	VAND V30.B16, V4.B16, V4.B16
+	VAND V30.B16, V5.B16, V5.B16
+	VAND V30.B16, V6.B16, V6.B16
+	VAND V30.B16, V7.B16, V7.B16
+	VADDP V5.B16, V4.B16, V4.B16
+	VADDP V7.B16, V6.B16, V6.B16
+	VADDP V6.B16, V4.B16, V4.B16
+	VADDP V4.B16, V4.B16, V4.B16
+	VMOV V4.D[0], R4
 	MVN R4, R4
 	CBNZ R4, runs_space_refilled
 	ADD $64, R22

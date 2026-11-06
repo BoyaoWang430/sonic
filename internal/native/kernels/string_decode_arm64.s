@@ -15,6 +15,12 @@ DATA decodeSimpleEscapes<>+114(SB)/1, $13
 DATA decodeSimpleEscapes<>+116(SB)/1, $9
 GLOBL decodeSimpleEscapes<>(SB), RODATA|NOPTR, $128
 
+DATA decodeHexDigits<>+48(SB)/8, $0x1716151413121110
+DATA decodeHexDigits<>+56(SB)/2, $0x1918
+DATA decodeHexDigits<>+65(SB)/8, $0x00001f1e1d1c1b1a
+DATA decodeHexDigits<>+97(SB)/8, $0x00001f1e1d1c1b1a
+GLOBL decodeHexDigits<>(SB), RODATA|NOPTR, $256
+
 // Unquote and ParseString share this ABI0 leaf entry. g (R28) is preserved.
 // Loads/stores are bounded and may be unaligned.
 // R0/R1 input cursor/remaining; R2 output cursor; R3 mode.
@@ -81,16 +87,29 @@ decode_neon_first:
 	SUB R24, R1
 	B decode_special
 decode_neon_prefix:
-	MOVBU (R0), R11
-	CMP R0, R2
-	BEQ decode_neon_prefix_advance
-	MOVB R11, (R2)
-decode_neon_prefix_advance:
-	ADD $1, R0
-	ADD $1, R2
-	SUB $1, R1
-	SUB $1, R24
-	CBNZ R24, decode_neon_prefix
+	MOVD R2, R22
+	VMOV V0.D[0], R13
+	TBZ $3, R24, decode_neon_prefix_4
+	MOVD R13, (R22)
+	ADD $8, R22
+	VMOV V0.D[1], R13
+decode_neon_prefix_4:
+	TBZ $2, R24, decode_neon_prefix_2
+	MOVW R13, (R22)
+	LSR $32, R13
+	ADD $4, R22
+decode_neon_prefix_2:
+	TBZ $1, R24, decode_neon_prefix_1
+	MOVH R13, (R22)
+	LSR $16, R13
+	ADD $2, R22
+decode_neon_prefix_1:
+	TBZ $0, R24, decode_neon_prefix_done
+	MOVB R13, (R22)
+decode_neon_prefix_done:
+	ADD R24, R0
+	ADD R24, R2
+	SUB R24, R1
 	B decode_special
 decode_scan_scalar:
 	CBZ R1, decode_input_end
@@ -273,26 +292,25 @@ decode_unicode:
 	MOVD R0, R12
 	MOVD $0, R19 // first UTF-16 unit
 decode_hex_start:
-	MOVD $4, R13
-	MOVD $0, R14
-decode_hex:
-	MOVBU (R12), R11
-	ADD $-48, R11, R15
-	MOVD $10, R22
-	CMP R22, R15
-	BLO decode_hex_digit
-	ORR $32, R11
-	ADD $-97, R11, R15
-	MOVD $6, R22
-	CMP R22, R15
-	BHS decode_bad_hex
-	ADD $10, R15
-decode_hex_digit:
-	LSL $4, R14
-	ORR R15, R14
-	ADD $1, R12
-	SUB $1, R13
-	CBNZ R13, decode_hex
+	MOVD $decodeHexDigits<>(SB), R22
+	MOVBU 0(R12), R11
+	MOVBU 1(R12), R13
+	MOVBU 2(R12), R15
+	MOVBU 3(R12), R23
+	MOVBU (R22)(R11), R11
+	MOVBU (R22)(R13), R13
+	MOVBU (R22)(R15), R15
+	MOVBU (R22)(R23), R23
+	AND R11, R13, R24
+	AND R15, R24, R24
+	AND R23, R24, R24
+	TBZ $4, R24, decode_hex_slow
+	LSL $12, R11, R14
+	ADD R13<<8, R14, R14
+	ADD R15<<4, R14, R14
+	ADD R23, R14, R14
+	MOVD $0x11110, R22
+	SUB R22, R14, R14
 	CBNZ R19, decode_second_unit
 	MOVD R14, R9
 	ADD $4, R0
@@ -399,6 +417,13 @@ decode_unpaired:
 decode_replace:
 	MOVD $0xfffd, R9
 	B decode_three
+decode_hex_slow:
+	TBZ $4, R11, decode_bad_hex
+	ADD $1, R12
+	TBZ $4, R13, decode_bad_hex
+	ADD $1, R12
+	TBZ $4, R15, decode_bad_hex
+	ADD $1, R12
 decode_bad_hex:
 	AND $4, R3, R16
 	CBNZ R16, decode_parser_unicode

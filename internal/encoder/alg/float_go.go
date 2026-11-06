@@ -11,12 +11,12 @@ func F64toa(buf []byte, v float64) []byte {
 	if v == 0 {
 		return append(buf, '0')
 	}
-	return number.AppendFloat(buf, v, 64)
+	return number.AppendFloat64(buf, v)
 }
 
 func F32toa(buf []byte, v float32) []byte {
 	if v == 0 {
 		return append(buf, '0')
 	}
-	return number.AppendFloat(buf, float64(v), 32)
+	return number.AppendFloat32(buf, v)
 }

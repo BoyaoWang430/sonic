@@ -13,8 +13,10 @@ import (
 // Flags select double-unquote and Unicode replacement. Invalid UTF-8 is preserved.
 // On error, written counts the decoded prefix and errorPos follows native/unquote.c.
 func Unquote(src string, dst []byte, flags uint64) (written, errorPos int, err types.ParsingError) {
-	_, written, _, errorPos, code := stringDecode(unsafe.StringData(src), len(src), unsafe.SliceData(dst), flags&3)
-	return written, errorPos, types.ParsingError(code)
+	var code int
+	_, written, _, errorPos, code = stringDecode(unsafe.StringData(src), len(src), unsafe.SliceData(dst), flags&3)
+	err = types.ParsingError(code)
+	return
 }
 
 // UnquoteBuffer decodes size bytes from src into dst without surrounding quotes,

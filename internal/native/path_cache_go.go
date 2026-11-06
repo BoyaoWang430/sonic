@@ -37,11 +37,9 @@ func pathOrdinaryByte(src string, p *int) byte {
 	return 0
 }
 
-func (b *pathBlock) nextSlow(src string, p *int) byte {
-	pos := *p
+func (b *pathBlock) nextSlow(src string, pos int) (byte, int) {
 	if uint(pos) >= uint(len(src)) {
-		*p = len(src)
-		return 0
+		return 0, len(src)
 	}
 	for {
 		if b.nonspace|b.boundaries == 0 || pos < b.base || pos >= b.end {
@@ -51,25 +49,21 @@ func (b *pathBlock) nextSlow(src string, p *int) byte {
 				pos++
 			}
 			if pos == len(src) {
-				*p = pos
-				return 0
+				return 0, pos
 			}
 			if pos < limit {
-				*p = pos + 1
-				return src[pos]
+				return src[pos], pos + 1
 			}
 			b.load(src, pos)
 		}
 		mask := b.nonspace >> uint(pos-b.base)
 		if mask != 0 {
 			pos += bits.TrailingZeros64(mask)
-			*p = pos + 1
-			return src[pos]
+			return src[pos], pos + 1
 		}
 		pos = b.end
 		if pos == len(src) {
-			*p = pos
-			return 0
+			return 0, pos
 		}
 	}
 }
@@ -91,30 +85,38 @@ func (b *pathBlock) string(src string, begin int) (end, escape int, err types.Pa
 			return pos + 1, -1, 0
 		}
 	}
-	end, escape, err, events, width := kernels.ScanPathStringBlock(src, pos)
+	end, escape, err, events, width := kernels.ScanPathStringBlock(src[pos:])
+	end += pos
+	if escape >= 0 {
+		escape += pos
+	}
 	b.saveStringTail(end, events, width)
 	return end, escape, err
 }
 
 // Preserve validation's error cursor and active grammar by replaying only
 // failures. Successful strings can consume the path's existing classifications.
-func (b *pathBlock) validateTarget(s *string, p *int, m *types.StateMachine) int {
-	pos := *p
-	ch := pathOrdinaryByte(*s, &pos)
-	if ch == 0 {
-		ch = b.nextSlow(*s, &pos)
+func (b *pathBlock) validateTarget(src string, origPos int, m *types.StateMachine) (int, int) {
+	pos := origPos
+	var ch byte
+	if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+		ch = src[pos]
+		pos++
+	} else {
+		ch, pos = b.nextSlow(src, pos)
 	}
 	if ch == '"' {
-		if end, _, err := b.string(*s, pos); err == 0 {
-			*p, m.Sp = end, 0
-			return pos - 1
+		if end, _, err := b.string(src, pos); err == 0 {
+			m.Sp = 0
+			return pos - 1, end
 		}
 	}
-	return SkipOne(s, p, m, 0)
+	p := origPos
+	ret := SkipOne(&src, &p, m, 0)
+	return ret, p
 }
 
-func (b *pathBlock) matchKey(src string, p *int, key string) (bool, types.ParsingError) {
-	begin := *p
+func (b *pathBlock) matchKey(src string, begin int, key string) (int, bool, types.ParsingError) {
 	// Establish a short plain key's boundary and equality in one pass,
 	// including mismatches. Quotes and backslashes still need the scanner.
 	if len(key) <= 8 && len(src)-begin > len(key) && src[begin+len(key)] == '"' {
@@ -126,38 +128,63 @@ func (b *pathBlock) matchKey(src string, p *int, key string) (bool, types.Parsin
 			}
 			diff |= c ^ key[i]
 		}
-		*p = begin + len(key) + 1
-		return diff == 0, 0
+		return begin + len(key) + 1, diff == 0, 0
 	}
 scanKey:
 	end, escape, err := b.string(src, begin)
-	*p = end
 	if err != 0 {
-		return false, err
+		return end, false, err
 	}
 	if escape < 0 {
-		return src[begin:end-1] == key, 0
+		return end, src[begin:end-1] == key, 0
 	}
-	return matchEscapedPathKey(src, p, key, begin, end)
+	return matchEscapedPathKey(src, key, begin, end)
 }
 
 // skipValue returns the final cursor and the token start or error. Traversal
 // deliberately ignores errors for unselected values and checks the following
 // delimiter; a selected target still propagates the returned error.
 func (b *pathBlock) skipValue(src string, pos int) (end, ret int) {
-	ch := pathOrdinaryByte(src, &pos)
-	if ch == 0 {
-		ch = b.nextSlow(src, &pos)
+	var ch byte
+	if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+		ch = src[pos]
+		pos++
+	} else {
+		ch, pos = b.nextSlow(src, pos)
 	}
 	start := pos - 1
 	switch ch {
 	case 0:
 		return pos, -int(types.ERR_EOF)
 	case '[', '{':
-		ret := skipContainerFast(src, &pos)
-		return pos, ret
+		if uint(pos) < uint(len(src)) && src[pos] == ch+2 {
+			return pos + 1, start
+		}
+		end, err := kernels.SkipContainer(src, start)
+		if err != 0 {
+			return end, -int(err)
+		}
+		return end, start
 	case '"':
-		end, _, err := b.string(src, pos)
+		if pos < b.base || pos >= b.end {
+			end, _, err := b.stringTail(src, pos)
+			if err != 0 {
+				return end, -int(err)
+			}
+			return end, start
+		}
+		mask := b.events >> uint(pos-b.base)
+		if mask == 0 {
+			pos = b.end
+		} else {
+			pos += bits.TrailingZeros64(mask)
+			if src[pos] == '"' {
+				return pos + 1, start
+			}
+		}
+		end, _, err, events, width := kernels.ScanPathStringBlock(src[pos:])
+		end += pos
+		b.saveStringTail(end, events, width)
 		if err != 0 {
 			return end, -int(err)
 		}

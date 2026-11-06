@@ -23,9 +23,12 @@ func GetByPath(s *string, p *int, path *[]interface{}, m *types.StateMachine) in
 func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (int, int) {
 	var block pathBlock
 	for _, component := range path {
-		ch := pathOrdinaryByte(src, &pos)
-		if ch == 0 {
-			ch = block.nextSlow(src, &pos)
+		var ch byte
+		if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+			ch = src[pos]
+			pos++
+		} else {
+			ch, pos = block.nextSlow(src, pos)
 		}
 		value := reflect.ValueOf(component)
 		switch value.Kind() {
@@ -35,9 +38,11 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 			}
 			key := value.String()
 			for {
-				ch = pathOrdinaryByte(src, &pos)
-				if ch == 0 {
-					ch = block.nextSlow(src, &pos)
+				if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+					ch = src[pos]
+					pos++
+				} else {
+					ch, pos = block.nextSlow(src, pos)
 				}
 				if ch == '}' {
 					return pathError(pos, ch, types.ERR_NOT_FOUND)
@@ -45,13 +50,17 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 				if ch != '"' {
 					return pathError(pos, ch, types.ERR_INVALID_CHAR)
 				}
-				matched, err := block.matchKey(src, &pos, key)
+				var matched bool
+				var err types.ParsingError
+				pos, matched, err = block.matchKey(src, pos, key)
 				if err != 0 {
 					return -int(err), pos
 				}
-				ch = pathOrdinaryByte(src, &pos)
-				if ch == 0 {
-					ch = block.nextSlow(src, &pos)
+				if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+					ch = src[pos]
+					pos++
+				} else {
+					ch, pos = block.nextSlow(src, pos)
 				}
 				if ch != ':' {
 					return pathError(pos, ch, types.ERR_INVALID_CHAR)
@@ -62,9 +71,11 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 				// Match the existing path traversal: skip unselected fields
 				// quickly, then require a comma or the enclosing object end.
 				pos, _ = block.skipValue(src, pos)
-				ch = pathOrdinaryByte(src, &pos)
-				if ch == 0 {
-					ch = block.nextSlow(src, &pos)
+				if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+					ch = src[pos]
+					pos++
+				} else {
+					ch, pos = block.nextSlow(src, pos)
 				}
 				if ch == '}' {
 					return pathError(pos, ch, types.ERR_NOT_FOUND)
@@ -97,20 +108,23 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine) (
 	// Only strings and whitespace can reuse the path's string classifications.
 	// Other targets enter their validator without an extra token probe.
 	if len(path) != 0 && uint(pos) < uint(len(src)) && (src[pos] == '"' || src[pos] <= ' ') {
-		ret := block.validateTarget(&src, &pos, m)
-		return ret, pos
+		return block.validateTarget(src, pos, m)
 	}
-	ret := SkipOne(&src, &pos, m, 0)
-	return ret, pos
+	p := pos
+	ret := SkipOne(&src, &p, m, 0)
+	return ret, p
 }
 
 // arrayIndex advances from an array's opening bracket to the requested value.
 // Unselected values retain relaxed skipping; commas and the closing bracket
 // are checked here before traversal returns to the next path component.
 func (b *pathBlock) arrayIndex(src string, pos int, index int64) (int, int) {
-	ch := pathOrdinaryByte(src, &pos)
-	if ch == 0 {
-		ch = b.nextSlow(src, &pos)
+	var ch byte
+	if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+		ch = src[pos]
+		pos++
+	} else {
+		ch, pos = b.nextSlow(src, pos)
 	}
 	if ch == ']' {
 		ret, end := pathError(pos, ch, types.ERR_NOT_FOUND)
@@ -122,9 +136,11 @@ func (b *pathBlock) arrayIndex(src string, pos int, index int64) (int, int) {
 	pos--
 	for ; index > 0; index-- {
 		pos, _ = b.skipValue(src, pos)
-		ch = pathOrdinaryByte(src, &pos)
-		if ch == 0 {
-			ch = b.nextSlow(src, &pos)
+		if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+			ch = src[pos]
+			pos++
+		} else {
+			ch, pos = b.nextSlow(src, pos)
 		}
 		if ch == ']' {
 			ret, end := pathError(pos, ch, types.ERR_NOT_FOUND)
@@ -149,14 +165,14 @@ func pathError(pos int, ch byte, err types.ParsingError) (int, int) {
 
 // matchEscapedPathKey compares only the escapes reached before a mismatch.
 // The complete string boundary was already checked by the path block scanner.
-func matchEscapedPathKey(src string, p *int, key string, begin, end int) (bool, types.ParsingError) {
+func matchEscapedPathKey(src string, key string, begin, end int) (int, bool, types.ParsingError) {
 	contentEnd := end - 1
 	var decoded [12]byte
 	i, k := begin, 0
 	for i < contentEnd && k < len(key) {
 		if src[i] != '\\' {
 			if src[i] != key[k] {
-				return false, 0
+				return end, false, 0
 			}
 			i++
 			k++
@@ -178,35 +194,33 @@ func matchEscapedPathKey(src string, p *int, key string, begin, end int) (bool, 
 		}
 		written, errorPos, err := kernels.Unquote(src[i:i+width], decoded[:width], 0)
 		if err != 0 {
-			// match_key's unescape helper reports the beginning of a bad hex
-			// group or the end of the first surrogate, rather than Unquote's
-			// individual offending byte. Keep that consumer-level convention.
+			var errPos int
 			switch err {
 			case types.ERR_INVALID_ESCAPE:
-				*p = i + 1
+				errPos = i + 1
 			case types.ERR_INVALID_CHAR:
-				*p = i + 2
+				errPos = i + 2
 				if errorPos >= 8 {
-					*p = i + 8
+					errPos = i + 8
 				}
 			case types.ERR_INVALID_UNICODE:
-				*p = i + 6
+				errPos = i + 6
 				if width == 12 {
-					*p = i + 8
+					errPos = i + 8
 				}
 			default:
-				*p = i + errorPos
+				errPos = i + errorPos
 			}
-			if *p > contentEnd {
-				*p = contentEnd
+			if errPos > contentEnd {
+				errPos = contentEnd
 			}
-			return false, err
+			return errPos, false, err
 		}
 		if written > len(key)-k || string(decoded[:written]) != key[k:k+written] {
-			return false, 0
+			return end, false, 0
 		}
 		i += width
 		k += written
 	}
-	return i == contentEnd && k == len(key), 0
+	return end, i == contentEnd && k == len(key), 0
 }

@@ -21,7 +21,7 @@ import (
 func (b *pathBlock) stringTail(src string, pos int) (end, escape int, err types.ParsingError) {
 	base := uintptr(unsafe.Pointer(rt.StringData(src)))
 	sp, se := base+uintptr(pos), base+uintptr(len(src))
-	stop := minNative(se, sp+32)
+	stop := minNative(se, sp+16)
 	escape = -1
 	for sp < stop && se-sp >= 8 {
 		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
@@ -79,10 +79,12 @@ scanBytes:
 		return len(src), escape, types.ERR_EOF
 	}
 	{
-		end, nextEscape, err, events, width := kernels.ScanPathStringBlock(src, int(sp-base))
+		off := int(sp - base)
+		end, nextEscape, err, events, width := kernels.ScanPathStringBlock(src[off:])
+		end += off
 		b.saveStringTail(end, events, width)
-		if escape < 0 {
-			escape = nextEscape
+		if escape < 0 && nextEscape >= 0 {
+			escape = off + nextEscape
 		}
 		runtime.KeepAlive(src)
 		return end, escape, err

@@ -38,14 +38,11 @@ TEXT ·scanStringRelaxed(SB), NOSPLIT, $0-48
 	MOVD $0x5555555555555555, R21
 	MOVD $0xaaaaaaaaaaaaaaaa, R22
 block:
-	MOVD $64, R19
-block_width:
-	CMP R19, R1
-	CSEL LO, R1, R19, R19
-	CMP $64, R19
-	BEQ block64
-	CMP $32, R19
-	BEQ block32
+	CMP $64, R1
+	BHS block64
+	CMP $32, R1
+	BHS block32
+	MOVD R1, R19
 	MOVD R19, R20
 	MOVD $0, R3
 	MOVD $0, R4
@@ -116,6 +113,7 @@ tail_advance:
 // additions then pack the groups into consecutive mask bytes. Partial chunks
 // above retain the bounded overlapping final load.
 block32:
+	MOVD $32, R19
 	VLD1 (R0), [V0.B16, V1.B16]
 	VCMEQ V22.B16, V0.B16, V2.B16
 	VCMEQ V23.B16, V0.B16, V3.B16
@@ -140,6 +138,7 @@ block32:
 	VMOV V6.S[1], R4
 	B classify
 block64:
+	MOVD $64, R19
 	VLD1 (R0), [V0.B16, V1.B16, V2.B16, V3.B16]
 	VCMEQ V22.B16, V0.B16, V4.B16
 	VCMEQ V23.B16, V0.B16, V5.B16
@@ -168,17 +167,22 @@ block64:
 	VAND V30.B16, V9.B16, V9.B16
 	VAND V30.B16, V10.B16, V10.B16
 	VAND V30.B16, V11.B16, V11.B16
-	VADDP V6.B16, V4.B16, V12.B16
-	VADDP V10.B16, V8.B16, V13.B16
-	VADDP V13.B16, V12.B16, V12.B16
-	VADDP V12.B16, V12.B16, V12.B16
-	VMOV V12.D[0], R3
-	VADDP V7.B16, V5.B16, V12.B16
-	VADDP V11.B16, V9.B16, V13.B16
-	VADDP V13.B16, V12.B16, V12.B16
-	VADDP V12.B16, V12.B16, V12.B16
-	VMOV V12.D[0], R4
+	VADDP V6.B16, V4.B16, V4.B16
+	VADDP V10.B16, V8.B16, V8.B16
+	VADDP V8.B16, V4.B16, V4.B16
+	VADDP V7.B16, V5.B16, V5.B16
+	VADDP V11.B16, V9.B16, V9.B16
+	VADDP V9.B16, V5.B16, V5.B16
+	VADDP V5.B16, V4.B16, V4.B16
+	VMOV V4.D[0], R3
+	VMOV V4.D[1], R4
 classify:
+	ORR R17, R4, R23
+	CBNZ R23, classify_slash
+	MOVD R3, RELAXED_QUOTES
+	CBNZ R3, found
+	B next_block
+classify_slash:
 	BIC R17, R4, R23
 	LSL $1, R23, R24
 	ORR R17, R24, R24
@@ -194,10 +198,12 @@ classify:
 	CBZ R4, quote
 	RBIT R4, R23
 	CLZ R23, R23
+	CBZ RELAXED_QUOTES, set_escape
 	RBIT RELAXED_QUOTES, R24
 	CLZ R24, R24
 	CMP R24, R23
 	BHS quote
+set_escape:
 	ADD R15, R23, R16
 quote:
 	CBNZ RELAXED_QUOTES, found
@@ -272,17 +278,17 @@ TEXT ·scanStringRelaxedBlock(SB), NOSPLIT, $0-64
 	MOVD $0xaaaaaaaaaaaaaaaa, R22
 	// Start path scans with a smaller chunk; long continuations use the
 	// common 64-byte loop without another first-chunk check.
-	MOVD $32, R19
-	B block_width
+	CMP $32, R1
+	BHS block32
+	MOVD R1, R19
+	B block_lt32
 block:
-	MOVD $64, R19
-block_width:
-	CMP R19, R1
-	CSEL LO, R1, R19, R19
-	CMP $64, R19
-	BEQ block64
-	CMP $32, R19
-	BEQ block32
+	CMP $64, R1
+	BHS block64
+	CMP $32, R1
+	BHS block32
+	MOVD R1, R19
+block_lt32:
 	MOVD R19, R20
 	MOVD $0, R3
 	MOVD $0, R4
@@ -353,6 +359,7 @@ tail_advance:
 // additions then pack the groups into consecutive mask bytes. Partial chunks
 // above retain the bounded overlapping final load.
 block32:
+	MOVD $32, R19
 	VLD1 (R0), [V0.B16, V1.B16]
 	VCMEQ V22.B16, V0.B16, V2.B16
 	VCMEQ V23.B16, V0.B16, V3.B16
@@ -375,6 +382,7 @@ block32:
 	CBZ R9, plain_block
 	B classify
 block64:
+	MOVD $64, R19
 	VLD1 (R0), [V0.B16, V1.B16, V2.B16, V3.B16]
 	VCMEQ V22.B16, V0.B16, V4.B16
 	VCMEQ V23.B16, V0.B16, V5.B16
@@ -384,17 +392,7 @@ block64:
 	VCMEQ V23.B16, V2.B16, V9.B16
 	VCMEQ V22.B16, V3.B16, V10.B16
 	VCMEQ V23.B16, V3.B16, V11.B16
-	VORR V5.B16, V4.B16, V12.B16
-	VORR V7.B16, V6.B16, V13.B16
-	VORR V9.B16, V8.B16, V14.B16
-	VORR V11.B16, V10.B16, V15.B16
-	VORR V13.B16, V12.B16, V12.B16
-	VORR V15.B16, V14.B16, V14.B16
-	VORR V14.B16, V12.B16, V12.B16
-	VADDV V12.B16, V12
-	VMOV V12.B[0], R9
 	ADD $64, R0
-	CBZ R9, plain_block
 	VAND V30.B16, V4.B16, V4.B16
 	VAND V30.B16, V5.B16, V5.B16
 	VAND V30.B16, V6.B16, V6.B16
@@ -403,17 +401,24 @@ block64:
 	VAND V30.B16, V9.B16, V9.B16
 	VAND V30.B16, V10.B16, V10.B16
 	VAND V30.B16, V11.B16, V11.B16
-	VADDP V6.B16, V4.B16, V12.B16
-	VADDP V10.B16, V8.B16, V13.B16
-	VADDP V13.B16, V12.B16, V12.B16
-	VADDP V12.B16, V12.B16, V12.B16
-	VMOV V12.D[0], R3
-	VADDP V7.B16, V5.B16, V12.B16
-	VADDP V11.B16, V9.B16, V13.B16
-	VADDP V13.B16, V12.B16, V12.B16
-	VADDP V12.B16, V12.B16, V12.B16
-	VMOV V12.D[0], R4
+	VADDP V6.B16, V4.B16, V4.B16
+	VADDP V10.B16, V8.B16, V8.B16
+	VADDP V8.B16, V4.B16, V4.B16
+	VADDP V7.B16, V5.B16, V5.B16
+	VADDP V11.B16, V9.B16, V9.B16
+	VADDP V9.B16, V5.B16, V5.B16
+	VADDP V5.B16, V4.B16, V4.B16
+	VMOV V4.D[0], R3
+	VMOV V4.D[1], R4
+	ORR R4, R3, R9
+	CBZ R9, plain_block
 classify:
+	ORR R17, R4, R23
+	CBNZ R23, classify_slash
+	MOVD R3, RELAXED_QUOTES
+	CBNZ R3, found
+	B next_block
+classify_slash:
 	BIC R17, R4, R23
 	LSL $1, R23, R24
 	ORR R17, R24, R24
@@ -429,10 +434,12 @@ classify:
 	CBZ R4, quote
 	RBIT R4, R23
 	CLZ R23, R23
+	CBZ RELAXED_QUOTES, set_escape
 	RBIT RELAXED_QUOTES, R24
 	CLZ R24, R24
 	CMP R24, R23
 	BHS quote
+set_escape:
 	ADD R15, R23, R16
 quote:
 	CBNZ RELAXED_QUOTES, found

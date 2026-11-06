@@ -57,11 +57,11 @@ func ValidateUTF8Fast(s *string) int {
 
 // Number-formatting callers reserve at least 32 output bytes.
 func F64toa(out *byte, val float64) int {
-	return len(number.AppendFloat(unsafe.Slice(out, 32)[:0], val, 64))
+	return len(number.AppendFloat64(unsafe.Slice(out, 32)[:0], val))
 }
 
 func F32toa(out *byte, val float32) int {
-	return len(number.AppendFloat(unsafe.Slice(out, 32)[:0], float64(val), 32))
+	return len(number.AppendFloat32(unsafe.Slice(out, 32)[:0], val))
 }
 
 func I64toa(out *byte, val int64) int {
