@@ -11,19 +11,18 @@
 	ORCB X20, X20; \
 	ANDN X20, X14, dst
 
-// X28..X30 and X26 hold repeated space/tab/newline/carriage-return bytes.
+// X28..X30 hold repeated space/tab/newline bytes; X26 holds 0xfbfbfbfbfbfbfbfb
+// so both tab (0x09) and carriage return (0x0d) map to 0x09 in one ORCB.
 // X31 remains available to the assembler for pseudo-instruction expansion.
 // AND the non-match bytes, then complement once to form exact space flags.
 #define SPACE_MASK \
 	XOR X28, X13, X17; \
 	ORCB X17, X17; \
-	XOR X29, X13, X20; \
-	ORCB X20, X20; \
-	AND X20, X17, X17; \
 	XOR X30, X13, X20; \
 	ORCB X20, X20; \
 	AND X20, X17, X17; \
-	XOR X26, X13, X20; \
+	AND X26, X13, X20; \
+	XOR X29, X20, X20; \
 	ORCB X20, X20; \
 	AND X20, X17, X17; \
 	ANDN X17, X14, X17
@@ -49,16 +48,17 @@ TEXT ·nonSpaceMask(SB), NOSPLIT, $0-24
 	MOV $0, X7
 	MOV $0, X11
 	BEQZ X6, masks_done
-	SLTI $8, X6, X20
-	BNEZ X20, masks_byte
 	MOV $0x8080808080808080, X14
 	MOV $0x0102040810204080, X16
 	MOV $0x2020202020202020, X28
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
-	MOV $0x0d0d0d0d0d0d0d0d, X26
+	MOV $0xfbfbfbfbfbfbfbfb, X26
+	SLTI $8, X6, X20
+	BNEZ X20, masks_short
 masks_word:
 	MOV (X5), X13
+masks_classify:
 	SPACE_MASK
 	XOR X14, X17, X19
 	PACK_MASK(X19, X11)
@@ -76,6 +76,24 @@ masks_word_advance:
 	ADD X20, X7
 	MOV $8, X6
 	JMP masks_word
+
+masks_short:
+	SLTI $4, X6, X20
+	BNEZ X20, masks_byte
+	MOVWU (X5), X13
+	ADD X6, X5, X20
+	MOVWU -4(X20), X20
+	MOV $8, X21
+	SUB X6, X21, X21
+	SLL $3, X21
+	SRL X21, X20
+	SLL $32, X20
+	OR X20, X13
+	SLL $3, X6, X21
+	SLL X21, X28, X20
+	OR X20, X13
+	MOV $8, X6
+	JMP masks_classify
 
 masks_byte:
 	MOVBU (X5), X13
@@ -108,17 +126,18 @@ TEXT ·traversalMasks(SB), NOSPLIT, $0-40
 	MOV $0, X10
 	MOV $0, X11
 	BEQZ X6, masks_done
-	SLTI $8, X6, X20
-	BNEZ X20, masks_byte
 	MOV $0x8080808080808080, X14
 	MOV $0xe0e0e0e0e0e0e0e0, X15
 	MOV $0x0102040810204080, X16
 	MOV $0x2020202020202020, X28
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
-	MOV $0x0d0d0d0d0d0d0d0d, X26
+	MOV $0xfbfbfbfbfbfbfbfb, X26
+	SLTI $8, X6, X20
+	BNEZ X20, masks_short
 masks_word:
 	MOV (X5), X13
+masks_classify:
 	SPACE_MASK
 	XOR X14, X17, X19
 	PACK_MASK(X19, X11)
@@ -148,6 +167,24 @@ masks_word_advance:
 	ADD X20, X7
 	MOV $8, X6
 	JMP masks_word
+
+masks_short:
+	SLTI $4, X6, X20
+	BNEZ X20, masks_byte
+	MOVWU (X5), X13
+	ADD X6, X5, X20
+	MOVWU -4(X20), X20
+	MOV $8, X21
+	SUB X6, X21, X21
+	SLL $3, X21
+	SRL X21, X20
+	SLL $32, X20
+	OR X20, X13
+	SLL $3, X6, X21
+	SLL X21, X28, X20
+	OR X20, X13
+	MOV $8, X6
+	JMP masks_classify
 
 masks_byte:
 	MOVBU (X5), X13
@@ -191,16 +228,17 @@ TEXT ·pathMasks(SB), NOSPLIT, $0-40
 	MOV $0, X11
 	MOV $0, X12
 	BEQZ X6, masks_done
-	SLTI $8, X6, X20
-	BNEZ X20, masks_byte
 	MOV $0x8080808080808080, X14
 	MOV $0x0102040810204080, X16
 	MOV $0x2020202020202020, X28
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
-	MOV $0x0d0d0d0d0d0d0d0d, X26
+	MOV $0xfbfbfbfbfbfbfbfb, X26
+	SLTI $8, X6, X20
+	BNEZ X20, masks_short
 masks_word:
 	MOV (X5), X13
+masks_classify:
 	SPACE_MASK
 	XOR X14, X17, X19
 	PACK_MASK(X19, X11)
@@ -213,10 +251,10 @@ masks_word_events:
 	PACK_MASK(X18, X10)
 masks_word_boundary:
 	MOV $0x7d7d7d7d7d7d7d7d, X22
-	BYTE_EQ(X22, X18)
-	OR X18, X17, X17
-	MOV $0x5d5d5d5d5d5d5d5d, X22
-	BYTE_EQ(X22, X18)
+	OR X28, X13, X20
+	XOR X22, X20, X20
+	ORCB X20, X20
+	ANDN X20, X14, X18
 	OR X18, X17, X17
 	MOV $0x2c2c2c2c2c2c2c2c, X22
 	BYTE_EQ(X22, X18)
@@ -226,6 +264,7 @@ masks_word_advance:
 	ADD $8, X5
 	ADD $8, X7
 	SUB $8, X6
+	BLTZ X6, masks_short_done
 	SLTI $8, X6, X20
 	BEQZ X20, masks_word
 	BEQZ X6, masks_done
@@ -236,6 +275,30 @@ masks_word_advance:
 	ADD X20, X7
 	MOV $8, X6
 	JMP masks_word
+
+masks_short:
+	SLTI $4, X6, X20
+	BNEZ X20, masks_byte
+	MOVWU (X5), X13
+	ADD X6, X5, X20
+	MOVWU -4(X20), X20
+	MOV $8, X21
+	SUB X6, X21, X21
+	SLL $3, X21
+	SRL X21, X20
+	SLL $32, X20
+	OR X20, X13
+	SLL $3, X6, X21
+	SLL X21, X28, X20
+	OR X20, X13
+	JMP masks_classify
+masks_short_done:
+	ADD $8, X6
+	MOV $1, X20
+	SLL X6, X20
+	ADD $-1, X20
+	AND X20, X12
+	JMP masks_done
 
 masks_byte:
 	MOVBU (X5), X13
@@ -291,15 +354,16 @@ TEXT ·space(SB), NOSPLIT, $0-24
 	MOV size+8(FP), X6
 	MOV $0, X7
 	BEQZ X6, space_done
-	SLTI $8, X6, X20
-	BNEZ X20, space_byte
 	MOV $0x8080808080808080, X14
 	MOV $0x2020202020202020, X28
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
-	MOV $0x0d0d0d0d0d0d0d0d, X26
+	MOV $0xfbfbfbfbfbfbfbfb, X26
+	SLTI $8, X6, X20
+	BNEZ X20, space_short
 space_word:
 	MOV (X5), X13
+space_classify:
 	SPACE_MASK
 	XOR X14, X17, X17
 	BNEZ X17, space_found
@@ -316,6 +380,19 @@ space_word:
 	ADD X20, X7
 	MOV $8, X6
 	JMP space_word
+space_short:
+	SLTI $4, X6, X20
+	BNEZ X20, space_byte
+	MOVWU (X5), X13
+	ADD X6, X5, X20
+	MOVWU -4(X20), X20
+	MOV $8, X21
+	SUB X6, X21, X21
+	SLL $3, X21
+	SRL X21, X20
+	SLL $32, X20
+	OR X20, X13
+	JMP space_classify
 space_byte:
 	MOVBU (X5), X13
 	MOV $32, X20

@@ -19,7 +19,7 @@
 // func htmlEscape(src *byte, size int, dst *byte, capacity int) (consumed, written int)
 // Complete HTML escaping in one ABI0 call, with ordinary frame metadata/RET.
 // g (X27), SP, and RA are never used as scratch registers.
-TEXT ·htmlEscape(SB), $0-48
+TEXT ·htmlEscape(SB), NOSPLIT, $0-48
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
 	MOV	dst+16(FP), X12
@@ -71,22 +71,26 @@ copy_single_word:
 	JMP copy_advance
 
 copy_short:
-	MOV X12, X5
-	AND $4, X7, X21
-	BEQZ X21, copy_short_half
-	MOVW X20, (X5)
-	SRL $32, X20
-	ADD $4, X5
-copy_short_half:
-	AND $2, X7, X21
-	BEQZ X21, copy_short_byte
-	MOVH X20, (X5)
-	SRL $16, X20
-	ADD $2, X5
-copy_short_byte:
-	AND $1, X7, X21
-	BEQZ X21, copy_advance
-	MOVB X20, (X5)
+	ADD X7, X12, X5
+	MOV $4, X21
+	BLTU X7, X21, copy_short_lt4
+	MOVW X20, (X12)
+	ADD $-4, X7, X21
+	SLL $3, X21
+	SRL X21, X20
+	MOVW X20, -4(X5)
+	JMP copy_advance
+copy_short_lt4:
+	MOV $1, X21
+	BEQ X7, X21, copy_short_1
+	MOVH X20, (X12)
+	ADD $-2, X7, X21
+	SLL $3, X21
+	SRL X21, X20
+	MOVH X20, -2(X5)
+	JMP copy_advance
+copy_short_1:
+	MOVB X20, (X12)
 
 copy_advance:
 	ADD X7, X10

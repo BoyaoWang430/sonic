@@ -391,6 +391,7 @@ runs_done:
 // The operations and their order match the Go fast path, so results are
 // bit-identical. Every other number, including all malformed ones, restores
 // the cursor and lets Go reproduce the complete C behavior.
+	PCALIGN $64
 TEXT runs_number<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOV X21, X16
 	MOVBU 0(X21), X14
@@ -604,6 +605,7 @@ runs_number_float_done:
 // the first escape, a backslash ahead of the block's first quote wins even if a
 // raw control precedes it. The first event is found word by word; only a
 // leading control needs the rest of its block.
+	PCALIGN $64
 TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOV X21, X12
 	MOV $-1, X14
@@ -700,6 +702,15 @@ runs_string_resume:
 	MOVBU 0(X21), X10
 	MOV $92, X15
 	BEQ X10, X15, runs_string_escape
+	BEQZ X13, runs_string_move
+	MOVBU 1(X21), X6
+	BNE X6, X15, runs_string_move
+	MOV $34, X15
+	BEQ X10, X15, runs_string_copy_done
+	MOVB X10, 0(X11)
+	ADD $1, X21
+	ADD $1, X11
+	JMP runs_string_escape
 
 runs_string_move:
 	// Load and classify the complete block before storing any of it.
@@ -743,12 +754,26 @@ runs_string_move_event:
 	BGEU X6, X15, runs_string_move_slash
 	BEQZ X6, runs_string_escape
 runs_string_move_short:
-	MOVBU 0(X21), X10
-	MOVB X10, 0(X11)
-	ADD $1, X21
-	ADD $1, X11
-	ADD $-1, X6
-	BNEZ X6, runs_string_move_short
+	ADD X6, X21
+	ADD X6, X11, X7
+	MOV $4, X15
+	BLTU X6, X15, runs_string_move_short_lt4
+	MOVWU -4(X21), X15
+	MOVW X5, 0(X11)
+	MOVW X15, -4(X7)
+	MOV X7, X11
+	JMP runs_string_escape
+runs_string_move_short_lt4:
+	MOV $1, X15
+	BEQ X6, X15, runs_string_move_short_1
+	MOVHU -2(X21), X15
+	MOVH X5, 0(X11)
+	MOVH X15, -2(X7)
+	MOV X7, X11
+	JMP runs_string_escape
+runs_string_move_short_1:
+	MOVB X5, 0(X11)
+	MOV X7, X11
 	JMP runs_string_escape
 runs_string_move_other:
 	MOV $34, X15
@@ -800,22 +825,44 @@ runs_string_slash_hit:
 	JMP runs_string_control_error
 
 runs_string_copy_quote:
+	BEQZ X6, runs_string_copy_done
 	MOV $8, X15
-	BLTU X6, X15, runs_string_quote_bytes
+	BLTU X6, X15, runs_string_quote_short
+	ADD X6, X21, X7
+	MOV -8(X7), X16
+runs_string_quote_words:
 	MOV 0(X21), X10
 	MOV X10, 0(X11)
 	ADD $8, X21
 	ADD $8, X11
 	ADD $-8, X6
-	JMP runs_string_copy_quote
-runs_string_quote_bytes:
-	BEQZ X6, runs_string_copy_done
-	MOVBU 0(X21), X10
-	MOVB X10, 0(X11)
-	ADD $1, X21
-	ADD $1, X11
-	ADD $-1, X6
-	JMP runs_string_quote_bytes
+	BGEU X6, X15, runs_string_quote_words
+	ADD X6, X21
+	ADD X6, X11
+	MOV X16, -8(X11)
+	JMP runs_string_copy_done
+runs_string_quote_short:
+	MOV 0(X21), X5
+	ADD X6, X21
+	ADD X6, X11, X7
+	MOV $4, X15
+	BLTU X6, X15, runs_string_quote_lt4
+	MOVWU -4(X21), X15
+	MOVW X5, 0(X11)
+	MOVW X15, -4(X7)
+	MOV X7, X11
+	JMP runs_string_copy_done
+runs_string_quote_lt4:
+	MOV $1, X15
+	BEQ X6, X15, runs_string_quote_1
+	MOVHU -2(X21), X15
+	MOVH X5, 0(X11)
+	MOVH X15, -2(X7)
+	MOV X7, X11
+	JMP runs_string_copy_done
+runs_string_quote_1:
+	MOVB X5, 0(X11)
+	MOV X7, X11
 runs_string_copy_done:
 	ADD $1, X21
 	SUB X12, X11, X10
@@ -824,23 +871,25 @@ runs_string_copy_done:
 
 runs_string_copy_slash:
 	MOV X19, X6
-runs_string_slash_words:
+	BEQZ X6, runs_string_escape
 	MOV $8, X15
-	BLTU X6, X15, runs_string_slash_bytes
+	BLTU X6, X15, runs_string_slash_short
+	ADD X6, X21, X7
+	MOV -8(X7), X16
+runs_string_slash_words:
 	MOV 0(X21), X10
 	MOV X10, 0(X11)
 	ADD $8, X21
 	ADD $8, X11
 	ADD $-8, X6
-	JMP runs_string_slash_words
-runs_string_slash_bytes:
-	BEQZ X6, runs_string_escape
-	MOVBU 0(X21), X10
-	MOVB X10, 0(X11)
-	ADD $1, X21
-	ADD $1, X11
-	ADD $-1, X6
-	JMP runs_string_slash_bytes
+	BGEU X6, X15, runs_string_slash_words
+	ADD X6, X21
+	ADD X6, X11
+	MOV X16, -8(X11)
+	JMP runs_string_escape
+runs_string_slash_short:
+	MOV 0(X21), X5
+	JMP runs_string_move_short
 
 // The caller publishes this output cursor before entering the Go Unicode
 // handler. The scanner itself has no dependency on Parser or its state layout.
@@ -863,6 +912,7 @@ runs_string_escape_error:
 // separators; longer runs are scanned one word at a time. The padded input
 // always ends in a nonspace byte, so the scan is bounded. X21 is input/output
 // and X10 is the consumed byte. No parser, tape, or container state is used.
+	PCALIGN $64
 TEXT runs_space<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOVBU 0(X21), X10
 	ADD $1, X21

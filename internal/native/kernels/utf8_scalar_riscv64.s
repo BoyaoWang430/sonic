@@ -7,7 +7,7 @@
 // X13: output pointer; X14: remaining output slots; X15: offsets written.
 // Bounded unaligned words skip ASCII runs. Invalid bytes are recorded singly;
 // output exhaustion leaves the next invalid byte unread. FP/g/SP/RA/X31 are preserved.
-TEXT ·utf8Scan(SB), $0-57
+TEXT ·utf8Scan(SB), NOSPLIT, $0-57
 	MOV src+0(FP), X10
 	MOV size+8(FP), X11
 	MOV base+16(FP), X12

@@ -16,7 +16,7 @@
 // Bounded unaligned words carry string/escape state and bracket masks.
 // Escaped quotes are ignored even outside strings, matching relaxed scanning.
 // SP, RA, FP, and g are preserved.
-TEXT ·skipContainer(SB), $0-40
+TEXT ·skipContainer(SB), NOSPLIT, $0-40
 	MOV src+0(FP), X10
 	MOV size+8(FP), X11
 	MOV X11, X12
@@ -32,14 +32,13 @@ TEXT ·skipContainer(SB), $0-40
 	MUL X20, X17
 	MOV $0x2222222222222222, X18
 	MOV $0x5c5c5c5c5c5c5c5c, X19
+	BEQZ X11, struct_eof
 
 struct_scan:
-	BEQZ X11, struct_eof
-	AND $7, X10, X5
-	BNEZ X5, struct_byte
 	MOV $8, X5
-	BLTU X11, X5, struct_byte
+	BLTU X11, X5, struct_tail
 	MOV 0(X10), X29
+struct_word:
 	STRUCT_EQ(X18, X24)          // quotes, bits 0..7
 
 	// Classify slashes once. Only pack the result and process runs when one
@@ -87,6 +86,7 @@ struct_brackets:
 	XOR X5, X15
 	JMP struct_advance
 struct_quote_prefix:
+	BEQZ X24, struct_depth
 	SLL $1, X24, X5
 	XOR X5, X24
 	SLL $2, X24, X5
@@ -99,6 +99,7 @@ struct_quote_prefix:
 	ANDN X24, X26, X26
 	ANDN X24, X28, X28
 
+struct_depth:
 	// Most words cannot close the entry depth. Only potentially completing
 	// words need ordered close positions; all other depth updates use counts.
 	CPOP X28, X5
@@ -122,7 +123,30 @@ struct_count:
 struct_advance:
 	ADD $8, X10
 	SUB $8, X11
-	JMP struct_scan
+	BGTZ X11, struct_scan
+	JMP struct_eof
+
+struct_tail:
+	BLTU X12, X5, struct_short
+	ADD X11, X10, X6
+	MOV -8(X6), X29
+	SUB X11, X5, X6
+	SLL $3, X6
+	SRL X6, X29
+	JMP struct_word
+
+struct_short:
+	MOV $4, X6
+	BLTU X11, X6, struct_byte
+	MOVWU 0(X10), X29
+	ADD X11, X10, X6
+	MOVWU -4(X6), X6
+	SUB X11, X5, X5
+	SLL $3, X5
+	SRL X5, X6
+	SLL $32, X6
+	OR X6, X29
+	JMP struct_word
 
 struct_byte:
 	MOVBU 0(X10), X9
@@ -136,21 +160,23 @@ struct_byte:
 	NOT X15, X15
 struct_byte_state:
 	MOV $0, X14
-	BNEZ X15, struct_scan
+	BNEZ X15, struct_byte_next
 	AND $255, X16, X5
 	BEQ X9, X5, struct_byte_open
 	AND $255, X17, X5
-	BNE X9, X5, struct_scan
+	BNE X9, X5, struct_byte_next
 	SUB $1, X13
-	BNEZ X13, struct_scan
+	BNEZ X13, struct_byte_next
 	SUB X11, X12, X5
 	JMP struct_success
 struct_byte_open:
 	ADD $1, X13
-	JMP struct_scan
+	JMP struct_byte_next
 struct_byte_slash:
 	XOR $1, X14
-	JMP struct_scan
+struct_byte_next:
+	BNEZ X11, struct_byte
+	JMP struct_eof
 
 struct_success_word:
 	CTZ X28, X5

@@ -2,26 +2,33 @@
 
 #include "textflag.h"
 
-// JSON's eight simple escapes. Missing entries are zero and therefore invalid;
-// Unicode escapes keep their separate decoder. A bounded lookup replaces the
-// repeated character-comparison chain for dense escaped input.
-DATA decodeSimpleEscapes<>+34(SB)/1, $34
-DATA decodeSimpleEscapes<>+47(SB)/1, $47
-DATA decodeSimpleEscapes<>+92(SB)/1, $92
-DATA decodeSimpleEscapes<>+98(SB)/1, $8
-DATA decodeSimpleEscapes<>+102(SB)/1, $12
-DATA decodeSimpleEscapes<>+110(SB)/1, $10
-DATA decodeSimpleEscapes<>+114(SB)/1, $13
-DATA decodeSimpleEscapes<>+116(SB)/1, $9
-GLOBL decodeSimpleEscapes<>(SB), RODATA|NOPTR, $128
+// Exact candidate mask in X6 for word X23 using Zbb ORCB:
+//   X9  = 0x8080808080808080 (high bits)
+//   X20 = 0x5c5c5c5c5c5c5c5c (backslash)
+//   X26 = 0xe0e0e0e0e0e0e0e0 (control mask: < 0x20 has top 3 bits zero)
+//   X28 = 0x2222222222222222 when (mode & 4) != 0, else 0x5c5c5c5c5c5c5c5c
+//   X30 = 0 when (mode & 8) != 0, else -1
+// All five registers remain live across every escape.
+#define DECODE_MASK \
+	XOR X20, X23, X6; \
+	ORCB X6, X6; \
+	XOR X28, X23, X5; \
+	ORCB X5, X5; \
+	AND X5, X6, X6; \
+	AND X26, X23, X5; \
+	ORCB X5, X5; \
+	OR X30, X5, X5; \
+	AND X5, X6, X6; \
+	ANDN X6, X9, X6
 
-// Unquote and ParseString share this ABI0 leaf entry. g (X27) is preserved.
+// func stringDecode(src *byte, size int, dst *byte, mode uint64) (end, written, escaped, errorPos, code int)
+// Complete string unquoting/parsing in one ABI0 call; FP (X8), g (X27), SP, and RA are preserved.
 // Loads/stores are bounded and may be unaligned.
 // X10/X11 input cursor/remaining; X12 output cursor; X13 mode.
 // X14/X15 input/output bases; X16 original length; X17 saw-escape.
 // X18 current Unicode escape's original offset; X19 first UTF-16/code point.
-// X22-X24 hex cursor/count/accumulator; X29 selects first/second UTF-16 unit.
-TEXT ·stringDecode(SB), $0-72
+// X22-X25 hex cursor/count/accumulator; X29 selects first/second UTF-16 unit.
+TEXT ·stringDecode(SB), NOSPLIT, $0-72
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
 	MOV	dst+16(FP), X12
@@ -31,58 +38,59 @@ TEXT ·stringDecode(SB), $0-72
 	MOV	X11, X16
 	MOV	$0, X17
 
-decode_scan:
-	BEQZ X11, decode_input_end
-	MOV $8, X5
-	BLTU X11, X5, decode_short
-decode_scan_word:
-	MOV $0x0101010101010101, X18
-	MOV $0x8080808080808080, X19
-	MOV $0x5c5c5c5c5c5c5c5c, X20
-	MOV $0x2222222222222222, X21
-	MOV $0x2020202020202020, X22
+	BEQZ	X11, decode_input_end
+	MOV	$4, X5
+	BLTU	X11, X5, decode_tiny
 
-// Scan plain runs with bounded word loads, retaining the first escape only:
-// decoding changes the input/output correspondence at that escape. Input and
-// output may be identical, in which case the unescaped prefix is never stored.
-	JMP decode_word
+	MOV	$0x8080808080808080, X9
+	MOV	$0x5c5c5c5c5c5c5c5c, X20
+	MOV	$0xe0e0e0e0e0e0e0e0, X26
+	MOV	X20, X28
+	AND	$4, X13, X5
+	BEQZ	X5, decode_init_ctrl
+	MOV	$0x2222222222222222, X28
+decode_init_ctrl:
+	MOV	$-1, X30
+	AND	$8, X13, X5
+	BEQZ	X5, decode_init_done
+	MOV	$0, X30
+decode_init_done:
+	MOV	$8, X5
+	BLTU	X11, X5, decode_short
+	JMP	decode_word
+
 	PCALIGN $64
 decode_word:
-	MOV $8, X5
-	BLTU X11, X5, decode_tail
-	MOV (X10), X23
-	MOV $8, X24
-decode_word_classify:
-	XOR X20, X23, X5
-	SUB X18, X5, X6
-	ANDN X5, X6, X6
-	AND $4, X13, X26
-	BEQZ X26, decode_word_find
-	XOR X21, X23, X5
-	SUB X18, X5, X7
-	ANDN X5, X7, X7
-	OR X7, X6, X6
-	AND $8, X13, X26
-	BEQZ X26, decode_word_find
-	SUB X22, X23, X7
-	ANDN X23, X7, X7
-	OR X7, X6, X6
-decode_word_find:
-	AND X19, X6, X6
-	BEQZ X6, decode_word_copy
-	CTZ X6, X24
-	SRL $3, X24, X24
-	BEQZ X24, decode_special
-decode_word_copy:
-	BEQ X10, X12, decode_word_advance
-	MOV $8, X5
-	BNE X24, X5, decode_word_short_copy
-	MOV X23, (X12)
-decode_word_advance:
-	ADD X24, X10
-	ADD X24, X12
-	SUB X24, X11
-	BEQZ X6, decode_word
+	MOV	$8, X5
+	BLTU	X11, X5, decode_tail
+	MOV	(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_word_event
+	MOV	$32, X5
+	BLTU	X11, X5, decode_word_single
+	BEQ	X10, X12, decode_bulk_inplace_next
+	MOV	X23, (X12)
+	JMP	decode_bulk_next
+decode_word_single:
+	BEQ	X10, X12, decode_word_single_advance
+	MOV	X23, (X12)
+decode_word_single_advance:
+	ADD	$8, X10
+	ADD	$8, X12
+	SUB	$8, X11
+	JMP	decode_word
+
+decode_word_event:
+	CTZ	X6, X24
+	SRL	$3, X24, X24
+	BEQZ	X24, decode_special
+	BEQ	X10, X12, decode_word_event_advance
+	JMP	decode_word_short_copy
+decode_word_event_advance:
+	ADD	X24, X10
+	ADD	X24, X12
+	SUB	X24, X11
+	BEQZ	X6, decode_input_end
 
 decode_special:
 	MOVBU	(X10), X21
@@ -102,8 +110,8 @@ decode_escape:
 	BLTU	X11, X5, decode_eof
 	ADD	$2, X10
 	SUB	$2, X11
-	AND	$1, X13, X26
-	BEQZ	X26, decode_escape_letter
+	AND	$1, X13, X6
+	BEQZ	X6, decode_escape_letter
 	// Preserve native double-unquote's second escape and EOF rules exactly.
 	BEQZ	X11, decode_eof
 	MOVBU	-1(X10), X21
@@ -131,15 +139,15 @@ decode_escape_letter:
 	MOVBU	-1(X10), X21
 	MOV	$117, X5                // u
 	BEQ	X21, X5, decode_unicode
-	MOV $128, X5
-	BGEU X21, X5, decode_invalid_escape
-	MOV $decodeSimpleEscapes<>(SB), X5
-	ADD X21, X5
-	MOVBU (X5), X21
-	BNEZ X21, decode_emit_byte
+	MOV	$128, X5
+	BGEU	X21, X5, decode_invalid_escape
+	MOV	$decodeSimpleEscapes<>(SB), X5
+	ADD	X21, X5
+	MOVBU	(X5), X21
+	BNEZ	X21, decode_emit_byte
 decode_invalid_escape:
-	AND	$4, X13, X26
-	BNEZ	X26, decode_parser_escape
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_escape
 	SUB	X14, X10, X6
 	SUB	$1, X6
 	MOV	$3, X7                  // native ERR_INVALID_ESCAPE
@@ -153,33 +161,15 @@ decode_emit_byte:
 	ADD	$1, X12
 
 decode_resume:
-	// Dense escapes need no word setup. Keep the input cursor unchanged
-	// unless the next escape is adjacent or follows one ordinary byte, so
-	// longer plain runs retain the word path and its copy strategy.
-	BEQZ X11, decode_input_end
-	MOVBU (X10), X21
-	MOV $92, X5
-	BEQ X21, X5, decode_escape
-	MOV $2, X6
-	BLTU X11, X6, decode_tiny_loaded
-	MOVBU 1(X10), X6
-	BNE X6, X5, decode_resume_scan
-	AND $4, X13, X26
-	BEQZ X26, decode_resume_plain
-	MOV $34, X5
-	BEQ X21, X5, decode_quote
-	AND $8, X13, X26
-	BEQZ X26, decode_resume_plain
-	MOV $32, X5
-	BLTU X21, X5, decode_special
-decode_resume_plain:
-	BEQ X10, X12, decode_resume_advance
-	MOVB X21, (X12)
-decode_resume_advance:
-	ADD $1, X10
-	ADD $1, X12
-	SUB $1, X11
-	JMP decode_escape
+	// Adjacent escapes bypass word loads; otherwise X9/X20/X26/X28/X30 are
+	// still live in registers, so resume word/short scanning directly.
+	BEQZ	X11, decode_input_end
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
+	MOV	$8, X5
+	BGEU	X11, X5, decode_word
+	JMP	decode_short_plain
 
 	// Align the Unicode entry so its four-digit loop fits in one cache line.
 	// All entries branch past the padding, including the second UTF-16 unit.
@@ -224,11 +214,11 @@ decode_codepoint:
 	BGEU	X19, X5, decode_three
 	// A surrogate. Double-unquote consumes one extra backslash before
 	// inspecting the second escape, including its native replacement cases.
-	AND	$1, X13, X26
-	BEQZ	X26, decode_surrogate
+	AND	$1, X13, X5
+	BEQZ	X5, decode_surrogate
 	BNEZ	X11, decode_double_surrogate
-	AND	$2, X13, X26
-	BEQZ	X26, decode_eof
+	AND	$2, X13, X5
+	BEQZ	X5, decode_eof
 	JMP	decode_replace
 decode_double_surrogate:
 	MOVBU	(X10), X21
@@ -270,10 +260,10 @@ decode_second_unit:
 	ADD	X24, X19
 	JMP	decode_four
 decode_not_low:
-	AND	$2, X13, X26
-	BNEZ	X26, decode_replace_then_retry
-	AND	$4, X13, X26
-	BNEZ	X26, decode_parser_unicode
+	AND	$2, X13, X5
+	BNEZ	X5, decode_replace_then_retry
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_unicode
 	SUB	X14, X10, X6
 	SUB	$4, X6
 	MOV	$4, X7
@@ -290,22 +280,22 @@ decode_replace_then_retry:
 	JMP	decode_codepoint
 
 decode_unpaired:
-	AND	$2, X13, X26
-	BNEZ	X26, decode_replace
-	AND	$4, X13, X26
-	BNEZ	X26, decode_parser_unicode
+	AND	$2, X13, X5
+	BNEZ	X5, decode_replace
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_unicode
 	SUB	X14, X10, X6
 	SUB	$4, X6
-	AND	$1, X13, X26
-	SUB	X26, X6
+	AND	$1, X13, X5
+	SUB	X5, X6
 	MOV	$4, X7
 	JMP	decode_error
 decode_replace:
 	MOV	$0xfffd, X19
 	JMP	decode_three
 decode_bad_hex:
-	AND	$4, X13, X26
-	BNEZ	X26, decode_parser_unicode
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_unicode
 	SUB	X14, X22, X6
 	MOV	$2, X7
 	JMP	decode_error
@@ -362,30 +352,30 @@ decode_four:
 // repeating the word-length dispatch for every byte. X21 may
 // already contain the current non-backslash byte from short/resume dispatch.
 decode_tiny:
-	MOVBU (X10), X21
-	MOV $92, X5
-	BEQ X21, X5, decode_escape
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
 decode_tiny_loaded:
-	AND $4, X13, X26
-	BEQZ X26, decode_tiny_plain
-	MOV $34, X5
-	BEQ X21, X5, decode_quote
-	AND $8, X13, X26
-	BEQZ X26, decode_tiny_plain
-	MOV $32, X5
-	BLTU X21, X5, decode_special
+	AND	$4, X13, X5
+	BEQZ	X5, decode_tiny_plain
+	MOV	$34, X5
+	BEQ	X21, X5, decode_quote
+	AND	$8, X13, X5
+	BEQZ	X5, decode_tiny_plain
+	MOV	$32, X5
+	BLTU	X21, X5, decode_special
 decode_tiny_plain:
-	BEQ X10, X12, decode_tiny_advance
-	MOVB X21, (X12)
+	BEQ	X10, X12, decode_tiny_advance
+	MOVB	X21, (X12)
 decode_tiny_advance:
-	ADD $1, X10
-	ADD $1, X12
-	SUB $1, X11
-	BNEZ X11, decode_tiny
+	ADD	$1, X10
+	ADD	$1, X12
+	SUB	$1, X11
+	BNEZ	X11, decode_tiny
 
 decode_input_end:
-	AND	$4, X13, X26
-	BNEZ	X26, decode_eof
+	AND	$4, X13, X5
+	BNEZ	X5, decode_eof
 	MOV	X16, X5
 	JMP	decode_success
 decode_quote:
@@ -398,8 +388,8 @@ decode_success:
 decode_eof:
 	MOV	X16, X6
 	MOV	$1, X7
-	AND	$4, X13, X26
-	BEQZ	X26, decode_error
+	AND	$4, X13, X5
+	BEQZ	X5, decode_error
 	MOV	$5, X7
 decode_error:
 	MOV	X6, X5
@@ -415,80 +405,177 @@ decode_done:
 // The source word is already loaded, so exact-width stores are safe even
 // when in-place decoding has brought the output just behind the input.
 decode_word_short_copy:
-	MOV X12, X5
-	AND $4, X24, X7
-	BEQZ X7, decode_word_short_half
-	MOVW X23, (X5)
-	SRL $32, X23
-	ADD $4, X5
-decode_word_short_half:
-	AND $2, X24, X7
-	BEQZ X7, decode_word_short_byte
-	MOVH X23, (X5)
-	SRL $16, X23
-	ADD $2, X5
-decode_word_short_byte:
-	AND $1, X24, X7
-	BEQZ X7, decode_word_advance
-	MOVB X23, (X5)
-	JMP decode_word_advance
+	ADD	X24, X12, X5
+	MOV	$4, X7
+	BLTU	X24, X7, decode_word_short_lt4
+	MOVW	X23, (X12)
+	ADD	$-4, X24, X7
+	SLL	$3, X7
+	SRL	X7, X23
+	MOVW	X23, -4(X5)
+	JMP	decode_word_short_done
+decode_word_short_lt4:
+	MOV	$1, X7
+	BEQ	X24, X7, decode_word_short_1
+	MOVH	X23, (X12)
+	ADD	$-2, X24, X7
+	SLL	$3, X7
+	SRL	X7, X23
+	MOVH	X23, -2(X5)
+	JMP	decode_word_short_done
+decode_word_short_1:
+	MOVB	X23, (X12)
+decode_word_short_done:
+	ADD	X24, X10
+	MOV	X5, X12
+	SUB	X24, X11
+	BEQZ	X6, decode_input_end
+	JMP	decode_special
 
 // Reached after consuming a complete ordinary word. The final eight input
 // bytes are in bounds, even when an earlier escape contracted in-place output.
-// Discard the consumed prefix BEFORE classification: it may have been changed
-// by stores, and masking matches afterwards would not prevent SWAR borrow.
+// Discard the consumed prefix BEFORE classification.
 decode_tail:
-	BEQZ X11, decode_input_end
-	// One to three bytes cost less to inspect directly than to classify a word.
-	MOV $4, X5
-	BLTU X11, X5, decode_tiny
-	ADD X11, X10, X5
-	MOV -8(X5), X23
-	MOV $8, X5
-	SUB X11, X5
-	SLL $3, X5
-	SRL X5, X23
+	BEQZ	X11, decode_input_end
+	BNEZ	X17, decode_tail_contracted
+	ADD	X11, X10, X5
+	MOV	-8(X5), X23
+	DECODE_MASK
+	BNEZ	X6, decode_tail_uncontracted_event
+	BEQ	X10, X12, decode_tail_done
+	ADD	X11, X12
+	MOV	X23, -8(X12)
+	JMP	decode_input_end
+decode_tail_done:
+	ADD	X11, X12
+	JMP	decode_input_end
+decode_tail_uncontracted_event:
+	MOV	$8, X5
+	SUB	X11, X5
+	SLL	$3, X5
+	SRL	X5, X23
+	SRL	X5, X6
+	JMP	decode_word_event
+decode_tail_contracted:
+	MOV	$4, X5
+	BLTU	X11, X5, decode_tiny
+	ADD	X11, X10, X5
+	MOV	-8(X5), X23
+	MOV	$8, X5
+	SUB	X11, X5
+	SLL	$3, X5
+	SRL	X5, X23
 	// Fill unused lanes with ff, which is neither an escape nor a control.
-	MOV $-1, X6
-	SRL X5, X6
-	XOR $-1, X6
-	OR X6, X23
-	MOV X11, X24
-	JMP decode_word_classify
+	MOV	$-1, X6
+	SRL	X5, X6
+	XOR	$-1, X6
+	OR	X6, X23
+	MOV	X11, X24
+	JMP	decode_word_classify_tail
 
 // A short input or post-escape suffix has no guaranteed preceding clean word.
 // For 4..7 bytes, two bounded four-byte loads construct its complete value;
 // overlapping bytes agree because both loads precede any output stores.
 decode_short:
-	// An escape at the cursor must not pay for a word that stops immediately.
-	MOVBU (X10), X21
-	MOV $92, X5
-	BEQ X21, X5, decode_escape
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
 decode_short_plain:
-	MOV $4, X5
-	BLTU X11, X5, decode_tiny_loaded
-	MOVWU (X10), X23
-	ADD X11, X10, X5
-	MOVWU -4(X5), X6
-	ADD $-4, X11, X7
-	SLL $3, X7
-	SLL X7, X6
-	OR X6, X23
-	ADD $32, X7
-	MOV $-1, X6
-	SLL X7, X6
-	OR X6, X23
-	MOV $0x0101010101010101, X18
-	MOV $0x8080808080808080, X19
-	MOV $0x5c5c5c5c5c5c5c5c, X20
-	MOV $0x2222222222222222, X21
-	MOV $0x2020202020202020, X22
-	MOV X11, X24
-	JMP decode_word_classify
+	MOV	$4, X5
+	BLTU	X11, X5, decode_tiny_loaded
+	MOVWU	(X10), X23
+	ADD	X11, X10, X5
+	MOVWU	-4(X5), X6
+	ADD	$-4, X11, X7
+	SLL	$3, X7
+	SLL	X7, X6
+	OR	X6, X23
+	ADD	$32, X7
+	MOV	$-1, X6
+	SLL	X7, X6
+	OR	X6, X23
+	MOV	X11, X24
+decode_word_classify_tail:
+	DECODE_MASK
+	BNEZ	X6, decode_word_event
+	BEQ	X10, X12, decode_tail_advance
+	JMP	decode_word_short_copy
+decode_tail_advance:
+	ADD	X24, X10
+	ADD	X24, X12
+	SUB	X24, X11
+	JMP	decode_input_end
 
-// Resume has already checked the input length, loaded its first byte, and
-// excluded a leading or adjacent escape. Retain that work for a short suffix.
-decode_resume_scan:
-	MOV $8, X5
-	BGEU X11, X5, decode_scan_word
-	JMP decode_short_plain
+	PCALIGN $64
+decode_bulk:
+	MOV	0(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_word_event
+	MOV	X23, 0(X12)
+decode_bulk_next:
+	MOV	8(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_bulk_event_8
+	MOV	X23, 8(X12)
+	MOV	16(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_bulk_event_16
+	MOV	X23, 16(X12)
+	MOV	24(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_bulk_event_24
+	MOV	X23, 24(X12)
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_bulk
+	JMP	decode_word
+
+	PCALIGN $64
+decode_bulk_inplace:
+	MOV	0(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_word_event
+decode_bulk_inplace_next:
+	MOV	8(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_bulk_event_8
+	MOV	16(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_bulk_event_16
+	MOV	24(X10), X23
+	DECODE_MASK
+	BNEZ	X6, decode_bulk_event_24
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_bulk_inplace
+	JMP	decode_word
+
+decode_bulk_event_8:
+	MOV	$8, X7
+	JMP	decode_bulk_event
+decode_bulk_event_16:
+	MOV	$16, X7
+	JMP	decode_bulk_event
+decode_bulk_event_24:
+	MOV	$24, X7
+decode_bulk_event:
+	ADD	X7, X10
+	ADD	X7, X12
+	SUB	X7, X11
+	JMP	decode_word_event
+
+#undef DECODE_MASK
+
+DATA decodeSimpleEscapes<>+34(SB)/1, $34
+DATA decodeSimpleEscapes<>+47(SB)/1, $47
+DATA decodeSimpleEscapes<>+92(SB)/1, $92
+DATA decodeSimpleEscapes<>+98(SB)/1, $8
+DATA decodeSimpleEscapes<>+102(SB)/1, $12
+DATA decodeSimpleEscapes<>+110(SB)/1, $10
+DATA decodeSimpleEscapes<>+114(SB)/1, $13
+DATA decodeSimpleEscapes<>+116(SB)/1, $9
+GLOBL decodeSimpleEscapes<>(SB), RODATA|NOPTR, $128
