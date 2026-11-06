@@ -135,10 +135,24 @@ num_digits:
 	MOV 0(X10), X23
 	NUMBER_DIGIT_FLAGS
 	BNEZ X6, num_word_nondigit
-	ADD $8, X10
-	ADD $8, X12
-	SUB $8, X11
-	JMP num_digits
+	MOV $8, X5
+	BEQ X11, X5, num_digits_done_word
+	AND $7, X10, X6
+	SUB X6, X5, X5
+num_digits_aligned:
+	ADD X5, X10
+	ADD X5, X12
+	SUB X5, X11
+	MOV $8, X5
+	BLTU X11, X5, num_digits_tail
+	MOV 0(X10), X23
+	NUMBER_DIGIT_FLAGS
+	BNEZ X6, num_word_nondigit
+	MOV $8, X5
+	BNE X11, X5, num_digits_aligned
+num_digits_done_word:
+	ADD X5, X12
+	JMP num_digits_eof
 num_word_nondigit:
 	CTZ X6, X5
 	SRL $3, X5
@@ -360,21 +374,57 @@ num_skip:
 	MOV 0(X10), X23
 num_skip_classify:
 	OR X19, X23, X5
+	XOR X18, X23, X6
 	XOR X16, X5, X14
+	ORCB X6, X6
 	ORCB X14, X14
-	NUMBER_NONBOUNDARY(X18)
-	NUMBER_NONBOUNDARY(X19)
-	NUMBER_NONBOUNDARY(X21)
-	AND X22, X23, X5
-	XOR X20, X5, X5
+	XOR X19, X23, X5
+	XOR X21, X23, X7
 	ORCB X5, X5
+	ORCB X7, X7
+	AND X6, X14, X14
+	AND X22, X23, X6
 	AND X5, X14, X14
+	XOR X20, X6, X6
+	AND X7, X14, X14
+	ORCB X6, X6
+	AND X6, X14, X14
 	ANDN X14, X29, X14
 	BNEZ X14, num_skip_found
-	ADD $8, X10
-	ADD $8, X12
-	SUB $8, X11
-	JMP num_skip
+	MOV $8, X5
+	BEQ X11, X5, num_skip_done_word
+	AND $7, X10, X6
+	SUB X6, X5, X5
+num_skip_aligned:
+	ADD X5, X10
+	ADD X5, X12
+	SUB X5, X11
+	MOV $8, X5
+	BLTU X11, X5, num_skip_tail
+	MOV 0(X10), X23
+	OR X19, X23, X5
+	XOR X18, X23, X6
+	XOR X16, X5, X14
+	ORCB X6, X6
+	ORCB X14, X14
+	XOR X19, X23, X5
+	XOR X21, X23, X7
+	ORCB X5, X5
+	ORCB X7, X7
+	AND X6, X14, X14
+	AND X22, X23, X6
+	AND X5, X14, X14
+	XOR X20, X6, X6
+	AND X7, X14, X14
+	ORCB X6, X6
+	AND X6, X14, X14
+	ANDN X14, X29, X14
+	BNEZ X14, num_skip_found
+	MOV $8, X5
+	BNE X11, X5, num_skip_aligned
+num_skip_done_word:
+	ADD X5, X12
+	JMP num_success
 num_skip_found:
 	CTZ X14, X5
 	SRL $3, X5

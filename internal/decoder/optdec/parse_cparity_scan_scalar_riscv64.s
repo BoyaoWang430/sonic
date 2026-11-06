@@ -26,8 +26,8 @@
 #define CP_NONSPACE_WORD(offset) \
 	MOV offset(X10), X5; \
 	XOR X11, X5, X6; \
-	ORCB X6, X6; \
 	XOR X13, X5, X7; \
+	ORCB X6, X6; \
 	ORCB X7, X7; \
 	AND X7, X6; \
 	AND X14, X5, X7; \

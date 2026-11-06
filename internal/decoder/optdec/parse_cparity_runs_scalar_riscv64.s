@@ -576,8 +576,8 @@ runs_number_float_done:
 // to 0xff, so no carry or borrow crosses bytes.
 #define RUNS_STRING_EVENTS(word, out, tmp) \
 	XOR X29, word, out; \
-	ORCB out, out; \
 	XOR X30, word, tmp; \
+	ORCB out, out; \
 	ORCB tmp, tmp; \
 	AND tmp, out; \
 	AND X17, word, tmp; \
@@ -945,18 +945,19 @@ runs_space_word:
 	// 0xff marks bytes differing from all four whitespace characters.
 	MOV 0(X21), X5
 	XOR X11, X5, X6
-	ORCB X6, X6
 	XOR X12, X5, X7
+	ORCB X6, X6
 	ORCB X7, X7
 	AND X7, X6
 	XOR X13, X5, X7
+	XOR X14, X5, X15
 	ORCB X7, X7
-	AND X7, X6
-	XOR X14, X5, X7
-	ORCB X7, X7
+	ORCB X15, X15
+	AND X15, X7
 	AND X7, X6
 	BNEZ X6, runs_space_found
 	ADD $8, X21
+	AND $-8, X21
 	JMP runs_space_word
 runs_space_found:
 	CTZ X6, X6

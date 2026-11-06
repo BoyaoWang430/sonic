@@ -17,14 +17,14 @@
 // AND the non-match bytes, then complement once to form exact space flags.
 #define SPACE_MASK \
 	XOR X28, X13, X17; \
-	ORCB X17, X17; \
 	XOR X30, X13, X20; \
+	AND X26, X13, X21; \
+	ORCB X17, X17; \
 	ORCB X20, X20; \
+	XOR X29, X21, X21; \
 	AND X20, X17, X17; \
-	AND X26, X13, X20; \
-	XOR X29, X20, X20; \
-	ORCB X20, X20; \
-	AND X20, X17, X17; \
+	ORCB X21, X21; \
+	AND X21, X17, X17; \
 	ANDN X17, X14, X17
 
 // Pack exact byte high bits into eight consecutive bits, then retain source
@@ -133,6 +133,8 @@ TEXT ·traversalMasks(SB), NOSPLIT, $0-40
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
 	MOV $0xfbfbfbfbfbfbfbfb, X26
+	MOV $0x2222222222222222, X24
+	MOV $0x5c5c5c5c5c5c5c5c, X25
 	SLTI $8, X6, X20
 	BNEZ X20, masks_short
 masks_word:
@@ -141,17 +143,17 @@ masks_classify:
 	SPACE_MASK
 	XOR X14, X17, X19
 	PACK_MASK(X19, X11)
-	MOV $0x2222222222222222, X22
-	BYTE_EQ(X22, X18)
-	MOV $0x5c5c5c5c5c5c5c5c, X22
-	BYTE_EQ(X22, X19)
-	OR X19, X18, X18
+	XOR X24, X13, X18
+	XOR X25, X13, X19
+	ORCB X18, X18
+	ORCB X19, X19
+	AND X19, X18, X18
 	BEQZ X9, masks_word_events
 	AND X15, X13, X20
 	ORCB X20, X20
-	ANDN X20, X14, X20
-	OR X20, X18, X18
+	AND X20, X18, X18
 masks_word_events:
+	ANDN X18, X14, X18
 	PACK_MASK(X18, X10)
 masks_word_advance:
 	ADD $8, X5
@@ -234,6 +236,10 @@ TEXT ·pathMasks(SB), NOSPLIT, $0-40
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
 	MOV $0xfbfbfbfbfbfbfbfb, X26
+	MOV $0x2222222222222222, X24
+	MOV $0x5c5c5c5c5c5c5c5c, X25
+	MOV $0x7d7d7d7d7d7d7d7d, X15
+	MOV $0x2c2c2c2c2c2c2c2c, X9
 	SLTI $8, X6, X20
 	BNEZ X20, masks_short
 masks_word:
@@ -242,22 +248,22 @@ masks_classify:
 	SPACE_MASK
 	XOR X14, X17, X19
 	PACK_MASK(X19, X11)
-	MOV $0x2222222222222222, X22
-	BYTE_EQ(X22, X18)
-	MOV $0x5c5c5c5c5c5c5c5c, X22
-	BYTE_EQ(X22, X19)
-	OR X19, X18, X18
+	XOR X24, X13, X18
+	XOR X25, X13, X19
+	ORCB X18, X18
+	ORCB X19, X19
+	AND X19, X18, X18
+	ANDN X18, X14, X18
 masks_word_events:
 	PACK_MASK(X18, X10)
 masks_word_boundary:
-	MOV $0x7d7d7d7d7d7d7d7d, X22
 	OR X28, X13, X20
-	XOR X22, X20, X20
+	XOR X9, X13, X21
+	XOR X15, X20, X20
+	ORCB X21, X21
 	ORCB X20, X20
+	AND X21, X20, X20
 	ANDN X20, X14, X18
-	OR X18, X17, X17
-	MOV $0x2c2c2c2c2c2c2c2c, X22
-	BYTE_EQ(X22, X18)
 	OR X18, X17, X17
 	PACK_MASK(X17, X12)
 masks_word_advance:
@@ -354,7 +360,6 @@ TEXT ·space(SB), NOSPLIT, $0-24
 	MOV size+8(FP), X6
 	MOV $0, X7
 	BEQZ X6, space_done
-	MOV $0x8080808080808080, X14
 	MOV $0x2020202020202020, X28
 	MOV $0x0909090909090909, X29
 	MOV $0x0a0a0a0a0a0a0a0a, X30
@@ -364,9 +369,18 @@ TEXT ·space(SB), NOSPLIT, $0-24
 space_word:
 	MOV (X5), X13
 space_classify:
-	SPACE_MASK
-	XOR X14, X17, X17
+	XOR X28, X13, X17
+	XOR X30, X13, X20
+	AND X26, X13, X21
+	ORCB X17, X17
+	ORCB X20, X20
+	XOR X29, X21, X21
+	AND X20, X17, X17
+	ORCB X21, X21
+	AND X21, X17, X17
 	BNEZ X17, space_found
+	MOV $40, X20
+	BGEU X6, X20, space_enter_bulk
 	ADD $8, X5
 	ADD $8, X7
 	SUB $8, X6
@@ -416,3 +430,79 @@ space_found:
 space_done:
 	MOV X7, n+16(FP)
 	RET
+
+space_enter_bulk:
+	MOV $8, X20
+	AND $7, X5, X21
+	SUB X21, X20, X20
+	ADD X20, X5
+	ADD X20, X7
+	SUB X20, X6
+	MOV $32, X22
+	PCALIGN $64
+space_bulk:
+	MOV 0(X5), X13
+	MOV 8(X5), X14
+	XOR X28, X13, X17
+	XOR X30, X13, X20
+	AND X26, X13, X21
+	ORCB X17, X17
+	ORCB X20, X20
+	XOR X29, X21, X21
+	AND X20, X17, X17
+	ORCB X21, X21
+	AND X21, X17, X17
+	BNEZ X17, space_found
+	MOV 16(X5), X13
+	XOR X28, X14, X17
+	XOR X30, X14, X20
+	AND X26, X14, X21
+	ORCB X17, X17
+	ORCB X20, X20
+	XOR X29, X21, X21
+	AND X20, X17, X17
+	ORCB X21, X21
+	AND X21, X17, X17
+	BNEZ X17, space_found_8
+	MOV 24(X5), X14
+	XOR X28, X13, X17
+	XOR X30, X13, X20
+	AND X26, X13, X21
+	ORCB X17, X17
+	ORCB X20, X20
+	XOR X29, X21, X21
+	AND X20, X17, X17
+	ORCB X21, X21
+	AND X21, X17, X17
+	BNEZ X17, space_found_16
+	XOR X28, X14, X17
+	XOR X30, X14, X20
+	AND X26, X14, X21
+	ORCB X17, X17
+	ORCB X20, X20
+	XOR X29, X21, X21
+	AND X20, X17, X17
+	ORCB X21, X21
+	AND X21, X17, X17
+	BNEZ X17, space_found_24
+	ADD $32, X5
+	ADD $32, X7
+	SUB $32, X6
+	BGEU X6, X22, space_bulk
+	SLTI $8, X6, X20
+	BEQZ X20, space_word
+	BEQZ X6, space_done
+	ADD $-8, X6, X20
+	ADD X20, X5
+	ADD X20, X7
+	MOV $8, X6
+	JMP space_word
+space_found_8:
+	ADD $8, X7
+	JMP space_found
+space_found_16:
+	ADD $16, X7
+	JMP space_found
+space_found_24:
+	ADD $24, X7
+	JMP space_found

@@ -13,7 +13,7 @@
 	SRL $56, dst
 
 // func skipContainer(src *byte, size int, open uint64) (end int, err types.ParsingError)
-// Bounded unaligned words carry string/escape state and bracket masks.
+// Bounded words carry string/escape state and bracket masks.
 // Escaped quotes are ignored even outside strings, matching relaxed scanning.
 // SP, RA, FP, and g are preserved.
 TEXT ·skipContainer(SB), NOSPLIT, $0-40
@@ -34,23 +34,60 @@ TEXT ·skipContainer(SB), NOSPLIT, $0-40
 	MOV $0x5c5c5c5c5c5c5c5c, X19
 	BEQZ X11, struct_eof
 
+	MOV $8, X5
+	BLTU X11, X5, struct_tail
+	MOV 0(X10), X29
+	MOV $32, X5
+	BLTU X11, X5, struct_word
+	AND $7, X10, X5
+	BEQZ X5, struct_word
+	// Align X10 down to an 8-byte boundary for the bulk scan while
+	// shifting the first unaligned word into the high lanes of X29.
+	SUB X5, X10
+	ADD X5, X11
+	SLL $3, X5, X6
+	SLL X6, X29
+	JMP struct_word
+
+	PCALIGN $32
 struct_scan:
 	MOV $8, X5
 	BLTU X11, X5, struct_tail
 	MOV 0(X10), X29
 struct_word:
-	STRUCT_EQ(X18, X24)          // quotes, bits 0..7
-
-	// Classify slashes once. Only pack the result and process runs when one
-	// is present. A carry-in still escapes a quote at byte zero.
-	XOR X19, X29, X5
+	XOR X18, X29, X5
 	ORCB X5, X5
-	NOT X5, X6
+	XOR X19, X29, X6
+	ORCB X6, X6
+	NOT X6, X6
 	BNEZ X6, struct_slashes
+	BNEZ X14, struct_carry
+	NOT X5, X24
+	BNEZ X24, struct_pack_quotes
+	BNEZ X15, struct_advance
+	JMP struct_brackets
+
+struct_carry:
+	ANDN X5, X21, X24
+	SRL $7, X24
+	MUL X23, X24
+	SRL $56, X24
 	ANDN X14, X24, X24
 	MOV $0, X14
 	JMP struct_quotes
+
+struct_pack_quotes:
+	AND X21, X24
+	SRL $7, X24
+	MUL X23, X24
+	SRL $56, X24
+	JMP struct_quotes
+
 struct_slashes:
+	ANDN X5, X21, X24
+	SRL $7, X24
+	MUL X23, X24
+	SRL $56, X24
 	AND X21, X6, X25
 	SRL $7, X25
 	MUL X23, X25
@@ -75,17 +112,29 @@ struct_quotes:
 	BNEZ X24, struct_brackets
 	BNEZ X15, struct_advance
 struct_brackets:
-	STRUCT_EQ(X16, X26)
-	STRUCT_EQ(X17, X28)
-	OR X26, X28, X5
-	BNEZ X5, struct_quote_prefix
+	XOR X16, X29, X5
+	ORCB X5, X5
+	XOR X17, X29, X6
+	ORCB X6, X6
+	AND X5, X6, X7
+	NOT X7, X7
+	BNEZ X7, struct_has_brackets
 	// Without brackets only final quote parity matters, not each transition.
+	BEQZ X24, struct_advance
 	CPOP X24, X5
 	AND $1, X5
 	NEG X5, X5
 	XOR X5, X15
 	JMP struct_advance
-struct_quote_prefix:
+struct_has_brackets:
+	ANDN X5, X21, X26
+	SRL $7, X26
+	MUL X23, X26
+	SRL $56, X26
+	ANDN X6, X21, X28
+	SRL $7, X28
+	MUL X23, X28
+	SRL $56, X28
 	BEQZ X24, struct_depth
 	SLL $1, X24, X5
 	XOR X5, X24

@@ -9,16 +9,21 @@
 //   X28 = 0x2222222222222222 when (mode & 4) != 0, else 0x5c5c5c5c5c5c5c5c
 //   X30 = 0 when (mode & 8) != 0, else -1
 // All five registers remain live across every escape.
-#define DECODE_MASK \
-	XOR X20, X23, X6; \
+#define DECODE_MASK(reg) \
+	XOR X20, reg, X6; \
+	XOR X28, reg, X5; \
 	ORCB X6, X6; \
-	XOR X28, X23, X5; \
 	ORCB X5, X5; \
 	AND X5, X6, X6; \
-	AND X26, X23, X5; \
+	AND X26, reg, X5; \
 	ORCB X5, X5; \
 	OR X30, X5, X5; \
 	AND X5, X6, X6; \
+	ANDN X6, X9, X6
+
+#define UNQUOTE_MASK(reg) \
+	XOR X20, reg, X6; \
+	ORCB X6, X6; \
 	ANDN X6, X9, X6
 
 // func stringDecode(src *byte, size int, dst *byte, mode uint64) (end, written, escaped, errorPos, code int)
@@ -64,13 +69,13 @@ decode_word:
 	MOV	$8, X5
 	BLTU	X11, X5, decode_tail
 	MOV	(X10), X23
-	DECODE_MASK
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_word_event
 	MOV	$32, X5
 	BLTU	X11, X5, decode_word_single
-	BEQ	X10, X12, decode_bulk_inplace_next
+	BEQ	X10, X12, decode_enter_inplace
 	MOV	X23, (X12)
-	JMP	decode_bulk_next
+	JMP	decode_enter_bulk
 decode_word_single:
 	BEQ	X10, X12, decode_word_single_advance
 	MOV	X23, (X12)
@@ -440,7 +445,7 @@ decode_tail:
 	BNEZ	X17, decode_tail_contracted
 	ADD	X11, X10, X5
 	MOV	-8(X5), X23
-	DECODE_MASK
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_tail_uncontracted_event
 	BEQ	X10, X12, decode_tail_done
 	ADD	X11, X12
@@ -496,7 +501,7 @@ decode_short_plain:
 	OR	X6, X23
 	MOV	X11, X24
 decode_word_classify_tail:
-	DECODE_MASK
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_word_event
 	BEQ	X10, X12, decode_tail_advance
 	JMP	decode_word_short_copy
@@ -506,23 +511,99 @@ decode_tail_advance:
 	SUB	X24, X11
 	JMP	decode_input_end
 
+decode_enter_bulk:
+	BNE	X11, X16, decode_select_bulk_next
+	AND	$7, X10, X5
+	BEQZ	X5, decode_select_bulk_next
+	MOV	$8, X7
+	SUB	X5, X7, X7
+	ADD	X7, X10
+	ADD	X7, X12
+	SUB	X7, X11
+	MOV	$32, X5
+	BLTU	X11, X5, decode_word
+	AND	$12, X13, X5
+	BEQZ	X5, decode_unquote_bulk
+	JMP	decode_bulk
+decode_select_bulk_next:
+	AND	$12, X13, X5
+	BEQZ	X5, decode_unquote_bulk_next
+	JMP	decode_bulk_next
+
+decode_enter_inplace:
+	BNE	X11, X16, decode_bulk_inplace_next
+	AND	$7, X10, X5
+	BEQZ	X5, decode_bulk_inplace_next
+	MOV	$8, X7
+	SUB	X5, X7, X7
+	ADD	X7, X10
+	ADD	X7, X12
+	SUB	X7, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_bulk_inplace
+	JMP	decode_word
+
+	PCALIGN $64
+decode_unquote_bulk:
+	MOV	0(X10), X23
+	MOV	8(X10), X21
+	UNQUOTE_MASK(X23)
+	BNEZ	X6, decode_word_event
+	MOV	16(X10), X22
+	MOV	X23, 0(X12)
+	UNQUOTE_MASK(X21)
+	BNEZ	X6, decode_bulk_event_8_preload
+	MOV	24(X10), X23
+	MOV	X21, 8(X12)
+	JMP	decode_unquote_bulk_third
+decode_unquote_bulk_next:
+	MOV	8(X10), X23
+	UNQUOTE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_8
+	MOV	16(X10), X22
+	MOV	24(X10), X21
+	MOV	X23, 8(X12)
+	MOV	X21, X23
+decode_unquote_bulk_third:
+	UNQUOTE_MASK(X22)
+	BNEZ	X6, decode_bulk_event_16
+	MOV	X22, 16(X12)
+	UNQUOTE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_24
+	MOV	X23, 24(X12)
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_unquote_bulk
+	JMP	decode_word
+
 	PCALIGN $64
 decode_bulk:
 	MOV	0(X10), X23
-	DECODE_MASK
+	MOV	8(X10), X21
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_word_event
+	MOV	16(X10), X22
 	MOV	X23, 0(X12)
+	DECODE_MASK(X21)
+	BNEZ	X6, decode_bulk_event_8_preload
+	MOV	24(X10), X23
+	MOV	X21, 8(X12)
+	JMP	decode_bulk_third
 decode_bulk_next:
 	MOV	8(X10), X23
-	DECODE_MASK
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_bulk_event_8
+	MOV	16(X10), X22
+	MOV	24(X10), X21
 	MOV	X23, 8(X12)
-	MOV	16(X10), X23
-	DECODE_MASK
+	MOV	X21, X23
+decode_bulk_third:
+	DECODE_MASK(X22)
 	BNEZ	X6, decode_bulk_event_16
-	MOV	X23, 16(X12)
-	MOV	24(X10), X23
-	DECODE_MASK
+	MOV	X22, 16(X12)
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_bulk_event_24
 	MOV	X23, 24(X12)
 	ADD	$32, X10
@@ -535,17 +616,24 @@ decode_bulk_next:
 	PCALIGN $64
 decode_bulk_inplace:
 	MOV	0(X10), X23
-	DECODE_MASK
+	MOV	8(X10), X21
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_word_event
+	MOV	16(X10), X22
+	DECODE_MASK(X21)
+	BNEZ	X6, decode_bulk_event_8_preload
+	MOV	24(X10), X23
+	JMP	decode_bulk_inplace_third
 decode_bulk_inplace_next:
 	MOV	8(X10), X23
-	DECODE_MASK
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_bulk_event_8
-	MOV	16(X10), X23
-	DECODE_MASK
-	BNEZ	X6, decode_bulk_event_16
+	MOV	16(X10), X22
 	MOV	24(X10), X23
-	DECODE_MASK
+decode_bulk_inplace_third:
+	DECODE_MASK(X22)
+	BNEZ	X6, decode_bulk_event_16
+	DECODE_MASK(X23)
 	BNEZ	X6, decode_bulk_event_24
 	ADD	$32, X10
 	ADD	$32, X12
@@ -554,10 +642,13 @@ decode_bulk_inplace_next:
 	BGEU	X11, X5, decode_bulk_inplace
 	JMP	decode_word
 
+decode_bulk_event_8_preload:
+	MOV	X21, X23
 decode_bulk_event_8:
 	MOV	$8, X7
 	JMP	decode_bulk_event
 decode_bulk_event_16:
+	MOV	X22, X23
 	MOV	$16, X7
 	JMP	decode_bulk_event
 decode_bulk_event_24:
@@ -568,6 +659,7 @@ decode_bulk_event:
 	SUB	X7, X11
 	JMP	decode_word_event
 
+#undef UNQUOTE_MASK
 #undef DECODE_MASK
 
 DATA decodeSimpleEscapes<>+34(SB)/1, $34

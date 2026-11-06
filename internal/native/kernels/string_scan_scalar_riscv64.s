@@ -26,11 +26,12 @@ str_scan:
 	MOV 0(X10), X21
 str_classify:
 	XOR X16, X21, X7
-	ORCB X7, X7
 	XOR X17, X21, X6
+	ORCB X7, X7
 	ORCB X6, X6
 	AND X6, X7, X5
 	ANDN X5, X20, X22
+	BEQZ X22, str_clean_word
 str_event:
 	BEQZ X22, str_advance
 	CTZ X22, X23
@@ -122,6 +123,10 @@ str_consume:
 	JMP str_event
 str_crossing:
 	MOV X26, X24
+	JMP str_advance
+str_clean_word:
+	MOV $40, X5
+	BGEU X11, X5, str_enter_bulk
 str_advance:
 	ADD X24, X10
 	ADD X24, X13
@@ -183,6 +188,70 @@ str_tail_short:
 	SLL $32, X6
 	OR X6, X21
 	JMP str_tail_fill
+
+str_enter_bulk:
+	AND $7, X10, X5
+	SUB X5, X24, X5
+	ADD X5, X10
+	ADD X5, X13
+	SUB X5, X11
+	PCALIGN $64
+str_bulk:
+	MOV 0(X10), X21
+	MOV 8(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_event
+	MOV 16(X10), X21
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at8
+	MOV 24(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at16
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at24
+	ADD $32, X10
+	ADD $32, X13
+	SUB $32, X11
+	MOV $32, X5
+	BGEU X11, X5, str_bulk
+	JMP str_scan
+str_bulk_at8:
+	MOV X9, X21
+	ADD $8, X10
+	ADD $8, X13
+	SUB $8, X11
+	JMP str_event
+str_bulk_at16:
+	ADD $16, X10
+	ADD $16, X13
+	SUB $16, X11
+	JMP str_event
+str_bulk_at24:
+	MOV X9, X21
+	ADD $24, X10
+	ADD $24, X13
+	SUB $24, X11
+	JMP str_event
 
 // func scanStringStrict(src *byte, size int) (end, escape, errorPos int, err types.ParsingError)
 TEXT ·scanStringStrict(SB), NOSPLIT, $0-48
@@ -204,14 +273,15 @@ str_scan:
 	MOV 0(X10), X21
 str_classify:
 	XOR X16, X21, X7
-	ORCB X7, X7
 	XOR X17, X21, X6
+	ORCB X7, X7
 	ORCB X6, X6
-	AND X6, X7, X5
-	AND X18, X21, X6
-	ORCB X6, X6
+	AND X18, X21, X5
+	AND X6, X7, X6
+	ORCB X5, X5
 	AND X6, X5
 	ANDN X5, X20, X22
+	BEQZ X22, str_clean_word
 str_event:
 	BEQZ X22, str_advance
 	CTZ X22, X23
@@ -384,6 +454,10 @@ str_strict_dense_invalid:
 
 str_crossing:
 	MOV X26, X24
+	JMP str_advance
+str_clean_word:
+	MOV $40, X5
+	BGEU X11, X5, str_enter_bulk
 str_advance:
 	ADD X24, X10
 	ADD X24, X13
@@ -453,6 +527,82 @@ str_tail_short:
 	OR X6, X21
 	JMP str_tail_fill
 
+str_enter_bulk:
+	AND $7, X10, X5
+	SUB X5, X24, X5
+	ADD X5, X10
+	ADD X5, X13
+	SUB X5, X11
+	PCALIGN $64
+str_bulk:
+	MOV 0(X10), X21
+	MOV 8(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X21, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_event
+	MOV 16(X10), X21
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X9, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at8
+	MOV 24(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X21, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at16
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X9, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at24
+	ADD $32, X10
+	ADD $32, X13
+	SUB $32, X11
+	MOV $32, X5
+	BGEU X11, X5, str_bulk
+	JMP str_scan
+str_bulk_at8:
+	MOV X9, X21
+	ADD $8, X10
+	ADD $8, X13
+	SUB $8, X11
+	JMP str_event
+str_bulk_at16:
+	ADD $16, X10
+	ADD $16, X13
+	SUB $16, X11
+	JMP str_event
+str_bulk_at24:
+	MOV X9, X21
+	ADD $24, X10
+	ADD $24, X13
+	SUB $24, X11
+	JMP str_event
+
 // func scanStringRelaxedBlock(src *byte, size int) (end, escape, errorPos int, err types.ParsingError, tailEvents uint64, tailWidth int)
 TEXT ·scanStringRelaxedBlock(SB), NOSPLIT, $0-64
 	PCALIGN $64
@@ -472,11 +622,12 @@ str_scan:
 	MOV 0(X10), X21
 str_classify:
 	XOR X16, X21, X7
-	ORCB X7, X7
 	XOR X17, X21, X6
+	ORCB X7, X7
 	ORCB X6, X6
 	AND X6, X7, X5
 	ANDN X5, X20, X22
+	BEQZ X22, str_clean_word
 str_event:
 	BEQZ X22, str_advance
 	CTZ X22, X23
@@ -568,6 +719,10 @@ str_consume:
 	JMP str_event
 str_crossing:
 	MOV X26, X24
+	JMP str_advance
+str_clean_word:
+	MOV $40, X5
+	BGEU X11, X5, str_enter_bulk
 str_advance:
 	ADD X24, X10
 	ADD X24, X13
@@ -646,6 +801,70 @@ str_tail_short:
 	OR X6, X21
 	JMP str_tail_fill
 
+str_enter_bulk:
+	AND $7, X10, X5
+	SUB X5, X24, X5
+	ADD X5, X10
+	ADD X5, X13
+	SUB X5, X11
+	PCALIGN $64
+str_bulk:
+	MOV 0(X10), X21
+	MOV 8(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_event
+	MOV 16(X10), X21
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at8
+	MOV 24(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at16
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X6, X7, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at24
+	ADD $32, X10
+	ADD $32, X13
+	SUB $32, X11
+	MOV $32, X5
+	BGEU X11, X5, str_bulk
+	JMP str_scan
+str_bulk_at8:
+	MOV X9, X21
+	ADD $8, X10
+	ADD $8, X13
+	SUB $8, X11
+	JMP str_event
+str_bulk_at16:
+	ADD $16, X10
+	ADD $16, X13
+	SUB $16, X11
+	JMP str_event
+str_bulk_at24:
+	MOV X9, X21
+	ADD $24, X10
+	ADD $24, X13
+	SUB $24, X11
+	JMP str_event
+
 // func scanStringStrictBlock(src *byte, size int) (end, escape, errorPos int, err types.ParsingError, tailEvents uint64, tailWidth int)
 TEXT ·scanStringStrictBlock(SB), NOSPLIT, $0-64
 	PCALIGN $64
@@ -666,14 +885,15 @@ str_scan:
 	MOV 0(X10), X21
 str_classify:
 	XOR X16, X21, X7
-	ORCB X7, X7
 	XOR X17, X21, X6
+	ORCB X7, X7
 	ORCB X6, X6
-	AND X6, X7, X5
-	AND X18, X21, X6
-	ORCB X6, X6
+	AND X18, X21, X5
+	AND X6, X7, X6
+	ORCB X5, X5
 	AND X6, X5
 	ANDN X5, X20, X22
+	BEQZ X22, str_clean_word
 str_event:
 	BEQZ X22, str_advance
 	CTZ X22, X23
@@ -846,6 +1066,10 @@ str_strict_dense_invalid:
 
 str_crossing:
 	MOV X26, X24
+	JMP str_advance
+str_clean_word:
+	MOV $40, X5
+	BGEU X11, X5, str_enter_bulk
 str_advance:
 	ADD X24, X10
 	ADD X24, X13
@@ -933,3 +1157,79 @@ str_tail_short:
 	SLL $32, X6
 	OR X6, X21
 	JMP str_tail_fill
+
+str_enter_bulk:
+	AND $7, X10, X5
+	SUB X5, X24, X5
+	ADD X5, X10
+	ADD X5, X13
+	SUB X5, X11
+	PCALIGN $64
+str_bulk:
+	MOV 0(X10), X21
+	MOV 8(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X21, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_event
+	MOV 16(X10), X21
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X9, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at8
+	MOV 24(X10), X9
+	XOR X16, X21, X7
+	XOR X17, X21, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X21, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at16
+	XOR X16, X9, X7
+	XOR X17, X9, X6
+	ORCB X7, X7
+	ORCB X6, X6
+	AND X18, X9, X5
+	AND X6, X7, X6
+	ORCB X5, X5
+	AND X6, X5
+	ANDN X5, X20, X22
+	BNEZ X22, str_bulk_at24
+	ADD $32, X10
+	ADD $32, X13
+	SUB $32, X11
+	MOV $32, X5
+	BGEU X11, X5, str_bulk
+	JMP str_scan
+str_bulk_at8:
+	MOV X9, X21
+	ADD $8, X10
+	ADD $8, X13
+	SUB $8, X11
+	JMP str_event
+str_bulk_at16:
+	ADD $16, X10
+	ADD $16, X13
+	SUB $16, X11
+	JMP str_event
+str_bulk_at24:
+	MOV X9, X21
+	ADD $24, X10
+	ADD $24, X13
+	SUB $24, X11
+	JMP str_event

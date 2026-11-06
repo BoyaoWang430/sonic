@@ -184,7 +184,13 @@ utf8_ascii_start:
 	OR X19, X20, X16
 	AND X24, X16
 	BNEZ X16, utf8_nonascii_upper
-	JMP utf8_ascii_advance
+	AND $7, X10, X16
+	SUB X16, X23, X16
+	ADD X16, X10
+	ADD X16, X12
+	SUB X16, X11
+	BGEU X11, X23, utf8_ascii_blocks
+	JMP utf8_loop
 
 // The bulk path has already established its input bound. Only the next
 // 32-byte bound needs checking in this hot loop.

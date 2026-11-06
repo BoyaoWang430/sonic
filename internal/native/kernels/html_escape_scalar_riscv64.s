@@ -6,10 +6,10 @@
 // X23..X26 and X28 remain live across escapes; X5 is temporary, X6 the mask.
 #define HTML_MASK \
 	OR X24, X20, X6; \
-	XOR X25, X6; \
-	ORCB X6, X6; \
 	XOR X26, X20, X5; \
+	XOR X25, X6; \
 	ORCB X5, X5; \
+	ORCB X6, X6; \
 	AND X5, X6, X6; \
 	XOR X28, X20, X5; \
 	ORCB X5, X5; \
@@ -65,7 +65,7 @@ copy_word:
 	BLTU X11, X5, copy_single_word
 	BLTU X13, X5, copy_single_word
 	MOV X20, (X12)
-	JMP scan_bulk_next
+	JMP scan_enter_bulk
 copy_single_word:
 	MOV X20, (X12)
 	JMP copy_advance
@@ -283,5 +283,19 @@ tail_candidate:
 	SRL $3, X7
 	BEQZ X7, classify
 	JMP copy_short
+
+scan_enter_bulk:
+	BNE X11, X14, scan_bulk_next
+	AND $7, X10, X5
+	BEQZ X5, scan_bulk_next
+	SUB X5, X7, X7
+	ADD X7, X10
+	SUB X7, X11
+	ADD X7, X12
+	SUB X7, X13
+	MOV $32, X5
+	BLTU X11, X5, scan_word
+	BGEU X13, X5, scan_bulk
+	JMP scan_word
 
 #undef HTML_MASK
