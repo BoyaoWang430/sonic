@@ -268,10 +268,13 @@ func (c *compiler) compileSlice(vt reflect.Type) decFunc {
 		return &sliceStringDecoder{}
 	}
 
+	ed := c.compile(vt.Elem())
+	sd, _ := ed.(*structDecoder)
 	return &sliceDecoder{
-		elemType: rt.UnpackType(vt.Elem()),
-		elemDec:  c.compile(vt.Elem()),
-		typ:      vt,
+		elemType:  rt.UnpackType(vt.Elem()),
+		elemDec:   ed,
+		structDec: sd,
+		typ:       vt,
 	}
 }
 

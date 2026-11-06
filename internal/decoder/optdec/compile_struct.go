@@ -163,10 +163,7 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 			}
 		}
 
-		entries = append(entries, fieldEntry{
-			FieldMeta: f,
-			fieldDec:  dec,
-		})
+		entries = append(entries, newFieldEntry(f.Path[0].Size, dec))
 	}
 	return &structDecoder{
 		fieldMap:   caching.NewFieldCache(fv),
