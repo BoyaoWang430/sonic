@@ -25,15 +25,24 @@ TEXT ·scanStringRelaxed(SB), NOSPLIT, $0-48
 
 scan:
 	BEQZ	X11, eof
-	MOV	$64, X5
-	MINU	X11, X5, X5
-	// The M4 input group V8-V11 fits 64 bytes at the minimum VLEN=128.
-	VSETVLI X5, E8, M4, TA, MA, X20
+	VSETVLI X11, E8, M4, TA, MA, X20
 	VLE8V	(X10), V8
 	VMSEQVX X16, V8, V2
 	VMSEQVX X17, V8, V3
-	BEQZ	X12, masks
+	VMORMM	V2, V3, V5
+	BEQZ	X12, check_first
 	VMSLTUVX X18, V8, V4
+	VMORMM	V5, V4, V5
+check_first:
+	MOV	$64, X5
+	BNEZ	X19, clamp_64
+	VFIRSTM	V5, X6
+	BLTZ	X6, advance
+	BLTU	X6, X5, clamp_64
+	AND	$-64, X6, X20
+	JMP	advance
+clamp_64:
+	MINU	X5, X20, X20
 masks:
 	VSETIVLI $1, E64, M1, TA, MA, X0
 	VMVXS	V2, X22
@@ -114,18 +123,17 @@ escape_seen:
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
 	BEQ	X7, X6, consume_escape
-	MOV	$98, X6                 // b
-	BEQ	X7, X6, consume_escape
-	MOV	$102, X6                // f
-	BEQ	X7, X6, consume_escape
-	MOV	$110, X6                // n
-	BEQ	X7, X6, consume_escape
-	MOV	$114, X6                // r
-	BEQ	X7, X6, consume_escape
-	MOV	$116, X6                // t
-	BEQ	X7, X6, consume_escape
 	MOV	$117, X6                // u
-	BNE	X7, X6, invalid
+	BEQ	X7, X6, unicode
+	ADD	$-98, X7, X6
+	MOV	$19, X5
+	BGEU	X6, X5, invalid
+	MOV	$0x51011, X5
+	SRL	X6, X5
+	AND	$1, X5
+	BEQZ	X5, invalid
+	JMP	consume_escape
+unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
@@ -205,15 +213,24 @@ TEXT ·scanStringStrict(SB), NOSPLIT, $0-48
 
 scan:
 	BEQZ	X11, eof
-	MOV	$64, X5
-	MINU	X11, X5, X5
-	// The M4 input group V8-V11 fits 64 bytes at the minimum VLEN=128.
-	VSETVLI X5, E8, M4, TA, MA, X20
+	VSETVLI X11, E8, M4, TA, MA, X20
 	VLE8V	(X10), V8
 	VMSEQVX X16, V8, V2
 	VMSEQVX X17, V8, V3
-	BEQZ	X12, masks
+	VMORMM	V2, V3, V5
+	BEQZ	X12, check_first
 	VMSLTUVX X18, V8, V4
+	VMORMM	V5, V4, V5
+check_first:
+	MOV	$64, X5
+	BNEZ	X19, clamp_64
+	VFIRSTM	V5, X6
+	BLTZ	X6, advance
+	BLTU	X6, X5, clamp_64
+	AND	$-64, X6, X20
+	JMP	advance
+clamp_64:
+	MINU	X5, X20, X20
 masks:
 	VSETIVLI $1, E64, M1, TA, MA, X0
 	VMVXS	V2, X22
@@ -294,18 +311,17 @@ escape_seen:
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
 	BEQ	X7, X6, consume_escape
-	MOV	$98, X6                 // b
-	BEQ	X7, X6, consume_escape
-	MOV	$102, X6                // f
-	BEQ	X7, X6, consume_escape
-	MOV	$110, X6                // n
-	BEQ	X7, X6, consume_escape
-	MOV	$114, X6                // r
-	BEQ	X7, X6, consume_escape
-	MOV	$116, X6                // t
-	BEQ	X7, X6, consume_escape
 	MOV	$117, X6                // u
-	BNE	X7, X6, invalid
+	BEQ	X7, X6, unicode
+	ADD	$-98, X7, X6
+	MOV	$19, X5
+	BGEU	X6, X5, invalid
+	MOV	$0x51011, X5
+	SRL	X6, X5
+	AND	$1, X5
+	BEQZ	X5, invalid
+	JMP	consume_escape
+unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
@@ -385,15 +401,24 @@ TEXT ·scanStringRelaxedBlock(SB), NOSPLIT, $0-64
 
 scan:
 	BEQZ	X11, eof
-	MOV	$64, X5
-	MINU	X11, X5, X5
-	// The M4 input group V8-V11 fits 64 bytes at the minimum VLEN=128.
-	VSETVLI X5, E8, M4, TA, MA, X20
+	VSETVLI X11, E8, M4, TA, MA, X20
 	VLE8V	(X10), V8
 	VMSEQVX X16, V8, V2
 	VMSEQVX X17, V8, V3
-	BEQZ	X12, masks
+	VMORMM	V2, V3, V5
+	BEQZ	X12, check_first
 	VMSLTUVX X18, V8, V4
+	VMORMM	V5, V4, V5
+check_first:
+	MOV	$64, X5
+	BNEZ	X19, clamp_64
+	VFIRSTM	V5, X6
+	BLTZ	X6, advance
+	BLTU	X6, X5, clamp_64
+	AND	$-64, X6, X20
+	JMP	advance
+clamp_64:
+	MINU	X5, X20, X20
 masks:
 	VSETIVLI $1, E64, M1, TA, MA, X0
 	VMVXS	V2, X22
@@ -474,18 +499,17 @@ escape_seen:
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
 	BEQ	X7, X6, consume_escape
-	MOV	$98, X6                 // b
-	BEQ	X7, X6, consume_escape
-	MOV	$102, X6                // f
-	BEQ	X7, X6, consume_escape
-	MOV	$110, X6                // n
-	BEQ	X7, X6, consume_escape
-	MOV	$114, X6                // r
-	BEQ	X7, X6, consume_escape
-	MOV	$116, X6                // t
-	BEQ	X7, X6, consume_escape
 	MOV	$117, X6                // u
-	BNE	X7, X6, invalid
+	BEQ	X7, X6, unicode
+	ADD	$-98, X7, X6
+	MOV	$19, X5
+	BGEU	X6, X5, invalid
+	MOV	$0x51011, X5
+	SRL	X6, X5
+	AND	$1, X5
+	BEQZ	X5, invalid
+	JMP	consume_escape
+unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
@@ -582,15 +606,24 @@ TEXT ·scanStringStrictBlock(SB), NOSPLIT, $0-64
 
 scan:
 	BEQZ	X11, eof
-	MOV	$64, X5
-	MINU	X11, X5, X5
-	// The M4 input group V8-V11 fits 64 bytes at the minimum VLEN=128.
-	VSETVLI X5, E8, M4, TA, MA, X20
+	VSETVLI X11, E8, M4, TA, MA, X20
 	VLE8V	(X10), V8
 	VMSEQVX X16, V8, V2
 	VMSEQVX X17, V8, V3
-	BEQZ	X12, masks
+	VMORMM	V2, V3, V5
+	BEQZ	X12, check_first
 	VMSLTUVX X18, V8, V4
+	VMORMM	V5, V4, V5
+check_first:
+	MOV	$64, X5
+	BNEZ	X19, clamp_64
+	VFIRSTM	V5, X6
+	BLTZ	X6, advance
+	BLTU	X6, X5, clamp_64
+	AND	$-64, X6, X20
+	JMP	advance
+clamp_64:
+	MINU	X5, X20, X20
 masks:
 	VSETIVLI $1, E64, M1, TA, MA, X0
 	VMVXS	V2, X22
@@ -671,18 +704,17 @@ escape_seen:
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
 	BEQ	X7, X6, consume_escape
-	MOV	$98, X6                 // b
-	BEQ	X7, X6, consume_escape
-	MOV	$102, X6                // f
-	BEQ	X7, X6, consume_escape
-	MOV	$110, X6                // n
-	BEQ	X7, X6, consume_escape
-	MOV	$114, X6                // r
-	BEQ	X7, X6, consume_escape
-	MOV	$116, X6                // t
-	BEQ	X7, X6, consume_escape
 	MOV	$117, X6                // u
-	BNE	X7, X6, invalid
+	BEQ	X7, X6, unicode
+	ADD	$-98, X7, X6
+	MOV	$19, X5
+	BGEU	X6, X5, invalid
+	MOV	$0x51011, X5
+	SRL	X6, X5
+	AND	$1, X5
+	BEQZ	X5, invalid
+	JMP	consume_escape
+unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.

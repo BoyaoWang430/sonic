@@ -185,24 +185,32 @@ decode_unicode:
 	MOV	X10, X22
 	MOV	$0, X29                 // first UTF-16 unit
 decode_hex_start:
-	MOV	$4, X23
-	MOV	$0, X24
-decode_hex:
-	MOVBU	(X22), X21
-	ADD	$-48, X21, X25
-	MOV	$10, X5
-	BLTU	X25, X5, decode_hex_digit
-	OR	$32, X21
-	ADD	$-97, X21, X25
-	MOV	$6, X5
-	BGEU	X25, X5, decode_bad_hex
-	ADD	$10, X25
-decode_hex_digit:
-	SLL	$4, X24
-	OR	X25, X24
-	ADD	$1, X22
-	SUB	$1, X23
-	BNEZ	X23, decode_hex
+	MOV	$decodeHexDigits<>(SB), X5
+	MOVBU	0(X22), X21
+	MOVBU	1(X22), X23
+	MOVBU	2(X22), X25
+	MOVBU	3(X22), X6
+	ADD	X5, X21
+	ADD	X5, X23
+	ADD	X5, X25
+	ADD	X5, X6
+	MOVBU	0(X21), X21
+	MOVBU	0(X23), X23
+	MOVBU	0(X25), X25
+	MOVBU	0(X6), X6
+	AND	X21, X23, X7
+	AND	X25, X6, X5
+	AND	X5, X7, X7
+	AND	$16, X7
+	BEQZ	X7, decode_hex_slow
+	SLL	$12, X21, X24
+	SLL	$8, X23, X5
+	ADD	X5, X24
+	SLL	$4, X25, X5
+	ADD	X5, X24
+	ADD	X6, X24
+	MOV	$0x11110, X5
+	SUB	X5, X24
 	BNEZ	X29, decode_second_unit
 	MOV	X24, X19
 	ADD	$4, X10
@@ -298,6 +306,13 @@ decode_unpaired:
 decode_replace:
 	MOV	$0xfffd, X19
 	JMP	decode_three
+decode_hex_slow:
+	BEQZ	X21, decode_bad_hex
+	ADD	$1, X22
+	BEQZ	X23, decode_bad_hex
+	ADD	$1, X22
+	BEQZ	X25, decode_bad_hex
+	ADD	$1, X22
 decode_bad_hex:
 	AND	$4, X13, X5
 	BNEZ	X5, decode_parser_unicode
@@ -671,3 +686,9 @@ DATA decodeSimpleEscapes<>+110(SB)/1, $10
 DATA decodeSimpleEscapes<>+114(SB)/1, $13
 DATA decodeSimpleEscapes<>+116(SB)/1, $9
 GLOBL decodeSimpleEscapes<>(SB), RODATA|NOPTR, $128
+
+DATA decodeHexDigits<>+48(SB)/8, $0x1716151413121110
+DATA decodeHexDigits<>+56(SB)/2, $0x1918
+DATA decodeHexDigits<>+65(SB)/8, $0x00001f1e1d1c1b1a
+DATA decodeHexDigits<>+97(SB)/8, $0x00001f1e1d1c1b1a
+GLOBL decodeHexDigits<>(SB), RODATA|NOPTR, $256

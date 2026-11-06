@@ -673,16 +673,19 @@ runs_number_eisel_lemire:
 	LSL $4, R4, R4
 	MOVD (R11)(R4), R11
 	UMULH R8, R11, R4
-	MUL R8, R11, R5
-	CBZ R5, runs_number_fallback
-	AND $0x1ff, R4, R11
-	CMP $0x1ff, R11
+	AND $0x1ff, R4, R5
+	CMP $0x1ff, R5
 	BEQ runs_number_fallback
 	LSR $63, R4, R11
-	ADD $9, R11, R5
-	LSR R5, R4, R4
+	ADD $9, R11, R8
+	LSR R8, R4, R4
 	EOR $1, R11, R11
 	SUB R11, R10, R10
+	CBNZ R5, runs_number_el_round
+	AND $3, R4, R5
+	CMP $1, R5
+	BEQ runs_number_fallback
+runs_number_el_round:
 	AND $1, R4, R11
 	ADD R11, R4, R4
 	LSR $1, R4, R4

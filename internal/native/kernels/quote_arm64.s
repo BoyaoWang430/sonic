@@ -24,7 +24,50 @@ TEXT ·quote(SB), $0-56
 
 scan:
 	// Match the existing ARM classifier: quote, slash, and controls.
-	// Every 16-byte load and store is bounded by both logical lengths.
+	// Every 32-byte and 16-byte load and store is bounded by both logical lengths.
+	CMP $32, R1
+	BLO scan_16
+	CMP $32, R3
+	BLO scan_16
+	FLDPQ (R0), (F0, F6)
+	VCMEQ V1.B16, V0.B16, V4.B16
+	VCMEQ V2.B16, V0.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VUSHR $5, V0.B16, V5.B16
+	VCMEQ V3.B16, V5.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VCMEQ V1.B16, V6.B16, V7.B16
+	VCMEQ V2.B16, V6.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+	VUSHR $5, V6.B16, V5.B16
+	VCMEQ V3.B16, V5.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+	VORR V7.B16, V4.B16, V5.B16
+	VMOV V5.D[0], R23
+	VMOV V5.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, neon32_event
+	FSTPQ (F0, F6), (R2)
+	ADD $32, R0
+	ADD $32, R2
+	SUB $32, R1
+	SUB $32, R3
+	B scan
+neon32_event:
+	VMOV V4.D[0], R23
+	VMOV V4.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, neon_event
+	VST1 [V0.B16], (R2)
+	ADD $16, R0
+	ADD $16, R2
+	SUB $16, R1
+	SUB $16, R3
+	VMOV V6.B16, V0.B16
+	VMOV V7.D[0], R23
+	VMOV V7.D[1], R22
+	B neon_event
+scan_16:
 	CMP $16, R1
 	BLO scan_scalar
 	CMP $16, R3
@@ -57,14 +100,30 @@ neon_first:
 	ADD R23>>3, R24, R24
 	CBZ R24, classify
 neon_prefix:
-	MOVBU (R0), R10
-	MOVB R10, (R2)
-	ADD $1, R0
-	ADD $1, R2
-	SUB $1, R1
-	SUB $1, R3
-	SUB $1, R24
-	CBNZ R24, neon_prefix
+	MOVD R2, R22
+	VMOV V0.D[0], R10
+	TBZ $3, R24, neon_prefix_4
+	MOVD R10, (R22)
+	ADD $8, R22
+	VMOV V0.D[1], R10
+neon_prefix_4:
+	TBZ $2, R24, neon_prefix_2
+	MOVW R10, (R22)
+	LSR $32, R10, R10
+	ADD $4, R22
+neon_prefix_2:
+	TBZ $1, R24, neon_prefix_1
+	MOVH R10, (R22)
+	LSR $16, R10, R10
+	ADD $2, R22
+neon_prefix_1:
+	TBZ $0, R24, neon_prefix_done
+	MOVB R10, (R22)
+neon_prefix_done:
+	ADD R24, R0
+	ADD R24, R2
+	SUB R24, R1
+	SUB R24, R3
 	B classify
 scan_scalar:
 	CBZ R1, success

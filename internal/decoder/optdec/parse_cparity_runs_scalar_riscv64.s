@@ -412,7 +412,7 @@ runs_number_digits:
 	ADD $-48, X14, X15
 	BGEU X6, X15, runs_number_digits
 	MOV $19, X7
-	BLTU X7, X5, runs_number_fallback
+	BLTU X7, X5, runs_number_20digits
 runs_number_integer_end:
 	MOV $46, X7
 	BEQ X14, X7, runs_number_fraction
@@ -538,7 +538,7 @@ runs_number_exponent_add:
 // cParityAtofFast: negate first, then one exact operation by 10^|X7|.
 runs_number_float:
 	SRL $52, X12, X14
-	BNEZ X14, runs_number_fallback
+	BNEZ X14, runs_number_el_0
 	FCVTDLU X12, F0
 	BEQZ X13, runs_number_float_sign
 	FNEGD F0, F0
@@ -548,9 +548,9 @@ runs_number_float_sign:
 	MOV $runsPow10<>(SB), X14
 	BLT X7, X0, runs_number_float_divide
 	MOV $22, X15
-	BLT X15, X7, runs_number_fallback
+	BLT X15, X7, runs_number_el_0
 	MOV $1000000000000000, X15
-	BLTU X15, X12, runs_number_fallback
+	BLTU X15, X12, runs_number_el_0
 	SLL $3, X7
 	ADD X7, X14
 	MOVD 0(X14), F1
@@ -558,7 +558,7 @@ runs_number_float_sign:
 	JMP runs_number_float_done
 runs_number_float_divide:
 	MOV $-22, X15
-	BLT X7, X15, runs_number_fallback
+	BLT X7, X15, runs_number_el_0
 	SUB X7, X0, X7
 	SLL $3, X7
 	ADD X7, X14
@@ -566,6 +566,103 @@ runs_number_float_divide:
 	FDIVD F1, F0, F0
 runs_number_float_done:
 	FMVXD F0, X12
+	MOV $const_KReal, X11
+	MOV $0, X10
+	RET
+
+runs_number_20digits:
+	MOV $20, X7
+	BLTU X7, X5, runs_number_fallback
+	MOV $46, X7
+	BEQ X14, X7, runs_number_fallback
+	OR $32, X14, X15
+	MOV $101, X7
+	BEQ X15, X7, runs_number_fallback
+	MOV $0, X12
+	MOV X16, X5
+	ADD $19, X16, X7
+runs_number_reacc19:
+	MOVBU 0(X5), X15
+	ADD $-48, X15
+	MUL X17, X12
+	ADD X15, X12
+	ADD $1, X5
+	BNE X5, X7, runs_number_reacc19
+	MULHU X17, X12, X10
+	BNEZ X10, runs_number_20_float
+	MUL X17, X12, X10
+	MOVBU 0(X7), X15
+	ADD $-48, X15
+	ADD X15, X10, X10
+	BLTU X10, X15, runs_number_20_float
+	MOV X10, X12
+	MOV $const_KUint, X11
+	BEQZ X13, runs_number_success
+	JMP runs_number_negative_real
+runs_number_20_float:
+	MOV $1, X7
+	MOV $1, X10
+	JMP runs_number_eisel_lemire
+
+runs_number_el_0:
+	MOV $0, X10
+runs_number_eisel_lemire:
+	ADD $348, X7, X14
+	MOV $695, X15
+	BLTU X15, X14, runs_number_fallback
+	CLZ X12, X15
+	SLL X15, X12, X5
+	MOV $217706, X6
+	MUL X7, X6
+	SRA $16, X6
+	ADD $1087, X6
+	SUB X15, X6
+	MOV $·cParityPow10Mantissa+8(SB), X11
+	SLL $4, X14
+	ADD X14, X11
+	MOV 0(X11), X11
+	MULHU X5, X11, X14
+	AND $0x1ff, X14, X15
+	MOV $0x1ff, X11
+	BEQ X15, X11, runs_number_fallback
+	SRL $63, X14, X11
+	ADD $9, X11, X5
+	SRL X5, X14, X14
+	XOR $1, X11, X11
+	SUB X11, X6
+	BNEZ X15, runs_number_el_round
+	AND $3, X14, X15
+	MOV $1, X11
+	BEQ X15, X11, runs_number_fallback
+runs_number_el_round:
+	AND $1, X14, X11
+	ADD X11, X14
+	SRL $1, X14
+	SRL $53, X14, X11
+	BEQZ X11, runs_number_el_pack
+	SRL $1, X14
+	ADD $1, X6
+runs_number_el_pack:
+	ADD $-1, X6, X11
+	MOV $0x7fd, X15
+	BLTU X15, X11, runs_number_fallback
+	MOV $0x000fffffffffffff, X15
+	AND X15, X14
+	SLL $52, X6
+	OR X6, X14
+	SLL $63, X13, X11
+	OR X11, X14
+	BEQZ X10, runs_number_el_done
+	MOV $1, X15
+	BNE X10, X15, runs_number_el_check_trunc
+	MOV X14, X17
+	ADD $1, X12
+	MOV $2, X10
+	JMP runs_number_eisel_lemire
+runs_number_el_check_trunc:
+	BNE X14, X17, runs_number_fallback
+runs_number_el_done:
+	MOV X14, X12
 	MOV $const_KReal, X11
 	MOV $0, X10
 	RET

@@ -23,6 +23,51 @@ TEXT ·htmlEscape(SB), $0-48
 	VMOV R9, V4.B16
 
 scan:
+	CMP $32, R1
+	BLO scan_16
+	CMP $32, R3
+	BLO scan_16
+	FLDPQ (R0), (F0, F7)
+	VCMEQ V1.B16, V0.B16, V5.B16
+	VCMEQ V2.B16, V0.B16, V6.B16
+	VORR V6.B16, V5.B16, V5.B16
+	VCMEQ V3.B16, V0.B16, V6.B16
+	VORR V6.B16, V5.B16, V5.B16
+	VCMEQ V4.B16, V0.B16, V6.B16
+	VORR V6.B16, V5.B16, V5.B16
+	VCMEQ V1.B16, V7.B16, V8.B16
+	VCMEQ V2.B16, V7.B16, V6.B16
+	VORR V6.B16, V8.B16, V8.B16
+	VCMEQ V3.B16, V7.B16, V6.B16
+	VORR V6.B16, V8.B16, V8.B16
+	VCMEQ V4.B16, V7.B16, V6.B16
+	VORR V6.B16, V8.B16, V8.B16
+	VORR V8.B16, V5.B16, V6.B16
+	VMOV V6.D[0], R23
+	VMOV V6.D[1], R22
+	ORR R22, R23, R20
+	CBNZ R20, neon32_event
+	FSTPQ (F0, F7), (R2)
+	ADD $32, R0
+	ADD $32, R2
+	SUB $32, R1
+	SUB $32, R3
+	B scan
+neon32_event:
+	VMOV V5.D[0], R23
+	VMOV V5.D[1], R22
+	ORR R22, R23, R20
+	CBNZ R20, neon_event
+	VST1 [V0.B16], (R2)
+	ADD $16, R0
+	ADD $16, R2
+	SUB $16, R1
+	SUB $16, R3
+	VMOV V7.B16, V0.B16
+	VMOV V8.D[0], R23
+	VMOV V8.D[1], R22
+	B neon_event
+scan_16:
 	CMP $16, R1
 	BLO scan_scalar
 	CMP $16, R3
@@ -56,14 +101,30 @@ neon_first:
 	ADD R23>>3, R20, R20
 	CBZ R20, classify
 neon_prefix:
-	MOVBU (R0), R24
-	MOVB R24, (R2)
-	ADD $1, R0
-	ADD $1, R2
-	SUB $1, R1
-	SUB $1, R3
-	SUB $1, R20
-	CBNZ R20, neon_prefix
+	MOVD R2, R22
+	VMOV V0.D[0], R24
+	TBZ $3, R20, neon_prefix_4
+	MOVD R24, (R22)
+	ADD $8, R22
+	VMOV V0.D[1], R24
+neon_prefix_4:
+	TBZ $2, R20, neon_prefix_2
+	MOVW R24, (R22)
+	LSR $32, R24, R24
+	ADD $4, R22
+neon_prefix_2:
+	TBZ $1, R20, neon_prefix_1
+	MOVH R24, (R22)
+	LSR $16, R24, R24
+	ADD $2, R22
+neon_prefix_1:
+	TBZ $0, R20, neon_prefix_done
+	MOVB R24, (R22)
+neon_prefix_done:
+	ADD R20, R0
+	ADD R20, R2
+	SUB R20, R1
+	SUB R20, R3
 	B classify
 scan_scalar:
 	CBZ R1, success

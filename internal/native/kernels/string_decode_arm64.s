@@ -44,6 +44,54 @@ TEXT ·stringDecode(SB), $0-72
 	VEOR V3.B16, V3.B16, V3.B16
 
 decode_scan:
+	CMP $32, R1
+	BLO decode_scan_16
+	FLDPQ (R0), (F0, F6)
+	VCMEQ V1.B16, V0.B16, V4.B16
+	VCMEQ V1.B16, V6.B16, V7.B16
+	TBZ $2, R3, decode_neon32_mask
+	VCMEQ V2.B16, V0.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VCMEQ V2.B16, V6.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+	TBZ $3, R3, decode_neon32_mask
+	VUSHR $5, V0.B16, V5.B16
+	VCMEQ V3.B16, V5.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VUSHR $5, V6.B16, V5.B16
+	VCMEQ V3.B16, V5.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+decode_neon32_mask:
+	VORR V7.B16, V4.B16, V5.B16
+	VMOV V5.D[0], R23
+	VMOV V5.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, decode_neon32_event
+	CMP R0, R2
+	BEQ decode_neon32_advance
+	FSTPQ (F0, F6), (R2)
+decode_neon32_advance:
+	ADD $32, R0
+	ADD $32, R2
+	SUB $32, R1
+	B decode_scan
+decode_neon32_event:
+	VMOV V4.D[0], R23
+	VMOV V4.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, decode_neon_event
+	CMP R0, R2
+	BEQ decode_neon32_second
+	VST1 [V0.B16], (R2)
+decode_neon32_second:
+	ADD $16, R0
+	ADD $16, R2
+	SUB $16, R1
+	VMOV V6.B16, V0.B16
+	VMOV V7.D[0], R23
+	VMOV V7.D[1], R22
+	B decode_neon_event
+decode_scan_16:
 	CMP $16, R1
 	BLO decode_scan_scalar
 	VLD1 (R0), [V0.B16]
