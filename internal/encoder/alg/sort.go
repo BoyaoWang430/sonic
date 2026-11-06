@@ -185,17 +185,7 @@ func swap(kvs []_MapPair, a, b int) {
 
 // Compare two strings from the pos d.
 func lessFrom(a, b string, d int) bool {
-	l := len(a)
-	if l > len(b) {
-		l = len(b)
-	}
-	for i := d; i < l; i++ {
-		if a[i] == b[i] {
-			continue
-		}
-		return a[i] < b[i]
-	}
-	return len(a) < len(b)
+	return a[d:] < b[d:]
 }
 
 func byteAt(b string, p int) int {

@@ -73,8 +73,58 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			v := ins.Byte()
 			buf = append(buf, v)
 		case ir.OP_text:
-			v := ins.Vs()
-			buf = append(buf, v...)
+			buf = append(buf, ins.Vs()...)
+			if pc < pl {
+				next := (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc)))
+				switch next.Op() {
+				case ir.OP_str:
+					pc++
+					buf = alg.Quote(buf, *(*string)(p), false)
+					if pc < pl && (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc))).Op() == ir.OP_load {
+						pc++
+						x, _, p, q = s.Load()
+					}
+				case ir.OP_i64:
+					pc++
+					buf = alg.I64toa(buf, *(*int64)(p))
+					if pc < pl && (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc))).Op() == ir.OP_load {
+						pc++
+						x, _, p, q = s.Load()
+					}
+				case ir.OP_i32:
+					pc++
+					buf = alg.I64toa(buf, int64(*(*int32)(p)))
+					if pc < pl && (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc))).Op() == ir.OP_load {
+						pc++
+						x, _, p, q = s.Load()
+					}
+				case ir.OP_u64:
+					pc++
+					buf = alg.U64toa(buf, *(*uint64)(p))
+					if pc < pl && (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc))).Op() == ir.OP_load {
+						pc++
+						x, _, p, q = s.Load()
+					}
+				case ir.OP_u32:
+					pc++
+					buf = alg.U64toa(buf, uint64(*(*uint32)(p)))
+					if pc < pl && (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc))).Op() == ir.OP_load {
+						pc++
+						x, _, p, q = s.Load()
+					}
+				case ir.OP_bool:
+					pc++
+					if *(*bool)(p) {
+						buf = append(buf, 't', 'r', 'u', 'e')
+					} else {
+						buf = append(buf, 'f', 'a', 'l', 's', 'e')
+					}
+					if pc < pl && (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc))).Op() == ir.OP_load {
+						pc++
+						x, _, p, q = s.Load()
+					}
+				}
+			}
 		case ir.OP_deref:
 			p = *(*unsafe.Pointer)(p)
 		case ir.OP_index:
@@ -203,7 +253,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 		case ir.OP_eface:
 			*b = buf
-			if err := EncodeTypedPointer(b, *(**rt.GoType)(p), (*unsafe.Pointer)(rt.Add(p, 8)), s, flags); err != nil {
+			if err := encodeAnyValue(b, *(*any)(p), s, flags); err != nil {
 				return err
 			}
 			buf = *b
@@ -303,6 +353,13 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				f &= ^uint64(1 << _S_cond)
 				pc = ins.Vi()
 				continue
+			}
+			if pc < pl {
+				next := (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc)))
+				if next.Op() == ir.OP_byte {
+					pc++
+					buf = append(buf, next.Byte())
+				}
 			}
 		case ir.OP_is_zero:
 			fv := ins.VField()

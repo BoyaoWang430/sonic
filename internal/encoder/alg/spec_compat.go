@@ -146,3 +146,8 @@ func I64toa(buf []byte, v int64) []byte {
 func U64toa(buf []byte, v uint64) []byte {
 	return strconv.AppendUint(buf, v, 10)
 }
+
+func QuoteKey(e []byte, s string) []byte {
+	e = Quote(e, s, false)
+	return append(e, ':')
+}

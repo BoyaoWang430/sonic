@@ -19,7 +19,6 @@ package alg
 import (
 	"encoding"
 	"reflect"
-	"strconv"
 	"sync"
 	"unsafe"
 
@@ -109,37 +108,37 @@ func (self *MapIterator) append(t *rt.GoType, k unsafe.Pointer, v unsafe.Pointer
 func (self *MapIterator) appendGeneric(p *_MapPair, t *rt.GoType, v reflect.Kind, k unsafe.Pointer) error {
 	switch v {
 	case reflect.Int:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int)(k))))
 		return nil
 	case reflect.Int8:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int8)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int8)(k))))
 		return nil
 	case reflect.Int16:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int16)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int16)(k))))
 		return nil
 	case reflect.Int32:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int32)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int32)(k))))
 		return nil
 	case reflect.Int64:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int64)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int64)(k))))
 		return nil
 	case reflect.Uint:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint)(k))))
 		return nil
 	case reflect.Uint8:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint8)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint8)(k))))
 		return nil
 	case reflect.Uint16:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint16)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint16)(k))))
 		return nil
 	case reflect.Uint32:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint32)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint32)(k))))
 		return nil
 	case reflect.Uint64:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint64)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint64)(k))))
 		return nil
 	case reflect.Uintptr:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uintptr)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uintptr)(k))))
 		return nil
 	case reflect.Bool:
 		if *(*bool)(k) {
@@ -192,7 +191,9 @@ func IteratorStop(p *MapIterator) {
 	if len(p.values) != 0 {
 		for i := range p.values {
 			p.values[i] = nil
-			*p.at(i) = _MapPair{}
+			pair := p.at(i)
+			pair.k = ""
+			pair.v = nil
 		}
 		p.values = p.values[:0]
 		p.It = rt.GoMapIterator{}

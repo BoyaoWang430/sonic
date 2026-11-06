@@ -138,7 +138,7 @@ func numDigits(d uint64) int {
 
 func formatBase10(a []byte, u uint64) {
 	nd := len(a)
-	for nd >= 8 {
+	for nd > 8 {
 		x3210 := uint32(u % 1e8)
 		u /= 1e8
 		x32, x10 := x3210/1e4, x3210%1e4
@@ -151,6 +151,16 @@ func formatBase10(a []byte, u uint64) {
 		nd -= 8
 	}
 	x := uint32(u)
+	if nd == 8 {
+		x32, x10 := x/1e4, x%1e4
+		x1, x0 := (x10/100)*2, (x10%100)*2
+		x3, x2 := (x32/100)*2, (x32%100)*2
+		a[7], a[6] = smalls[x0+1], smalls[x0]
+		a[5], a[4] = smalls[x1+1], smalls[x1]
+		a[3], a[2] = smalls[x2+1], smalls[x2]
+		a[1], a[0] = smalls[x3+1], smalls[x3]
+		return
+	}
 	if nd >= 4 {
 		x10 := x % 1e4
 		x /= 1e4
@@ -184,6 +194,15 @@ func AppendFloat(dst []byte, v float64, bitSize int) []byte {
 	panic("number.AppendFloat: bits must be 32 or 64")
 }
 
+var zero32 [32]byte
+
+const (
+	float64FixedMinBits = 0x3eb0c6f7a0b5ed8d // math.Float64bits(1e-6)
+	float64FixedMaxBits = 0x444b1ae4d6e2ef50 // math.Float64bits(1e21)
+	float32FixedMinBits = 0x358637bd         // math.Float32bits(1e-6)
+	float32FixedMaxBits = 0x6258d727         // math.Float32bits(1e21)
+)
+
 func AppendFloat64(dst []byte, v float64) []byte {
 	b := math.Float64bits(v)
 	exp := int(b>>float64MantBits) & (1<<float64ExpBits - 1)
@@ -195,7 +214,7 @@ func AppendFloat64(dst []byte, v float64) []byte {
 
 	n := len(dst)
 	if cap(dst)-n < 32 {
-		dst = append(dst, make([]byte, 32)...)[:n]
+		dst = append(dst, zero32[:]...)[:n]
 	}
 	buf := dst[n : n+32]
 	pos := 0
@@ -216,6 +235,16 @@ func AppendFloat64(dst []byte, v float64) []byte {
 			shift := uint(float64MantBits - exp)
 			if mant&((1<<shift)-1) == 0 {
 				u := mant >> shift
+				if u < 10 {
+					buf[pos] = byte('0' + u)
+					return dst[:n+pos+1]
+				}
+				if u < 100 {
+					x := u * 2
+					buf[pos] = smalls[x]
+					buf[pos+1] = smalls[x+1]
+					return dst[:n+pos+2]
+				}
 				nd := numDigits(u)
 				formatBase10(buf[pos:pos+nd], u)
 				return dst[:n+pos+nd]
@@ -228,8 +257,8 @@ func AppendFloat64(dst []byte, v float64) []byte {
 
 	s := 64 - bits.Len64(mant)
 	d, p := shortFloat(mant<<uint(s), exp-s-float64MantBits, float64MantBits, float64MinExp)
-	abs := math.Abs(v)
-	return formatDecimal(dst, buf, n, pos, d, p, abs >= 1e-6 && abs < 1e21)
+	absBits := b & (1<<63 - 1)
+	return formatDecimal(dst, buf, n, pos, d, p, absBits >= float64FixedMinBits && absBits < float64FixedMaxBits)
 }
 
 func AppendFloat32(dst []byte, f float32) []byte {
@@ -243,7 +272,7 @@ func AppendFloat32(dst []byte, f float32) []byte {
 
 	n := len(dst)
 	if cap(dst)-n < 32 {
-		dst = append(dst, make([]byte, 32)...)[:n]
+		dst = append(dst, zero32[:]...)[:n]
 	}
 	buf := dst[n : n+32]
 	pos := 0
@@ -264,6 +293,16 @@ func AppendFloat32(dst []byte, f float32) []byte {
 			shift := uint(float32MantBits - exp)
 			if mant&((1<<shift)-1) == 0 {
 				u := mant >> shift
+				if u < 10 {
+					buf[pos] = byte('0' + u)
+					return dst[:n+pos+1]
+				}
+				if u < 100 {
+					x := u * 2
+					buf[pos] = smalls[x]
+					buf[pos+1] = smalls[x+1]
+					return dst[:n+pos+2]
+				}
 				nd := numDigits(u)
 				formatBase10(buf[pos:pos+nd], u)
 				return dst[:n+pos+nd]
@@ -276,56 +315,75 @@ func AppendFloat32(dst []byte, f float32) []byte {
 
 	s := 64 - bits.Len64(mant)
 	d, p := shortFloat(mant<<uint(s), exp-s-float32MantBits, float32MantBits, float32MinExp)
-	abs := math.Abs(float64(f))
-	return formatDecimal(dst, buf, n, pos, d, p, abs >= float64(float32(1e-6)) && abs < float64(float32(1e21)))
+	absBits := b & (1<<31 - 1)
+	return formatDecimal(dst, buf, n, pos, d, p, absBits >= float32FixedMinBits && absBits < float32FixedMaxBits)
 }
 
 func formatDecimal(dst, buf []byte, n, pos int, d uint64, p int, fixed bool) []byte {
 	nd := numDigits(d)
-	var digs [24]byte
-	formatBase10(digs[:nd], d)
 	dp := nd + p
-	for nd > 0 && digs[nd-1] == '0' {
-		nd--
-	}
 	if fixed {
 		if dp >= nd {
-			copy(buf[pos:], digs[:nd])
-			pos += nd
-			for rem := dp - nd; rem > 0; {
-				copy(buf[pos:pos+8], "00000000")
-				if rem <= 8 {
-					pos += rem
-					break
-				}
-				pos += 8
-				rem -= 8
+			formatBase10(buf[pos:pos+nd], d)
+			end := pos + dp
+			for pos += nd; pos < end; pos++ {
+				buf[pos] = '0'
 			}
-			return dst[:n+pos]
+			return dst[:n+end]
 		}
 		if dp > 0 {
-			copy(buf[pos:], digs[:dp])
-			pos += dp
-			buf[pos] = '.'
-			pos++
-			copy(buf[pos:], digs[dp:nd])
-			pos += nd - dp
-			return dst[:n+pos]
+			formatBase10(buf[pos+1:pos+1+nd], d)
+			switch dp {
+			case 1:
+				buf[pos] = buf[pos+1]
+				buf[pos+1] = '.'
+			case 2:
+				buf[pos], buf[pos+1] = buf[pos+1], buf[pos+2]
+				buf[pos+2] = '.'
+			default:
+				for i := 0; i < dp; i++ {
+					buf[pos+i] = buf[pos+1+i]
+				}
+				buf[pos+dp] = '.'
+			}
+			end := pos + 1 + nd
+			for buf[end-1] == '0' {
+				end--
+			}
+			if buf[end-1] == '.' {
+				end--
+			}
+			return dst[:n+end]
 		}
-		copy(buf[pos:pos+8], "0.000000")
-		pos += 2 - dp
-		copy(buf[pos:], digs[:nd])
-		pos += nd
-		return dst[:n+pos]
+		buf[pos] = '0'
+		buf[pos+1] = '.'
+		zEnd := pos + 2 - dp
+		for i := pos + 2; i < zEnd; i++ {
+			buf[i] = '0'
+		}
+		end := zEnd + nd
+		formatBase10(buf[zEnd:end], d)
+		for buf[end-1] == '0' {
+			end--
+		}
+		return dst[:n+end]
 	}
 
-	buf[pos] = digs[0]
-	pos++
-	if nd > 1 {
-		buf[pos] = '.'
+	if nd == 1 {
+		buf[pos] = byte('0' + d)
 		pos++
-		copy(buf[pos:], digs[1:nd])
-		pos += nd - 1
+	} else {
+		formatBase10(buf[pos+1:pos+1+nd], d)
+		buf[pos] = buf[pos+1]
+		buf[pos+1] = '.'
+		end := pos + 1 + nd
+		for buf[end-1] == '0' {
+			end--
+		}
+		if buf[end-1] == '.' {
+			end--
+		}
+		pos = end
 	}
 	buf[pos] = 'e'
 	exp10 := dp - 1
