@@ -83,6 +83,17 @@ const (
 	OP_cond_testc
 	OP_unsupported
 	OP_is_zero
+	OP_f32_slice
+	OP_f64_slice
+	OP_map_string_any
+	OP_struct_fields
+	OP_struct_begin
+	OP_struct_end
+	OP_slice_eface
+	OP_slice_i64
+	OP_slice_str
+	OP_marshal_append
+	OP_marshal_append_p
 )
 
 const (
@@ -145,6 +156,17 @@ var OpNames = [256]string{
 	OP_cond_set:       "cond_set",
 	OP_cond_testc:     "cond_testc",
 	OP_unsupported:    "unsupported type",
+	OP_f32_slice:      "f32_slice",
+	OP_f64_slice:      "f64_slice",
+	OP_map_string_any: "map_string_any",
+	OP_struct_fields:  "struct_fields",
+	OP_struct_begin:   "struct_begin",
+	OP_struct_end:     "struct_end",
+	OP_slice_eface:      "slice_eface",
+	OP_slice_i64:        "slice_i64",
+	OP_slice_str:        "slice_str",
+	OP_marshal_append:   "marshal_append",
+	OP_marshal_append_p: "marshal_append_p",
 }
 
 func (self Op) String() string {
@@ -214,6 +236,11 @@ func NewInsVi(op Op, vi int) Instr {
 }
 
 func NewInsVs(op Op, vs string) Instr {
+	if len(vs) > 0 && len(vs) <= 32 {
+		buf := make([]byte, len(vs)+32)
+		copy(buf, vs)
+		vs = rt.Mem2Str(buf[:len(vs)])
+	}
 	return Instr{
 		o: op,
 		u: len(vs),
@@ -233,9 +260,38 @@ type typAndTab struct {
 	itab *rt.GoItab
 }
 
+const (
+	SpecFlagOmitEmpty uint8 = 1 << iota
+	SpecFlagIsPtr
+	SpecFlagOmitNil
+)
+
+type StructFieldSpec struct {
+	CommaKey    string
+	Offset      uintptr
+	Kind        Op
+	Flags       uint8
+	NoCommaSkip uint8
+}
+
+//go:inline
+func (s *StructFieldSpec) FirstKey() string {
+	h := (*rt.GoString)(unsafe.Pointer(&s.CommaKey))
+	skip := uintptr(s.NoCommaSkip)
+	return rt.String((*byte)(unsafe.Add(h.Ptr, skip)), h.Len-int(skip))
+}
+
 type typAndField struct {
 	vt reflect.Type
 	fv *resolver.FieldMeta
+}
+
+func NewInsFields(specs []StructFieldSpec) Instr {
+	return Instr{
+		o: OP_struct_fields,
+		u: len(specs),
+		p: (*rt.GoSlice)(unsafe.Pointer(&specs)).Ptr,
+	}
 }
 
 func NewInsVtab(op Op, vt reflect.Type, itab *rt.GoItab) Instr {
@@ -281,6 +337,14 @@ func (self Instr) Vf() uint8 {
 
 func (self Instr) VField() *resolver.FieldMeta {
 	return (*resolver.FieldMeta)(self.p)
+}
+
+func (self Instr) VFields() (v []StructFieldSpec) {
+	s := (*rt.GoSlice)(unsafe.Pointer(&v))
+	s.Ptr = self.p
+	s.Len = self.u
+	s.Cap = self.u
+	return
 }
 
 func (self Instr) Vs() (v string) {
@@ -366,6 +430,8 @@ func (self Instr) Disassemble() string {
 	case OP_text:
 		return fmt.Sprintf("%-18s%s", self.Op().String(), strconv.Quote(self.Vs()))
 	case OP_index:
+		fallthrough
+	case OP_struct_fields:
 		return fmt.Sprintf("%-18s%d", self.Op().String(), self.Vi())
 	case OP_recurse:
 		fallthrough
@@ -378,6 +444,10 @@ func (self Instr) Disassemble() string {
 	case OP_marshal_text:
 		fallthrough
 	case OP_marshal_text_p:
+		fallthrough
+	case OP_marshal_append:
+		fallthrough
+	case OP_marshal_append_p:
 		vt, _ := self.Vtab()
 		return fmt.Sprintf("%-18s%s", self.Op().String(), vt.Pack())
 	case OP_goto:
@@ -468,6 +538,10 @@ func (self *Program) Vtab(op Op, vt reflect.Type, itab *rt.GoItab) {
 
 func (self *Program) VField(op Op, fv *resolver.FieldMeta) {
 	*self = append(*self, NewInsField(op, fv))
+}
+
+func (self *Program) Fields(specs []StructFieldSpec) {
+	*self = append(*self, NewInsFields(specs))
 }
 
 func (self Program) Disassemble() string {

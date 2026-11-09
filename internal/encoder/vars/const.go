@@ -39,4 +39,4 @@ var (
 	DebugCheckPtr = os.Getenv("SONIC_CHECK_POINTER") != ""
 )
 
-var UseVM = os.Getenv("SONIC_ENCODER_USE_VM") != ""
+var UseVM = os.Getenv("SONIC_ENCODER_USE_JIT") == ""

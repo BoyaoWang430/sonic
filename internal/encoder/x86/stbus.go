@@ -53,3 +53,15 @@ func EncodeTypedPointer(buf *[]byte, vt *rt.GoType, vp *unsafe.Pointer, sb *vars
 		return fn.(vars.Encoder)(buf, unsafe.Pointer(vp), sb, fv)
 	}
 }
+
+// EncodeValuePointer encodes the value stored at p.
+func EncodeValuePointer(buf *[]byte, vt *rt.GoType, p unsafe.Pointer, sb *vars.Stack, fv uint64) error {
+	if vt == nil {
+		return prim.EncodeNil(buf)
+	}
+	fn, err := vars.FindOrCompile(vt, (fv&(1<<alg.BitPointerValue)) != 0, compiler)
+	if err != nil {
+		return err
+	}
+	return fn.(vars.Encoder)(buf, p, sb, fv)
+}

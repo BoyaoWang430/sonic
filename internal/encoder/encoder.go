@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"runtime"
+	"unsafe"
 
 	"github.com/bytedance/gopkg/lang/dirtmake"
 	"github.com/bytedance/sonic/internal/encoder/alg"
@@ -178,8 +179,24 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 		return nil, err
 	}
 
-	/* htmlescape or correct UTF-8 if opts enable */
-	encodeFinishWithPool(buf, opts)
+	if !vars.UseVM {
+		if (opts&ValidateString != 0) && !utf8.Validate(*buf) {
+			if opts&EscapeHTML == 0 {
+				ret = utf8.CorrectWith(dirtmake.Bytes(0, len(*buf)+32), *buf, `\ufffd`)
+				vars.FreeBytes(buf)
+				return ret, nil
+			}
+			dst := vars.NewBytes()
+			*buf, *dst = utf8.CorrectWith(*dst, *buf, `\ufffd`), *buf
+			vars.FreeBytes(dst)
+		}
+
+		if opts&EscapeHTML != 0 {
+			ret = HTMLEscape(dirtmake.Bytes(0, len(*buf)+len(*buf)>>3+32), *buf)
+			vars.FreeBytes(buf)
+			return ret, nil
+		}
+	}
 
 	/* make a copy of the result */
 	if rt.CanSizeResue(cap(*buf)) {
@@ -188,6 +205,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 		vars.FreeBytes(buf)
 	} else {
 		ret = *buf
+		*buf = nil
 	}
 
 	/* return the buffer into pool */
@@ -197,18 +215,27 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 // EncodeInto is like Encode but uses a user-supplied buffer instead of allocating
 // a new one.
 func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
+	origLen := len(*buf)
 	err := encodeIntoCheckRace(buf, val, opts)
 	if err != nil {
 		return err
 	}
-	*buf = encodeFinish(*buf, opts)
-	return err
+	if !vars.UseVM {
+		*buf = alg.SanitizeAppended(*buf, origLen, uint64(opts)&alg.SanitizeMask)
+	}
+	return nil
 }
 
 func encodeInto(buf *[]byte, val interface{}, opts Options) error {
 	stk := vars.NewStack()
 	efv := rt.UnpackEface(val)
-	err := encodeTypedPointer(buf, efv.Type, &efv.Value, stk, uint64(opts))
+	var err error
+	if efv.Type == nil || efv.Type.Indirect() {
+		err = encodeValuePointer(buf, efv.Type, efv.Value, stk, uint64(opts))
+	} else {
+		stk.ValPtr = efv.Value
+		err = encodeValuePointer(buf, efv.Type, unsafe.Pointer(&stk.ValPtr), stk, uint64(opts))
+	}
 
 	/* return the stack into pool */
 	if err != nil {

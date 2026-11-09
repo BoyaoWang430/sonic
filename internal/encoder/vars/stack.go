@@ -34,8 +34,9 @@ type State struct {
 }
 
 type Stack struct {
-	sp uintptr
-	sb [MaxStack]State
+	sp     uintptr
+	sb     [MaxStack]State
+	ValPtr unsafe.Pointer
 }
 
 var (
@@ -45,12 +46,14 @@ var (
 			return &Stack{}
 		},
 	}
-	bufferPool   = sync.Pool{}
-	programCache = caching.CreateProgramCache()
+	bufferPool     = sync.Pool{}
+	programCache   = caching.CreateProgramCache()
+	programCachePV = caching.CreateProgramCache()
 )
 
 func ResetProgramCache() {
 	programCache.Reset()
+	programCachePV.Reset()
 }
 
 func NewBytes() *[]byte {
@@ -69,7 +72,8 @@ func NewStack() *Stack {
 }
 
 func ResetStack(p *Stack) {
-	rt.MemclrNoHeapPointers(unsafe.Pointer(p), StackSize)
+	p.ValPtr = nil
+	rt.MemclrNoHeapPointers(unsafe.Pointer(p), unsafe.Offsetof(Stack{}.ValPtr))
 }
 
 func (s *Stack) Top() *State {
@@ -131,6 +135,7 @@ func FreeBytes(p *[]byte) {
 
 func FreeStack(p *Stack) {
 	p.sp = 0
+	p.ValPtr = nil
 	stackPool.Put(p)
 }
 

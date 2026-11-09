@@ -22,6 +22,9 @@ import (
 	"strings"
 	"sync"
 	_ "unsafe"
+
+	"github.com/bytedance/sonic/internal/encoder/alg"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 type FieldOpts int
@@ -45,11 +48,14 @@ type Offset struct {
 }
 
 type FieldMeta struct {
-	Name   string
-	Path   []Offset
-	Opts   FieldOpts
-	Type   reflect.Type
-	IsZero func(reflect.Value) bool
+	Name                 string
+	PaddedCommaKey       string // "," + Quote(Name) + ":" backed by +32 zero-padded bytes
+	PaddedStructBeginKey string // "," + Quote(Name) + ":{" backed by +32 zero-padded bytes (when <= 32B)
+	Path                 []Offset
+	Opts                 FieldOpts
+	Type                 reflect.Type
+	IsZero               func(reflect.Value) bool
+	KeyNeedsSanitize     bool
 }
 
 func (self *FieldMeta) String() string {
@@ -116,16 +122,26 @@ func (self *FieldMeta) optimize() {
 
 func resolveFields(vt reflect.Type) []FieldMeta {
 	tfv := typeFields(vt)
-	ret := []FieldMeta(nil)
+	nFields := len(tfv.list)
+	if nFields == 0 {
+		return nil
+	}
+	ret := make([]FieldMeta, nFields)
+	totalDepth := 0
+	for i := range tfv.list {
+		totalDepth += len(tfv.list[i].index)
+	}
+	offsetSlab := make([]Offset, totalDepth)
+	slabPos := 0
 
 	/* convert each field */
-	for _, fv := range tfv.list {
-		/* add to result */
-		ret = append(ret, FieldMeta{})
-		fm := &ret[len(ret)-1]
+	for fIdx, fv := range tfv.list {
+		fm := &ret[fIdx]
 
 		item := vt
-		path := []Offset(nil)
+		depth := len(fv.index)
+		path := offsetSlab[slabPos : slabPos+depth : slabPos+depth]
+		slabPos += depth
 
 		/* check for "string" */
 		if fv.quoted {
@@ -141,7 +157,7 @@ func resolveFields(vt reflect.Type) []FieldMeta {
 		handleOmitZero(fv, fm)
 
 		/* dump the field path */
-		for _, i := range fv.index {
+		for d, i := range fv.index {
 			kind := F_offset
 			fval := item.Field(i)
 			item = fval.Type
@@ -153,11 +169,11 @@ func resolveFields(vt reflect.Type) []FieldMeta {
 			}
 
 			/* add to path */
-			path = append(path, Offset{
+			path[d] = Offset{
 				Kind: kind,
 				Type: item,
 				Size: fval.Offset,
-			})
+			}
 		}
 
 		/* get the index to the last offset */
@@ -173,7 +189,10 @@ func resolveFields(vt reflect.Type) []FieldMeta {
 		fm.Type = fvt
 		fm.Path = path
 		fm.Name = fv.name
+		fm.KeyNeedsSanitize = alg.NeedsSanitize(fm.Name)
 	}
+
+	populateKeyBlob(ret)
 
 	/* optimize the offsets */
 	for i := range ret {
@@ -188,6 +207,12 @@ var (
 	fieldLock  = sync.RWMutex{}
 	fieldCache = map[reflect.Type][]FieldMeta{}
 )
+
+func ResetFieldCacheForTest() {
+	fieldLock.Lock()
+	fieldCache = map[reflect.Type][]FieldMeta{}
+	fieldLock.Unlock()
+}
 
 func ResolveStruct(vt reflect.Type) []FieldMeta {
 	var ok bool
@@ -222,5 +247,60 @@ func handleOmitZero(fv StdField, fm *FieldMeta) {
 	if fv.omitZero {
 		fm.Opts |= F_omitzero
 		fm.IsZero = fv.isZero
+	}
+}
+
+// populateKeyBlob packs all fields' quoted JSON keys (,"name": and ,"name":{)
+// into a single per-struct byte slice with a single trailing 32-byte zero
+// safety zone so 16/32-byte unaligned loads in appendPaddedKey never cross an
+// unmapped page boundary.
+func populateKeyBlob(ret []FieldMeta) {
+	if len(ret) == 0 {
+		return
+	}
+	est := 32
+	for i := range ret {
+		est += len(ret[i].Name) + 8
+	}
+	blob := make([]byte, 0, est)
+	type keySpan struct {
+		start      int
+		commaLen   int
+		hasStructB bool
+	}
+	var stackSpans [32]keySpan
+	var spans []keySpan
+	if len(ret) <= len(stackSpans) {
+		spans = stackSpans[:len(ret)]
+	} else {
+		spans = make([]keySpan, len(ret))
+	}
+	for i := range ret {
+		fm := &ret[i]
+		start := len(blob)
+		blob = append(blob, ',')
+		blob = alg.Quote(blob, fm.Name, false)
+		blob = append(blob, ':')
+		commaKeyLen := len(blob) - start
+		hasStructB := false
+		if fm.Type.Kind() == reflect.Struct && !fm.KeyNeedsSanitize && commaKeyLen <= 31 {
+			blob = append(blob, '{')
+			hasStructB = true
+		}
+		spans[i] = keySpan{
+			start:      start,
+			commaLen:   commaKeyLen,
+			hasStructB: hasStructB,
+		}
+	}
+	var z32 [32]byte
+	blob = append(blob, z32[:]...)
+	blobStr := rt.Mem2Str(blob)
+	for i := range ret {
+		sp := spans[i]
+		ret[i].PaddedCommaKey = blobStr[sp.start : sp.start+sp.commaLen]
+		if sp.hasStructB {
+			ret[i].PaddedStructBeginKey = blobStr[sp.start : sp.start+sp.commaLen+1]
+		}
 	}
 }

@@ -62,26 +62,23 @@ func (enc *StreamEncoder) Encode(val interface{}) (err error) {
 
 		/* copy into io.Writer */
 		_, err = io.Copy(enc.w, buf)
+		vars.FreeBuffer(buf)
 		if err != nil {
-			vars.FreeBuffer(buf)
 			goto free_bytes
 		}
 
 	} else {
+		// according to standard library, terminate each value with a newline...
+		if enc.Opts&NoEncoderNewline == 0 {
+			*out = append(*out, '\n')
+		}
+
 		/* copy into io.Writer */
 		var n int
 		buf := *out
 		for len(buf) > 0 {
 			n, err = enc.w.Write(buf)
 			buf = buf[n:]
-			if err != nil {
-				goto free_bytes
-			}
-		}
-
-		// according to standard library, terminate each value with a newline...
-		if enc.Opts&NoEncoderNewline == 0 {
-			_, err = enc.w.Write([]byte{'\n'})
 			if err != nil {
 				goto free_bytes
 			}

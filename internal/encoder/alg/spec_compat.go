@@ -1,5 +1,4 @@
-//go:build (!amd64 && !arm64) || go1.28 || !go1.16 || (arm64 && !go1.20)
-// +build !amd64,!arm64 go1.28 !go1.16 arm64,!go1.20
+//go:build ((!amd64 && !arm64) || go1.28 || !go1.16 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
 
 /**
  * Copyright 2024 ByteDance Inc.
@@ -146,4 +145,14 @@ func I64toa(buf []byte, v int64) []byte {
 
 func U64toa(buf []byte, v uint64) []byte {
 	return strconv.AppendUint(buf, v, 10)
+}
+
+func QuoteKey(e []byte, s string) []byte {
+	e = Quote(e, s, false)
+	return append(e, ':')
+}
+
+func QuoteWithPaddedKey(e []byte, key string, val string) []byte {
+	e = append(e, key...)
+	return Quote(e, val, false)
 }

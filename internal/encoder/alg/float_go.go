@@ -1,0 +1,22 @@
+//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
+package alg
+
+import "github.com/bytedance/sonic/internal/native/number"
+
+// The Go formatter already appends to a Go slice. Keep that slice through
+// the caller instead of reserving a native output region and rebuilding it.
+// Preserve the existing encoder policy that represents either zero as "0".
+func F64toa(buf []byte, v float64) []byte {
+	if v == 0 {
+		return append(buf, '0')
+	}
+	return number.AppendFloat64(buf, v)
+}
+
+func F32toa(buf []byte, v float32) []byte {
+	if v == 0 {
+		return append(buf, '0')
+	}
+	return number.AppendFloat32(buf, v)
+}

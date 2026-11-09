@@ -19,6 +19,7 @@ package vars
 import (
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
@@ -29,20 +30,32 @@ type Encoder func(
 	fv uint64,
 ) error
 
+func cacheFor(pv bool) *caching.ProgramCache {
+	if pv {
+		return programCachePV
+	}
+	return programCache
+}
+
 func FindOrCompile(vt *rt.GoType, pv bool, compiler func(*rt.GoType, ...interface{}) (interface{}, error)) (interface{}, error) {
-	if val := programCache.Get(vt); val != nil {
+	pc := cacheFor(pv)
+	if val := pc.Get(vt); val != nil {
 		return val, nil
-	} else if ret, err := programCache.Compute(vt, compiler, pv); err == nil {
+	} else if ret, err := pc.Compute(vt, compiler, pv); err == nil {
 		return ret, nil
 	} else {
 		return nil, err
 	}
 }
 
-func GetProgram(vt *rt.GoType) interface{} {
-	return programCache.Get(vt)
+func GetProgram(vt *rt.GoType, pv bool) interface{} {
+	return cacheFor(pv).Get(vt)
 }
 
 func ComputeProgram(vt *rt.GoType, compute func(*rt.GoType, ...interface{}) (interface{}, error), pv bool) (interface{}, error) {
-	return programCache.Compute(vt, compute, pv)
+	return cacheFor(pv).Compute(vt, compute, pv)
+}
+
+func PutPrograms(items []caching.ProgramBatchItem, pv bool) {
+	cacheFor(pv).PutMany(items)
 }

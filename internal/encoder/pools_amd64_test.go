@@ -1,5 +1,5 @@
-//go:build amd64
-// +build amd64
+//go:build ignore
+// +build ignore
 
 package encoder
 

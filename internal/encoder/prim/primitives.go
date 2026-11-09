@@ -29,20 +29,11 @@ import (
 )
 
 func Compact(p *[]byte, v []byte) error {
-	buf := vars.NewBuffer()
-	err := json.Compact(buf, v)
-
-	/* check for errors */
+	out, err := alg.AppendCompactedJSON(*p, v, 0)
 	if err != nil {
 		return err
 	}
-
-	/* add to result */
-	v = buf.Bytes()
-	*p = append(*p, v...)
-
-	/* return the buffer into pool */
-	vars.FreeBuffer(buf)
+	*p = out
 	return nil
 }
 
@@ -67,34 +58,102 @@ func EncodeNil(rb *[]byte) error {
 // 	}
 // }
 
-func EncodeJsonMarshaler(buf *[]byte, val json.Marshaler, opt uint64) error {
-	if ret, err := val.MarshalJSON(); err != nil {
+// JSONAppender is an opt-in interface for custom types that can append their
+// JSON representation directly into the destination buffer's spare capacity.
+//
+// Contract (built on B02's non-aliasing scratch buffer):
+//   - AppendJSON is called with a zero-length slice `dst[origLen:origLen:cap(dst)]`
+//     sharing the parent encoding session's spare capacity.
+//   - It must return the appended JSON value slice (`ret`) or a non-nil error.
+//   - Under CompactMarshaler / EscapeHTML / ValidateString or JSON validation,
+//     if post-processing can overwrite in place without growth, no extra buffer
+//     is allocated; if expansion is needed, B02 overlap safety ensures the
+//     raw fragment is never corrupted before reading.
+//   - If AppendJSON returns an error or invalid JSON, the parent buffer is
+//     restored to `buf[:origLen]`.
+type JSONAppender interface {
+	AppendJSON(dst []byte) ([]byte, error)
+}
+
+var JSONAppenderType = reflect.TypeOf((*JSONAppender)(nil)).Elem()
+
+func EncodeJSONAppender(buf *[]byte, val JSONAppender, opt uint64) error {
+	b := *buf
+	origLen := len(b)
+	spare := b[origLen:origLen:cap(b)]
+	ret, err := val.AppendJSON(spare)
+	if err != nil {
+		*buf = b[:origLen]
 		return err
-	} else {
-		if opt&(1<<alg.BitCompactMarshaler) != 0 {
-			return Compact(buf, ret)
+	}
+	if len(ret) == 0 {
+		*buf = b[:origLen]
+		return vars.Error_marshaler(ret, 0)
+	}
+	sanitize := opt & alg.SanitizeMask
+	if opt&(1<<alg.BitCompactMarshaler) != 0 {
+		out, err := alg.AppendCompactedJSON(b[:origLen], ret, sanitize)
+		if err != nil {
+			*buf = b[:origLen]
+			return err
 		}
-		if opt&(1<<alg.BitNoValidateJSONMarshaler) == 0 {
-			if ok, s := alg.Valid(ret); !ok {
-				return vars.Error_marshaler(ret, s)
-			}
-		}
-		*buf = append(*buf, ret...)
+		*buf = out
 		return nil
 	}
+	if opt&(1<<alg.BitNoValidateJSONMarshaler) == 0 {
+		if ok, s := alg.Valid(ret); !ok {
+			*buf = b[:origLen]
+			return vars.Error_marshaler(ret, s)
+		}
+	}
+	if sanitize == 0 {
+		bs := (*rt.GoSlice)(unsafe.Pointer(&b))
+		rs := (*rt.GoSlice)(unsafe.Pointer(&ret))
+		if rs.Ptr == unsafe.Add(bs.Ptr, origLen) && origLen+rs.Len <= bs.Cap {
+			*buf = b[:origLen+rs.Len]
+			return nil
+		}
+	}
+	*buf = alg.AppendSanitizedBytes(b[:origLen], ret, sanitize)
+	return nil
+}
+
+func EncodeJsonMarshaler(buf *[]byte, val json.Marshaler, opt uint64) error {
+	ret, err := val.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	sanitize := opt & alg.SanitizeMask
+	if opt&(1<<alg.BitCompactMarshaler) != 0 {
+		out, err := alg.AppendCompactedJSON(*buf, ret, sanitize)
+		if err != nil {
+			return err
+		}
+		*buf = out
+		return nil
+	}
+	if opt&(1<<alg.BitNoValidateJSONMarshaler) == 0 {
+		if ok, s := alg.Valid(ret); !ok {
+			return vars.Error_marshaler(ret, s)
+		}
+	}
+	*buf = alg.AppendSanitizedBytes(*buf, ret, sanitize)
+	return nil
 }
 
 func EncodeTextMarshaler(buf *[]byte, val encoding.TextMarshaler, opt uint64) error {
-	if ret, err := val.MarshalText(); err != nil {
+	ret, err := val.MarshalText()
+	if err != nil {
 		return err
-	} else {
-		if opt&(1<<alg.BitNoQuoteTextMarshaler) != 0 {
-			*buf = append(*buf, ret...)
-			return nil
-		}
-		*buf = alg.Quote(*buf, rt.Mem2Str(ret), false)
+	}
+	sanitize := opt & alg.SanitizeMask
+	if opt&(1<<alg.BitNoQuoteTextMarshaler) != 0 {
+		*buf = alg.AppendSanitizedBytes(*buf, ret, sanitize)
 		return nil
 	}
+	ret = alg.DetachIfOverlappingSpare(*buf, ret)
+	*buf = alg.QuoteFlags(*buf, rt.Mem2Str(ret), false, sanitize)
+	return nil
 }
 
 func IsZero(val unsafe.Pointer, fv *resolver.FieldMeta) bool {

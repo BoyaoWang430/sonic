@@ -1,3 +1,6 @@
+//go:build amd64 && go1.16 && !go1.28
+// +build amd64,go1.16,!go1.28
+
 /*
  * Copyright 2021 ByteDance Inc.
  *
@@ -20,6 +23,7 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/internal/encoder/x86"
 	"github.com/bytedance/sonic/internal/jit"
@@ -31,7 +35,7 @@ import (
 func ForceUseJit() {
 	x86.SetCompiler(makeEncoderX86)
 	pretouchType = pretouchTypeX86
-	encodeTypedPointer = x86.EncodeTypedPointer
+	encodeValuePointer = x86.EncodeValuePointer
 	vars.UseVM = false
 }
 
@@ -77,13 +81,19 @@ func pretouchTypeX86(_vt reflect.Type, opts option.CompileOptions, v uint8) (map
 
 	/* find or compile */
 	vt := rt.UnpackType(_vt)
-	if val := vars.GetProgram(vt); val != nil {
+	pv := v == 1
+	if val := vars.GetProgram(vt, pv); val != nil {
 		return nil, nil
-	} else if _, err := vars.ComputeProgram(vt, encoder, v == 1); err == nil {
+	} else if _, err := vars.ComputeProgram(vt, encoder, pv); err == nil {
 		return compiler.rec, nil
 	} else {
 		return nil, err
 	}
+}
+
+type x86PretouchKey struct {
+	vt *rt.GoType
+	pv bool
 }
 
 type x86PretouchProgram struct {
@@ -93,21 +103,23 @@ type x86PretouchProgram struct {
 }
 
 func pretouchRecX86(vtm map[reflect.Type]uint8, opts option.CompileOptions) error {
-	pendings := make(map[*rt.GoType]x86PretouchProgram)
+	pendings := make(map[x86PretouchKey]x86PretouchProgram)
 
 	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
 		next := make(map[reflect.Type]uint8)
 		for vt, v := range vtm {
 			gvt := rt.UnpackType(vt)
-			if vars.GetProgram(gvt) != nil {
+			pv := v == 1
+			if vars.GetProgram(gvt, pv) != nil {
 				continue
 			}
-			if _, ok := pendings[gvt]; ok {
+			key := x86PretouchKey{vt: gvt, pv: pv}
+			if _, ok := pendings[key]; ok {
 				continue
 			}
 
 			compiler := NewCompiler().apply(opts)
-			pp, err := compiler.Compile(vt, v == 1)
+			pp, err := compiler.Compile(vt, pv)
 			if err != nil {
 				return err
 			}
@@ -115,13 +127,17 @@ func pretouchRecX86(vtm map[reflect.Type]uint8, opts option.CompileOptions) erro
 			as := x86.NewAssembler(pp)
 			as.Name = vt.String()
 			text, pcdata := as.Export()
+			funcName := "encode_" + as.Name
+			if pv {
+				funcName += "_pv"
+			}
 
-			pendings[gvt] = x86PretouchProgram{
+			pendings[key] = x86PretouchProgram{
 				vt: gvt,
-				pv: v == 1,
+				pv: pv,
 				item: loader.LoadOneItem{
 					Text:      text,
-					FuncName:  "encode_" + as.Name,
+					FuncName:  funcName,
 					ArgSize:   x86.FP_args,
 					ArgPtrs:   vars.ArgPtrs,
 					LocalPtrs: vars.LocalPtrs,
@@ -150,14 +166,21 @@ func pretouchRecX86(vtm map[reflect.Type]uint8, opts option.CompileOptions) erro
 	}
 
 	loaded := jit.LoadMany(items)
+	var batchVal []caching.ProgramBatchItem
+	var batchPV []caching.ProgramBatchItem
 	for i, p := range entries {
 		enc := x86.ToEncoder(loaded[i])
-		_, err := vars.ComputeProgram(p.vt, func(*rt.GoType, ...interface{}) (interface{}, error) {
-			return enc, nil
-		}, p.pv)
-		if err != nil {
-			return err
+		if p.pv {
+			batchPV = append(batchPV, caching.ProgramBatchItem{Vt: p.vt, Fn: enc})
+		} else {
+			batchVal = append(batchVal, caching.ProgramBatchItem{Vt: p.vt, Fn: enc})
 		}
+	}
+	if len(batchVal) > 0 {
+		vars.PutPrograms(batchVal, false)
+	}
+	if len(batchPV) > 0 {
+		vars.PutPrograms(batchPV, true)
 	}
 
 	return nil

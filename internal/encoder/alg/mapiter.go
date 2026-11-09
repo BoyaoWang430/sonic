@@ -19,7 +19,6 @@ package alg
 import (
 	"encoding"
 	"reflect"
-	"strconv"
 	"sync"
 	"unsafe"
 
@@ -35,13 +34,16 @@ type _MapPair struct {
 
 type MapIterator struct {
 	It rt.GoMapIterator // must be the first field
-	kv rt.GoSlice       // slice of _MapPair
-	ki int
+	platformMapOrder
+	kv     rt.GoSlice // slice of _MapPair
+	ki     int
+	values []any
 }
 
 var (
-	iteratorPool = sync.Pool{}
-	iteratorPair = rt.UnpackType(reflect.TypeOf(_MapPair{}))
+	iteratorPool     = sync.Pool{}
+	iteratorPair     = rt.UnpackType(reflect.TypeOf(_MapPair{}))
+	stringAnyMapType = rt.MapType(rt.UnpackType(vars.StringAnyMapType))
 )
 
 func init() {
@@ -66,7 +68,7 @@ func resetIterator(p *MapIterator) *MapIterator {
 }
 
 func (self *MapIterator) at(i int) *_MapPair {
-	return (*_MapPair)(unsafe.Pointer(uintptr(self.kv.Ptr) + uintptr(i)*unsafe.Sizeof(_MapPair{})))
+	return (*_MapPair)(unsafe.Add(self.kv.Ptr, uintptr(i)*unsafe.Sizeof(_MapPair{})))
 }
 
 func (self *MapIterator) add() (p *_MapPair) {
@@ -106,37 +108,37 @@ func (self *MapIterator) append(t *rt.GoType, k unsafe.Pointer, v unsafe.Pointer
 func (self *MapIterator) appendGeneric(p *_MapPair, t *rt.GoType, v reflect.Kind, k unsafe.Pointer) error {
 	switch v {
 	case reflect.Int:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int)(k))))
 		return nil
 	case reflect.Int8:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int8)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int8)(k))))
 		return nil
 	case reflect.Int16:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int16)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int16)(k))))
 		return nil
 	case reflect.Int32:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int32)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int32)(k))))
 		return nil
 	case reflect.Int64:
-		p.k = rt.Mem2Str(strconv.AppendInt(p.m[:0], int64(*(*int64)(k)), 10))
+		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int64)(k))))
 		return nil
 	case reflect.Uint:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint)(k))))
 		return nil
 	case reflect.Uint8:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint8)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint8)(k))))
 		return nil
 	case reflect.Uint16:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint16)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint16)(k))))
 		return nil
 	case reflect.Uint32:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint32)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint32)(k))))
 		return nil
 	case reflect.Uint64:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uint64)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint64)(k))))
 		return nil
 	case reflect.Uintptr:
-		p.k = rt.Mem2Str(strconv.AppendUint(p.m[:0], uint64(*(*uintptr)(k)), 10))
+		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uintptr)(k))))
 		return nil
 	case reflect.Bool:
 		if *(*bool)(k) {
@@ -186,6 +188,16 @@ func (self *MapIterator) appendInterface(p *_MapPair, t *rt.GoType, k unsafe.Poi
 }
 
 func IteratorStop(p *MapIterator) {
+	if len(p.values) != 0 {
+		for i := range p.values {
+			p.values[i] = nil
+			pair := p.at(i)
+			pair.k = ""
+			pair.v = nil
+		}
+		p.values = p.values[:0]
+		p.It = rt.GoMapIterator{}
+	}
 	iteratorPool.Put(p)
 }
 
@@ -207,13 +219,19 @@ func IteratorNext(p *MapIterator) {
 	}
 
 	/* update the key-value pair, and increase the pointer */
-	t.K = unsafe.Pointer(&p.at(p.ki).k)
-	t.V = p.at(p.ki).v
+	pair := p.orderedMapPair(p.ki)
+	t.K = unsafe.Pointer(&pair.k)
+	t.V = pair.v
 	p.ki++
 }
 
 func IteratorStart(t *rt.GoMapType, m unsafe.Pointer, fv uint64) (*MapIterator, error) {
 	it := newIterator()
+	if t == stringAnyMapType && fv&(1<<BitSortMapKeys) != 0 {
+		value := (rt.GoEface{Type: &t.GoType, Value: m}).Pack().(map[string]any)
+		it.startStringAnyMap(value)
+		return it, nil
+	}
 	rt.Mapiterinit(t, m, &it.It)
 	count := rt.Maplen(m)
 
@@ -236,15 +254,41 @@ func IteratorStart(t *rt.GoMapType, m unsafe.Pointer, fv uint64) (*MapIterator, 
 		}
 	}
 
-	/* sort the keys, map with only 1 item don't need sorting */
-	if it.ki = 1; count > 1 {
-		radixQsort(it.data(), 0, maxDepth(it.kv.Len))
-	}
+	/* prepare the sorted key order */
+	it.ki = 1
+	it.sortMapPairs()
 
 	/* load the first pair into iterator */
-	it.It.V = it.at(0).v
-	it.It.K = unsafe.Pointer(&it.at(0).k)
+	pair := it.orderedMapPair(0)
+	it.It.V = pair.v
+	it.It.K = unsafe.Pointer(&pair.k)
 	return it, nil
+}
+
+func (p *MapIterator) startStringAnyMap(m map[string]any) {
+	n := len(m)
+	if n == 0 {
+		return
+	}
+	if n > p.kv.Cap {
+		p.kv = rt.GrowSlice(iteratorPair, p.kv, n)
+	}
+	if n > cap(p.values) {
+		p.values = make([]any, n)
+	} else {
+		p.values = p.values[:n]
+	}
+	// Keep value snapshots in typed storage while pairs are sorted.
+	for key, value := range m {
+		i := p.kv.Len
+		p.values[i] = value
+		pair := p.add()
+		pair.k = key
+		pair.v = unsafe.Pointer(&p.values[i])
+	}
+	p.sortMapPairs()
+	p.ki = 0
+	IteratorNext(p)
 }
 
 func asText(v unsafe.Pointer) (string, error) {

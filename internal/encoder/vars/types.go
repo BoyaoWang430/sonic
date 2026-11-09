@@ -24,6 +24,7 @@ import (
 
 var (
 	ByteType                 = reflect.TypeOf(byte(0))
+	StringAnyMapType         = reflect.TypeOf(map[string]any(nil))
 	JsonNumberType           = reflect.TypeOf(json.Number(""))
 	JsonUnsupportedValueType = reflect.TypeOf(new(json.UnsupportedValueError))
 )
@@ -32,6 +33,9 @@ var (
 	ErrorType                 = reflect.TypeOf((*error)(nil)).Elem()
 	JsonMarshalerType         = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	EncodingTextMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+	jsonAppenderMethodType    = reflect.TypeOf((*interface {
+		AppendJSON([]byte) ([]byte, error)
+	})(nil)).Elem()
 )
 
 func IsSimpleByte(vt reflect.Type) bool {
@@ -43,5 +47,5 @@ func IsSimpleByte(vt reflect.Type) bool {
 }
 
 func isEitherMarshaler(vt reflect.Type) bool {
-	return vt.Implements(JsonMarshalerType) || vt.Implements(EncodingTextMarshalerType)
+	return vt.Implements(JsonMarshalerType) || vt.Implements(EncodingTextMarshalerType) || vt.Implements(jsonAppenderMethodType)
 }
