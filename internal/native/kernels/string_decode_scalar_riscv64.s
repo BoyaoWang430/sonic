@@ -1,0 +1,694 @@
+//go:build riscv64 && go1.26 && !go1.28 && riscv64.rva22u64 && !riscv64.rva23u64
+
+#include "textflag.h"
+
+// Exact candidate mask in X6 for word X23 using Zbb ORCB:
+//   X9  = 0x8080808080808080 (high bits)
+//   X20 = 0x5c5c5c5c5c5c5c5c (backslash)
+//   X26 = 0xe0e0e0e0e0e0e0e0 (control mask: < 0x20 has top 3 bits zero)
+//   X28 = 0x2222222222222222 when (mode & 4) != 0, else 0x5c5c5c5c5c5c5c5c
+//   X30 = 0 when (mode & 8) != 0, else -1
+// All five registers remain live across every escape.
+#define DECODE_MASK(reg) \
+	XOR X20, reg, X6; \
+	XOR X28, reg, X5; \
+	ORCB X6, X6; \
+	ORCB X5, X5; \
+	AND X5, X6, X6; \
+	AND X26, reg, X5; \
+	ORCB X5, X5; \
+	OR X30, X5, X5; \
+	AND X5, X6, X6; \
+	ANDN X6, X9, X6
+
+#define UNQUOTE_MASK(reg) \
+	XOR X20, reg, X6; \
+	ORCB X6, X6; \
+	ANDN X6, X9, X6
+
+// func stringDecode(src *byte, size int, dst *byte, mode uint64) (end, written, escaped, errorPos, code int)
+// Complete string unquoting/parsing in one ABI0 call; FP (X8), g (X27), SP, and RA are preserved.
+// Loads/stores are bounded and may be unaligned.
+// X10/X11 input cursor/remaining; X12 output cursor; X13 mode.
+// X14/X15 input/output bases; X16 original length; X17 saw-escape.
+// X18 current Unicode escape's original offset; X19 first UTF-16/code point.
+// X22-X25 hex cursor/count/accumulator; X29 selects first/second UTF-16 unit.
+TEXT ·stringDecode(SB), NOSPLIT, $0-72
+	MOV	src+0(FP), X10
+	MOV	size+8(FP), X11
+	MOV	dst+16(FP), X12
+	MOV	mode+24(FP), X13
+	MOV	X10, X14
+	MOV	X12, X15
+	MOV	X11, X16
+	MOV	$0, X17
+
+	BEQZ	X11, decode_input_end
+	MOV	$4, X5
+	BLTU	X11, X5, decode_tiny
+
+	MOV	$0x8080808080808080, X9
+	MOV	$0x5c5c5c5c5c5c5c5c, X20
+	MOV	$0xe0e0e0e0e0e0e0e0, X26
+	MOV	X20, X28
+	AND	$4, X13, X5
+	BEQZ	X5, decode_init_ctrl
+	MOV	$0x2222222222222222, X28
+decode_init_ctrl:
+	MOV	$-1, X30
+	AND	$8, X13, X5
+	BEQZ	X5, decode_init_done
+	MOV	$0, X30
+decode_init_done:
+	MOV	$8, X5
+	BLTU	X11, X5, decode_short
+	JMP	decode_word
+
+	PCALIGN $64
+decode_word:
+	MOV	$8, X5
+	BLTU	X11, X5, decode_tail
+	MOV	(X10), X23
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_word_event
+	MOV	$32, X5
+	BLTU	X11, X5, decode_word_single
+	BEQ	X10, X12, decode_enter_inplace
+	MOV	X23, (X12)
+	JMP	decode_enter_bulk
+decode_word_single:
+	BEQ	X10, X12, decode_word_single_advance
+	MOV	X23, (X12)
+decode_word_single_advance:
+	ADD	$8, X10
+	ADD	$8, X12
+	SUB	$8, X11
+	JMP	decode_word
+
+decode_word_event:
+	CTZ	X6, X24
+	SRL	$3, X24, X24
+	BEQZ	X24, decode_special
+	BEQ	X10, X12, decode_word_event_advance
+	JMP	decode_word_short_copy
+decode_word_event_advance:
+	ADD	X24, X10
+	ADD	X24, X12
+	SUB	X24, X11
+	BEQZ	X6, decode_input_end
+
+decode_special:
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
+	MOV	$34, X5
+	BEQ	X21, X5, decode_quote
+	// Only parser validation puts a raw control into the special mask.
+	SUB	X14, X10, X6
+	MOV	$1, X7
+	JMP	decode_error
+
+decode_escape:
+	MOV	$1, X17
+	SUB	X14, X10, X18
+	MOV	$2, X5
+	BLTU	X11, X5, decode_eof
+	ADD	$2, X10
+	SUB	$2, X11
+	AND	$1, X13, X6
+	BEQZ	X6, decode_escape_letter
+	// Preserve native double-unquote's second escape and EOF rules exactly.
+	BEQZ	X11, decode_eof
+	MOVBU	-1(X10), X21
+	MOV	$92, X5
+	BNE	X21, X5, decode_escape_letter
+	MOVBU	(X10), X21
+	BNE	X21, X5, decode_double_skip
+	MOV	$2, X6
+	BLTU	X11, X6, decode_eof
+	MOVBU	1(X10), X21
+	BEQ	X21, X5, decode_double_extra
+	MOV	$34, X5
+	BEQ	X21, X5, decode_double_extra
+	SUB	X14, X10, X6
+	ADD	$1, X6
+	MOV	$2, X7                  // native ERR_INVALID_CHAR
+	JMP	decode_error
+decode_double_extra:
+	ADD	$1, X10
+	SUB	$1, X11
+decode_double_skip:
+	ADD	$1, X10
+	SUB	$1, X11
+decode_escape_letter:
+	MOVBU	-1(X10), X21
+	MOV	$117, X5                // u
+	BEQ	X21, X5, decode_unicode
+	MOV	$128, X5
+	BGEU	X21, X5, decode_invalid_escape
+	MOV	$decodeSimpleEscapes<>(SB), X5
+	ADD	X21, X5
+	MOVBU	(X5), X21
+	BNEZ	X21, decode_emit_byte
+decode_invalid_escape:
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_escape
+	SUB	X14, X10, X6
+	SUB	$1, X6
+	MOV	$3, X7                  // native ERR_INVALID_ESCAPE
+	JMP	decode_error
+decode_parser_escape:
+	MOV	X18, X6
+	MOV	$2, X7
+	JMP	decode_error
+decode_emit_byte:
+	MOVB	X21, (X12)
+	ADD	$1, X12
+
+decode_resume:
+	// Adjacent escapes bypass word loads; otherwise X9/X20/X26/X28/X30 are
+	// still live in registers, so resume word/short scanning directly.
+	BEQZ	X11, decode_input_end
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
+	MOV	$8, X5
+	BGEU	X11, X5, decode_word
+	JMP	decode_short_plain
+
+	// Align the Unicode entry so its four-digit loop fits in one cache line.
+	// All entries branch past the padding, including the second UTF-16 unit.
+	PCALIGN $64
+decode_unicode:
+	MOV	$4, X5
+	BLTU	X11, X5, decode_eof
+	MOV	X10, X22
+	MOV	$0, X29                 // first UTF-16 unit
+decode_hex_start:
+	MOV	$decodeHexDigits<>(SB), X5
+	MOVBU	0(X22), X21
+	MOVBU	1(X22), X23
+	MOVBU	2(X22), X25
+	MOVBU	3(X22), X6
+	ADD	X5, X21
+	ADD	X5, X23
+	ADD	X5, X25
+	ADD	X5, X6
+	MOVBU	0(X21), X21
+	MOVBU	0(X23), X23
+	MOVBU	0(X25), X25
+	MOVBU	0(X6), X6
+	AND	X21, X23, X7
+	AND	X25, X6, X5
+	AND	X5, X7, X7
+	AND	$16, X7
+	BEQZ	X7, decode_hex_slow
+	SLL	$12, X21, X24
+	SLL	$8, X23, X5
+	ADD	X5, X24
+	SLL	$4, X25, X5
+	ADD	X5, X24
+	ADD	X6, X24
+	MOV	$0x11110, X5
+	SUB	X5, X24
+	BNEZ	X29, decode_second_unit
+	MOV	X24, X19
+	ADD	$4, X10
+	SUB	$4, X11
+
+decode_codepoint:
+	MOV	$0x80, X5
+	BLTU	X19, X5, decode_ascii
+	MOV	$0x800, X5
+	BLTU	X19, X5, decode_two
+	MOV	$0xd800, X5
+	BLTU	X19, X5, decode_three
+	MOV	$0xe000, X5
+	BGEU	X19, X5, decode_three
+	// A surrogate. Double-unquote consumes one extra backslash before
+	// inspecting the second escape, including its native replacement cases.
+	AND	$1, X13, X5
+	BEQZ	X5, decode_surrogate
+	BNEZ	X11, decode_double_surrogate
+	AND	$2, X13, X5
+	BEQZ	X5, decode_eof
+	JMP	decode_replace
+decode_double_surrogate:
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BNE	X21, X5, decode_surrogate
+	ADD	$1, X10
+	SUB	$1, X11
+decode_surrogate:
+	MOV	$6, X5
+	BLTU	X11, X5, decode_unpaired
+	MOV	$0xdc00, X5
+	BGEU	X19, X5, decode_unpaired
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BNE	X21, X5, decode_unpaired
+	MOVBU	1(X10), X21
+	MOV	$117, X5
+	BNE	X21, X5, decode_unpaired
+	// Keep the second escape's original position for parser error mapping.
+	SUB	X14, X10, X18
+	ADD	$2, X10, X22
+	MOV	$1, X29
+	JMP	decode_hex_start
+
+decode_second_unit:
+	ADD	$6, X10
+	SUB	$6, X11
+	MOV	$0xdc00, X5
+	BLTU	X24, X5, decode_not_low
+	MOV	$0xe000, X5
+	BGEU	X24, X5, decode_not_low
+	MOV	$0xd800, X5
+	SUB	X5, X19
+	SLL	$10, X19
+	MOV	$0xdc00, X5
+	SUB	X5, X24
+	MOV	$0x10000, X5
+	ADD	X5, X24
+	ADD	X24, X19
+	JMP	decode_four
+decode_not_low:
+	AND	$2, X13, X5
+	BNEZ	X5, decode_replace_then_retry
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_unicode
+	SUB	X14, X10, X6
+	SUB	$4, X6
+	MOV	$4, X7
+	JMP	decode_error
+decode_replace_then_retry:
+	MOV	$0xef, X21
+	MOVB	X21, 0(X12)
+	MOV	$0xbf, X21
+	MOVB	X21, 1(X12)
+	MOV	$0xbd, X21
+	MOVB	X21, 2(X12)
+	ADD	$3, X12
+	MOV	X24, X19
+	JMP	decode_codepoint
+
+decode_unpaired:
+	AND	$2, X13, X5
+	BNEZ	X5, decode_replace
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_unicode
+	SUB	X14, X10, X6
+	SUB	$4, X6
+	AND	$1, X13, X5
+	SUB	X5, X6
+	MOV	$4, X7
+	JMP	decode_error
+decode_replace:
+	MOV	$0xfffd, X19
+	JMP	decode_three
+decode_hex_slow:
+	BEQZ	X21, decode_bad_hex
+	ADD	$1, X22
+	BEQZ	X23, decode_bad_hex
+	ADD	$1, X22
+	BEQZ	X25, decode_bad_hex
+	ADD	$1, X22
+decode_bad_hex:
+	AND	$4, X13, X5
+	BNEZ	X5, decode_parser_unicode
+	SUB	X14, X22, X6
+	MOV	$2, X7
+	JMP	decode_error
+decode_parser_unicode:
+	MOV	X18, X6
+	MOV	$12, X7
+	JMP	decode_error
+
+decode_ascii:
+	MOVB	X19, (X12)
+	ADD	$1, X12
+	JMP	decode_resume
+decode_two:
+	SRL	$6, X19, X21
+	OR	$0xc0, X21
+	MOVB	X21, 0(X12)
+	AND	$0x3f, X19, X21
+	OR	$0x80, X21
+	MOVB	X21, 1(X12)
+	ADD	$2, X12
+	JMP	decode_resume
+decode_three:
+	SRL	$12, X19, X21
+	OR	$0xe0, X21
+	MOVB	X21, 0(X12)
+	SRL	$6, X19, X21
+	AND	$0x3f, X21
+	OR	$0x80, X21
+	MOVB	X21, 1(X12)
+	AND	$0x3f, X19, X21
+	OR	$0x80, X21
+	MOVB	X21, 2(X12)
+	ADD	$3, X12
+	JMP	decode_resume
+decode_four:
+	SRL	$18, X19, X21
+	OR	$0xf0, X21
+	MOVB	X21, 0(X12)
+	SRL	$12, X19, X21
+	AND	$0x3f, X21
+	OR	$0x80, X21
+	MOVB	X21, 1(X12)
+	SRL	$6, X19, X21
+	AND	$0x3f, X21
+	OR	$0x80, X21
+	MOVB	X21, 2(X12)
+	AND	$0x3f, X19, X21
+	OR	$0x80, X21
+	MOVB	X21, 3(X12)
+	ADD	$4, X12
+	JMP	decode_resume
+
+// Once the remaining input is small, keep its bytes in this loop instead of
+// repeating the word-length dispatch for every byte. X21 may
+// already contain the current non-backslash byte from short/resume dispatch.
+decode_tiny:
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
+decode_tiny_loaded:
+	AND	$4, X13, X5
+	BEQZ	X5, decode_tiny_plain
+	MOV	$34, X5
+	BEQ	X21, X5, decode_quote
+	AND	$8, X13, X5
+	BEQZ	X5, decode_tiny_plain
+	MOV	$32, X5
+	BLTU	X21, X5, decode_special
+decode_tiny_plain:
+	BEQ	X10, X12, decode_tiny_advance
+	MOVB	X21, (X12)
+decode_tiny_advance:
+	ADD	$1, X10
+	ADD	$1, X12
+	SUB	$1, X11
+	BNEZ	X11, decode_tiny
+
+decode_input_end:
+	AND	$4, X13, X5
+	BNEZ	X5, decode_eof
+	MOV	X16, X5
+	JMP	decode_success
+decode_quote:
+	SUB	X14, X10, X5
+	ADD	$1, X5
+decode_success:
+	MOV	$-1, X6
+	MOV	$0, X7
+	JMP	decode_done
+decode_eof:
+	MOV	X16, X6
+	MOV	$1, X7
+	AND	$4, X13, X5
+	BEQZ	X5, decode_error
+	MOV	$5, X7
+decode_error:
+	MOV	X6, X5
+decode_done:
+	SUB	X15, X12, X28
+	MOV	X5, end+32(FP)
+	MOV	X28, written+40(FP)
+	MOV	X17, escaped+48(FP)
+	MOV	X6, errorPos+56(FP)
+	MOV	X7, code+64(FP)
+	RET
+
+// The source word is already loaded, so exact-width stores are safe even
+// when in-place decoding has brought the output just behind the input.
+decode_word_short_copy:
+	ADD	X24, X12, X5
+	MOV	$4, X7
+	BLTU	X24, X7, decode_word_short_lt4
+	MOVW	X23, (X12)
+	ADD	$-4, X24, X7
+	SLL	$3, X7
+	SRL	X7, X23
+	MOVW	X23, -4(X5)
+	JMP	decode_word_short_done
+decode_word_short_lt4:
+	MOV	$1, X7
+	BEQ	X24, X7, decode_word_short_1
+	MOVH	X23, (X12)
+	ADD	$-2, X24, X7
+	SLL	$3, X7
+	SRL	X7, X23
+	MOVH	X23, -2(X5)
+	JMP	decode_word_short_done
+decode_word_short_1:
+	MOVB	X23, (X12)
+decode_word_short_done:
+	ADD	X24, X10
+	MOV	X5, X12
+	SUB	X24, X11
+	BEQZ	X6, decode_input_end
+	JMP	decode_special
+
+// Reached after consuming a complete ordinary word. The final eight input
+// bytes are in bounds, even when an earlier escape contracted in-place output.
+// Discard the consumed prefix BEFORE classification.
+decode_tail:
+	BEQZ	X11, decode_input_end
+	BNEZ	X17, decode_tail_contracted
+	ADD	X11, X10, X5
+	MOV	-8(X5), X23
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_tail_uncontracted_event
+	BEQ	X10, X12, decode_tail_done
+	ADD	X11, X12
+	MOV	X23, -8(X12)
+	JMP	decode_input_end
+decode_tail_done:
+	ADD	X11, X12
+	JMP	decode_input_end
+decode_tail_uncontracted_event:
+	MOV	$8, X5
+	SUB	X11, X5
+	SLL	$3, X5
+	SRL	X5, X23
+	SRL	X5, X6
+	JMP	decode_word_event
+decode_tail_contracted:
+	MOV	$4, X5
+	BLTU	X11, X5, decode_tiny
+	ADD	X11, X10, X5
+	MOV	-8(X5), X23
+	MOV	$8, X5
+	SUB	X11, X5
+	SLL	$3, X5
+	SRL	X5, X23
+	// Fill unused lanes with ff, which is neither an escape nor a control.
+	MOV	$-1, X6
+	SRL	X5, X6
+	XOR	$-1, X6
+	OR	X6, X23
+	MOV	X11, X24
+	JMP	decode_word_classify_tail
+
+// A short input or post-escape suffix has no guaranteed preceding clean word.
+// For 4..7 bytes, two bounded four-byte loads construct its complete value;
+// overlapping bytes agree because both loads precede any output stores.
+decode_short:
+	MOVBU	(X10), X21
+	MOV	$92, X5
+	BEQ	X21, X5, decode_escape
+decode_short_plain:
+	MOV	$4, X5
+	BLTU	X11, X5, decode_tiny_loaded
+	MOVWU	(X10), X23
+	ADD	X11, X10, X5
+	MOVWU	-4(X5), X6
+	ADD	$-4, X11, X7
+	SLL	$3, X7
+	SLL	X7, X6
+	OR	X6, X23
+	ADD	$32, X7
+	MOV	$-1, X6
+	SLL	X7, X6
+	OR	X6, X23
+	MOV	X11, X24
+decode_word_classify_tail:
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_word_event
+	BEQ	X10, X12, decode_tail_advance
+	JMP	decode_word_short_copy
+decode_tail_advance:
+	ADD	X24, X10
+	ADD	X24, X12
+	SUB	X24, X11
+	JMP	decode_input_end
+
+decode_enter_bulk:
+	BNE	X11, X16, decode_select_bulk_next
+	AND	$7, X10, X5
+	BEQZ	X5, decode_select_bulk_next
+	MOV	$8, X7
+	SUB	X5, X7, X7
+	ADD	X7, X10
+	ADD	X7, X12
+	SUB	X7, X11
+	MOV	$32, X5
+	BLTU	X11, X5, decode_word
+	AND	$12, X13, X5
+	BEQZ	X5, decode_unquote_bulk
+	JMP	decode_bulk
+decode_select_bulk_next:
+	AND	$12, X13, X5
+	BEQZ	X5, decode_unquote_bulk_next
+	JMP	decode_bulk_next
+
+decode_enter_inplace:
+	BNE	X11, X16, decode_bulk_inplace_next
+	AND	$7, X10, X5
+	BEQZ	X5, decode_bulk_inplace_next
+	MOV	$8, X7
+	SUB	X5, X7, X7
+	ADD	X7, X10
+	ADD	X7, X12
+	SUB	X7, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_bulk_inplace
+	JMP	decode_word
+
+	PCALIGN $64
+decode_unquote_bulk:
+	MOV	0(X10), X23
+	MOV	8(X10), X21
+	UNQUOTE_MASK(X23)
+	BNEZ	X6, decode_word_event
+	MOV	16(X10), X22
+	MOV	X23, 0(X12)
+	UNQUOTE_MASK(X21)
+	BNEZ	X6, decode_bulk_event_8_preload
+	MOV	24(X10), X23
+	MOV	X21, 8(X12)
+	JMP	decode_unquote_bulk_third
+decode_unquote_bulk_next:
+	MOV	8(X10), X23
+	UNQUOTE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_8
+	MOV	16(X10), X22
+	MOV	24(X10), X21
+	MOV	X23, 8(X12)
+	MOV	X21, X23
+decode_unquote_bulk_third:
+	UNQUOTE_MASK(X22)
+	BNEZ	X6, decode_bulk_event_16
+	MOV	X22, 16(X12)
+	UNQUOTE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_24
+	MOV	X23, 24(X12)
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_unquote_bulk
+	JMP	decode_word
+
+	PCALIGN $64
+decode_bulk:
+	MOV	0(X10), X23
+	MOV	8(X10), X21
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_word_event
+	MOV	16(X10), X22
+	MOV	X23, 0(X12)
+	DECODE_MASK(X21)
+	BNEZ	X6, decode_bulk_event_8_preload
+	MOV	24(X10), X23
+	MOV	X21, 8(X12)
+	JMP	decode_bulk_third
+decode_bulk_next:
+	MOV	8(X10), X23
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_8
+	MOV	16(X10), X22
+	MOV	24(X10), X21
+	MOV	X23, 8(X12)
+	MOV	X21, X23
+decode_bulk_third:
+	DECODE_MASK(X22)
+	BNEZ	X6, decode_bulk_event_16
+	MOV	X22, 16(X12)
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_24
+	MOV	X23, 24(X12)
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_bulk
+	JMP	decode_word
+
+	PCALIGN $64
+decode_bulk_inplace:
+	MOV	0(X10), X23
+	MOV	8(X10), X21
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_word_event
+	MOV	16(X10), X22
+	DECODE_MASK(X21)
+	BNEZ	X6, decode_bulk_event_8_preload
+	MOV	24(X10), X23
+	JMP	decode_bulk_inplace_third
+decode_bulk_inplace_next:
+	MOV	8(X10), X23
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_8
+	MOV	16(X10), X22
+	MOV	24(X10), X23
+decode_bulk_inplace_third:
+	DECODE_MASK(X22)
+	BNEZ	X6, decode_bulk_event_16
+	DECODE_MASK(X23)
+	BNEZ	X6, decode_bulk_event_24
+	ADD	$32, X10
+	ADD	$32, X12
+	SUB	$32, X11
+	MOV	$32, X5
+	BGEU	X11, X5, decode_bulk_inplace
+	JMP	decode_word
+
+decode_bulk_event_8_preload:
+	MOV	X21, X23
+decode_bulk_event_8:
+	MOV	$8, X7
+	JMP	decode_bulk_event
+decode_bulk_event_16:
+	MOV	X22, X23
+	MOV	$16, X7
+	JMP	decode_bulk_event
+decode_bulk_event_24:
+	MOV	$24, X7
+decode_bulk_event:
+	ADD	X7, X10
+	ADD	X7, X12
+	SUB	X7, X11
+	JMP	decode_word_event
+
+#undef UNQUOTE_MASK
+#undef DECODE_MASK
+
+DATA decodeSimpleEscapes<>+34(SB)/1, $34
+DATA decodeSimpleEscapes<>+47(SB)/1, $47
+DATA decodeSimpleEscapes<>+92(SB)/1, $92
+DATA decodeSimpleEscapes<>+98(SB)/1, $8
+DATA decodeSimpleEscapes<>+102(SB)/1, $12
+DATA decodeSimpleEscapes<>+110(SB)/1, $10
+DATA decodeSimpleEscapes<>+114(SB)/1, $13
+DATA decodeSimpleEscapes<>+116(SB)/1, $9
+GLOBL decodeSimpleEscapes<>(SB), RODATA|NOPTR, $128
+
+DATA decodeHexDigits<>+48(SB)/8, $0x1716151413121110
+DATA decodeHexDigits<>+56(SB)/2, $0x1918
+DATA decodeHexDigits<>+65(SB)/8, $0x00001f1e1d1c1b1a
+DATA decodeHexDigits<>+97(SB)/8, $0x00001f1e1d1c1b1a
+GLOBL decodeHexDigits<>(SB), RODATA|NOPTR, $256

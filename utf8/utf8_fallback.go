@@ -1,5 +1,4 @@
-//go:build (!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)
-// +build !amd64,!arm64 go1.28 !go1.17 arm64,!go1.20
+//go:build ((!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -35,4 +34,28 @@ func Validate(src []byte) bool {
 // This is used when native UTF-8 validation is not available.
 func ValidateString(src string) bool {
 	return utf8.Valid(rt.Str2Mem(src))
+}
+
+// CorrectWith replaces each invalid UTF-8 byte in src with repl and appends to dst.
+func CorrectWith(dst []byte, src []byte, repl string) []byte {
+	start := 0
+	for i := 0; i < len(src); {
+		if src[i] < utf8.RuneSelf {
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(src[i:])
+		if r == utf8.RuneError && size == 1 {
+			dst = append(dst, src[start:i]...)
+			dst = append(dst, repl...)
+			i++
+			start = i
+			continue
+		}
+		i += size
+	}
+	if start < len(src) {
+		dst = append(dst, src[start:]...)
+	}
+	return dst
 }
