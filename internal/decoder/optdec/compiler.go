@@ -29,6 +29,8 @@ func findOrCompile(vt *rt.GoType) (decFunc, error) {
 
 type compiler struct {
 	visited  map[reflect.Type]bool
+	compiled map[reflect.Type]decFunc
+	recDecs  []*recuriveDecoder
 	depth    int
 	counts   int
 	opts     option.CompileOptions
@@ -37,8 +39,9 @@ type compiler struct {
 
 func newCompiler() *compiler {
 	return &compiler{
-		visited: make(map[reflect.Type]bool),
-		opts:    option.DefaultCompileOptions(),
+		visited:  make(map[reflect.Type]bool),
+		compiled: make(map[reflect.Type]decFunc),
+		opts:     option.DefaultCompileOptions(),
 	}
 }
 
@@ -99,17 +102,28 @@ func (c *compiler) rescue(ep *error) {
 	}
 }
 
-func (c *compiler) compileType(vt reflect.Type) (rt decFunc, err error) {
+func (c *compiler) newRecursiveDecoder(vt reflect.Type) *recuriveDecoder {
+	r := &recuriveDecoder{
+		typ: rt.UnpackType(vt),
+	}
+	c.recDecs = append(c.recDecs, r)
+	return r
+}
+
+func (c *compiler) compileType(vt reflect.Type) (ret decFunc, err error) {
 	defer c.rescue(&err)
-	rt = c.compile(vt)
-	return rt, err
+	ret = c.compile(vt)
+	for _, r := range c.recDecs {
+		if target, ok := c.compiled[r.typ.Pack()]; ok {
+			r.bind(target)
+		}
+	}
+	return ret, err
 }
 
 func (c *compiler) compile(vt reflect.Type) decFunc {
 	if c.visited[vt] {
-		return &recuriveDecoder{
-			typ: rt.UnpackType(vt),
-		}
+		return c.newRecursiveDecoder(vt)
 	}
 
 	dec := c.tryCompilePtrUnmarshaler(vt, false)
@@ -268,10 +282,13 @@ func (c *compiler) compileSlice(vt reflect.Type) decFunc {
 		return &sliceStringDecoder{}
 	}
 
+	ed := c.compile(vt.Elem())
+	sd, _ := ed.(*structDecoder)
 	return &sliceDecoder{
-		elemType: rt.UnpackType(vt.Elem()),
-		elemDec:  c.compile(vt.Elem()),
-		typ:      vt,
+		elemType:  rt.UnpackType(vt.Elem()),
+		elemDec:   ed,
+		structDec: sd,
+		typ:       vt,
 	}
 }
 
@@ -436,12 +453,20 @@ func (c *compiler) compileMapKey(vt reflect.Type) decKey {
 
 // maybe vt is a named type, and not a pointer receiver, see issue 379
 func (c *compiler) tryCompilePtrUnmarshaler(vt reflect.Type, strOpt bool) decFunc {
+	if noCopyRawMessageType != nil && rt.UnpackType(vt) == noCopyRawMessageType {
+		return &noCopyRawMessageDecoder{strOpt: strOpt}
+	}
+	if vt == jsonRawMessageGoType && !strOpt {
+		return &rawMessageDecoder{}
+	}
 	pt := reflect.PtrTo(vt)
 
 	/* check for `json.Unmarshaler` with pointer receiver */
 	if pt.Implements(jsonUnmarshalerType) {
+		upt := rt.UnpackType(pt)
 		return &unmarshalJSONDecoder{
-			typ:    rt.UnpackType(pt),
+			typ:    upt,
+			itab:   rt.GetItab(rt.IfaceType(rt.UnpackType(jsonUnmarshalerType)), upt, true),
 			strOpt: strOpt,
 		}
 	}
@@ -452,8 +477,10 @@ func (c *compiler) tryCompilePtrUnmarshaler(vt reflect.Type, strOpt bool) decFun
 		if strOpt {
 			panicForInvalidStrType(vt)
 		}
+		upt := rt.UnpackType(pt)
 		return &unmarshalTextDecoder{
-			typ: rt.UnpackType(pt),
+			typ:  upt,
+			itab: rt.GetItab(rt.IfaceType(rt.UnpackType(encodingTextUnmarshalerType)), upt, true),
 		}
 	}
 

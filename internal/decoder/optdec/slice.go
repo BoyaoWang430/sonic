@@ -8,9 +8,10 @@ import (
 )
 
 type sliceDecoder struct {
-	elemType *rt.GoType
-	elemDec  decFunc
-	typ      reflect.Type
+	elemType  *rt.GoType
+	elemDec   decFunc
+	structDec *structDecoder
+	typ       reflect.Type
 }
 
 var (
@@ -28,19 +29,33 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 		return error_mismatch(node, ctx, d.typ)
 	}
 
-	slice := rt.MakeSlice(vp, d.elemType, arr.Len())
+	size := arr.Len()
+	slice := rt.MakeSlice(vp, d.elemType, size)
 	elems := slice.Ptr
+	elemSize := d.elemType.Size
 	next := arr.Children()
 
 	var gerr error
-	for i := 0; i < arr.Len(); i++ {
-		val := NewNode(next)
-		elem := unsafe.Pointer(uintptr(elems) + uintptr(i)*d.elemType.Size)
-		err := d.elemDec.FromDom(elem, val, ctx)
-		if gerr == nil && err != nil {
-			gerr = err
+	if sd := d.structDec; sd != nil {
+		for i := 0; i < size; i++ {
+			val := NewNode(next)
+			elem := unsafe.Add(elems, uintptr(i)*elemSize)
+			err := sd.FromDom(elem, val, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = val.Next()
 		}
-		next = val.Next()
+	} else {
+		for i := 0; i < size; i++ {
+			val := NewNode(next)
+			elem := unsafe.Add(elems, uintptr(i)*elemSize)
+			err := d.elemDec.FromDom(elem, val, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = val.Next()
+		}
 	}
 
 	*(*rt.GoSlice)(vp) = *slice

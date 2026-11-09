@@ -3,28 +3,40 @@ package optdec
 import (
 	"encoding/json"
 	"strconv"
+	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native"
 	"github.com/bytedance/sonic/internal/native/types"
+	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/internal/utils"
 )
 
 func SkipNumberFast(json string, start int) (int, bool) {
 	// find the number ending, we parsed in native, it always valid
 	pos := start
-	for pos < len(json) && json[pos] != ']' && json[pos] != '}' && json[pos] != ',' {
-		if json[pos] >= '0' && json[pos] <= '9' || json[pos] == '.' || json[pos] == '-' || json[pos] == '+' || json[pos] == 'e' || json[pos] == 'E' {
-			pos += 1
+	base := unsafe.Pointer(rt.StringData(json))
+	for pos+8 <= len(json) {
+		w := *(*uint64)(unsafe.Add(base, pos))
+		if (w&0xf0f0f0f0f0f0f0f0)|(((w+0x0606060606060606)&0xf0f0f0f0f0f0f0f0)>>4) == 0x3333333333333333 {
+			pos += 8
+			continue
+		}
+		c := json[pos]
+		if c >= '0' && c <= '9' || c == '.' || c == '-' || c == '+' || c|0x20 == 'e' {
+			pos++
+			continue
+		}
+		return pos, pos != start
+	}
+	for pos < len(json) {
+		c := json[pos]
+		if c >= '0' && c <= '9' || c == '.' || c == '-' || c == '+' || c|0x20 == 'e' {
+			pos++
 		} else {
 			break
 		}
 	}
-
-	// if not found number, return false
-	if pos == start {
-		return pos, false
-	}
-	return pos, true
+	return pos, pos != start
 }
 
 // pos is the start index of the raw

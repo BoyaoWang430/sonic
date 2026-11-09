@@ -5,6 +5,7 @@ import (
 	"unsafe"
 
 	"encoding/json"
+	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/decoder/consts"
 	"github.com/bytedance/sonic/internal/decoder/errors"
 	"github.com/bytedance/sonic/internal/rt"
@@ -38,6 +39,14 @@ const (
 )
 
 func Decode(s *string, i *int, f uint64, val interface{}) error {
+	return DecodeWithSession(s, i, f, val, nil)
+}
+
+func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **InputSession) error {
+	var sess *InputSession
+	if sessPtr != nil {
+		sess = *sessPtr
+	}
 	vv := rt.UnpackEface(val)
 	vp := vv.Value
 
@@ -66,21 +75,48 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 	}
 
 	/* parse into document */
-	ctx, err := NewContext(*s, *i, uint64(f), etp)
+	origPos := *i
+	ctx, err := NewContextWithSession(*s, origPos, uint64(f), etp, sess)
 	defer ctx.Delete()
 	if ctx.Parser.Utf8Inv {
-		*s = ctx.Parser.Json
+		*s = parserCorrectedSource(ctx.Parser, *s, origPos)
 	}
 	if err != nil {
+		if sess != nil {
+			*sess = InputSession{}
+		}
 		goto fix_error
 	}
 	err = dec.FromDom(vp, ctx.Root(), &ctx)
 
 fix_error:
-	err = fix_error(*s, *i, err)
+	err = fix_error(*s, origPos, err)
 
-	// update position at last
-	*i += ctx.Parser.Pos()
+	newPos := origPos + ctx.Parser.Pos()
+	if sessPtr != nil {
+		if err != nil {
+			*sessPtr = nil
+		} else if hasMoreJSONTokens(*s, newPos) {
+			if ctx.Parser.sessionPadded == nil {
+				if sess == nil {
+					sess = &InputSession{}
+					*sessPtr = sess
+				}
+				sess.src = *s
+				sess.base = origPos
+				sess.padded = ctx.Parser.padded
+				sess.utf8Checked = (f & (1 << _F_validate_string)) != 0
+				ctx.Parser.padded = ctx.Parser.paddedBackup
+				ctx.Parser.paddedBackup = nil
+			}
+		} else if sess != nil {
+			if sess.padded != nil && uintptr(cap(sess.padded)) <= maxPooledJsonPaddedCap && ctx.Parser.padded == nil {
+				ctx.Parser.padded = sess.padded[:0]
+			}
+			*sessPtr = nil
+		}
+	}
+	*i = newPos
 	return err
 }
 
@@ -132,42 +168,40 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return pretouchRec(vtm, cfg)
 }
 
-func pretouchType(_vt reflect.Type, opts option.CompileOptions) (map[reflect.Type]bool, error) {
-	/* compile function */
-	compiler := newCompiler().apply(opts)
-	decoder := func(vt *rt.GoType, _ ...interface{}) (interface{}, error) {
-		if f, err := compiler.compileType(_vt); err != nil {
-			return nil, err
-		} else {
-			return f, nil
-		}
-	}
-
-	/* find or compile */
-	vt := rt.UnpackType(_vt)
-	if val := programCache.Get(vt); val != nil {
-		return nil, nil
-	} else if _, err := programCache.Compute(vt, decoder); err == nil {
-		return compiler.visited, nil
-	} else {
-		return nil, err
-	}
+func ResetProgramCache() {
+	programCache.Reset()
 }
 
 func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
 		return nil
 	}
-	next := make(map[reflect.Type]bool)
-	for vt := range vtm {
-		sub, err := pretouchType(vt, opts)
-		if err != nil {
-			return err
+	seen := make(map[*rt.GoType]struct{}, len(vtm))
+	var batch []caching.ProgramBatchItem
+	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
+		next := make(map[reflect.Type]bool)
+		for vt := range vtm {
+			gvt := rt.UnpackType(vt)
+			if _, ok := seen[gvt]; ok {
+				continue
+			}
+			seen[gvt] = struct{}{}
+			if programCache.Get(gvt) != nil {
+				continue
+			}
+			compiler := newCompiler().apply(opts)
+			f, err := compiler.compileType(vt)
+			if err != nil {
+				return err
+			}
+			batch = append(batch, caching.ProgramBatchItem{Vt: gvt, Fn: f})
+			for svt := range compiler.visited {
+				next[svt] = true
+			}
 		}
-		for svt := range sub {
-			next[svt] = true
-		}
+		opts.RecursiveDepth--
+		vtm = next
 	}
-	opts.RecursiveDepth -= 1
-	return pretouchRec(next, opts)
+	programCache.PutMany(batch)
+	return nil
 }

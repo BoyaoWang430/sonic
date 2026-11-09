@@ -64,9 +64,10 @@ func (self *Decoder) SetOptions(opts Options) {
 
 // Decoder is the decoder context object
 type Decoder struct {
-	i int
-	f uint64
-	s string
+	i    int
+	f    uint64
+	s    string
+	sess *inputSession
 }
 
 // NewDecoder creates a new decoder instance.
@@ -82,6 +83,7 @@ func (self *Decoder) Pos() int {
 func (self *Decoder) Reset(s string) {
 	self.s = s
 	self.i = 0
+	self.sess = nil
 	// self.f = 0
 }
 
@@ -111,7 +113,7 @@ func (self *Decoder) CheckTrailings() error {
 // Decode parses the JSON-encoded data from current position and stores the result
 // in the value pointed to by val.
 func (self *Decoder) Decode(val interface{}) error {
-	return decodeImpl(&self.s, &self.i, self.f, val)
+	return decodeSessionImpl(&self.s, &self.i, self.f, val, &self.sess)
 }
 
 // UseInt64 indicates the Decoder to unmarshal an integer into an interface{} as an

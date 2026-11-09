@@ -1,16 +1,13 @@
 package optdec
 
 import (
-	"fmt"
 	"reflect"
 	"unsafe"
 
 	"sync"
 
-	"github.com/bytedance/sonic/internal/native"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
-	"github.com/bytedance/sonic/utf8"
 )
 
 type ErrorCode int
@@ -53,6 +50,29 @@ var ParsingErrors = []string{
 
 func (code ErrorCode) Error() string {
 	return ParsingErrors[code]
+}
+
+// scanStopReason classifies why a bounded scan pass returned to Go.
+type scanStopReason uint8
+
+const (
+	scanStopDone scanStopReason = iota
+	scanStopNodeCapExhausted
+	scanStopTextCapExhausted
+	scanStopBudgetExhausted
+	scanStopNeedMore
+	scanStopSyntaxError
+)
+
+func classifyScanStop(code ErrorCode) scanStopReason {
+	switch code {
+	case SONIC_OK:
+		return scanStopDone
+	case SONIC_VISIT_FAILED:
+		return scanStopNodeCapExhausted
+	default:
+		return scanStopSyntaxError
+	}
 }
 
 type node struct {
@@ -100,9 +120,12 @@ type Parser struct {
 	_nbk  _nospaceBlock
 
 	// node buffer cursor
-	nbuf    nodeBuf
-	Utf8Inv bool
-	isEface bool
+	nbuf          nodeBuf
+	Utf8Inv       bool
+	isEface       bool
+	paddedBackup  []byte
+	sessionPadded []byte
+	unesc         []byte
 }
 
 // only when parse non-empty object/array are needed.
@@ -117,8 +140,10 @@ type jsonStat struct {
 }
 
 var (
-	defaultJsonPaddedCap uintptr = 1 << 20                           // 1 Mb
-	defaultNodesCap      uintptr = (1 << 20) / unsafe.Sizeof(node{}) // 1 Mb
+	defaultJsonPaddedCap   uintptr = 64 << 10                          // 64 KB initial pool buffer
+	defaultNodesCap        uintptr = (64 << 10) / unsafe.Sizeof(node{}) // 4096 nodes (64 KB) initial pool buffer
+	maxPooledJsonPaddedCap uintptr = 1 << 20                           // 1 MB max pooled padded buffer
+	maxPooledNodesCap      uintptr = (64 << 10) / unsafe.Sizeof(node{}) // 4096 nodes (64 KB) max pooled node buffer
 )
 
 var parsePool sync.Pool = sync.Pool{
@@ -135,28 +160,7 @@ var parsePool sync.Pool = sync.Pool{
 var padding string = "x\"x\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
 func newParser(data string, pos int, opt uint64) *Parser {
-	p := parsePool.Get().(*Parser)
-
-	/* validate json if needed */
-	if (opt&(1<<_F_validate_string)) != 0 && !utf8.ValidateString(data) {
-		dbuf := utf8.CorrectWith(nil, rt.Str2Mem(data[pos:]), "\ufffd")
-		dbuf = append(dbuf, padding...)
-		p.Json = rt.Mem2Str(dbuf[:len(dbuf)-len(padding)])
-		p.Utf8Inv = true
-		p.start = uintptr((*rt.GoString)(unsafe.Pointer(&p.Json)).Ptr)
-	} else {
-		p.Json = data
-		// TODO: prevent too large JSON
-		p.padded = append(p.padded, data[pos:]...)
-		p.padded = append(p.padded, padding...)
-		p.start = uintptr((*rt.GoSlice)(unsafe.Pointer(&p.padded)).Ptr)
-	}
-
-	p.cur = p.start
-	p.end = p.cur + uintptr(len(p.Json))
-	p.options = opt
-	p.nbuf.init(p.nodes)
-	return p
+	return newParserImpl(data, pos, opt)
 }
 
 func (p *Parser) Pos() int {
@@ -164,11 +168,46 @@ func (p *Parser) Pos() int {
 }
 
 func (p *Parser) JsonBytes() []byte {
-	if p.Utf8Inv {
-		return (rt.Str2Mem(p.Json))
-	} else {
-		return p.padded
+	return parserJSONBytes(p)
+}
+
+// rawSlice returns a zero-copy substring of the source JSON document [start:end].
+func (p *Parser) rawSlice(start, end int) string {
+	return p.Json[start:end]
+}
+
+// strRefCommon returns a zero-copy string view of an unescaped JSON string token.
+func (p *Parser) strRefCommon(off, length int) string {
+	return p.Json[off : off+length]
+}
+
+// strCommon returns an unescaped JSON string token, copying if copyStr is true.
+func (p *Parser) strCommon(off, length int, copyStr bool) string {
+	s := p.Json[off : off+length]
+	if !copyStr {
+		return s
 	}
+	return string(rt.Str2Mem(s))
+}
+
+// bytesEscaped returns the decoded byte slice for an escaped JSON string token.
+func (p *Parser) bytesEscaped(off int, val uint64) []byte {
+	if p.unesc != nil {
+		uoff := int(val >> 32)
+		ulen := int(uint32(val))
+		return p.unesc[uoff : uoff+ulen]
+	}
+	return p.JsonBytes()[off : off+int(val)]
+}
+
+// strRefEscaped returns a transient string view of a decoded escaped JSON string token.
+func (p *Parser) strRefEscaped(off int, val uint64) string {
+	return rt.Mem2Str(p.bytesEscaped(off, val))
+}
+
+// strEscaped returns a heap-copied string of a decoded escaped JSON string token.
+func (p *Parser) strEscaped(off int, val uint64) string {
+	return string(p.bytesEscaped(off, val))
 }
 
 var nodeType = rt.UnpackType(reflect.TypeOf(node{}))
@@ -179,52 +218,19 @@ func calMaxNodeCap(jsonSize int) int {
 }
 
 func (p *Parser) parse() ErrorCode {
-	// when decode into struct, we should decode number as possible
-	old := p.options
-	if !p.isEface {
-		p.options &^= 1 << _F_use_number
-	}
-
-	// fast path with limited node buffer
-	err := ErrorCode(native.ParseWithPadding(unsafe.Pointer(p)))
-	if err != SONIC_VISIT_FAILED {
-		p.options = old
-		return err
-	}
-
-	// check OoB here
-	offset := p.nbuf.ncur - p.nbuf.nstart
-	curLen := int(offset / unsafe.Sizeof(node{}))
-	if curLen != len(p.nodes) {
-		panic(fmt.Sprintf("current len: %d, real len: %d cap: %d", curLen, len(p.nodes), cap(p.nodes)))
-	}
-
-	// node buf is not enough, continue parse
-	// the maxCap is always meet all valid JSON
-	maxCap := curLen + calMaxNodeCap(len(p.Json)-int(p.cur-p.start))
-	slice := rt.GoSlice{
-		Ptr: rt.Mallocgc(uintptr(maxCap)*nodeType.Size, nodeType, false),
-		Len: maxCap,
-		Cap: maxCap,
-	}
-	rt.Memmove(unsafe.Pointer(slice.Ptr), unsafe.Pointer(&p.nodes[0]), offset)
-	p.backup = p.nodes
-	p.nodes = *(*[]node)(unsafe.Pointer(&slice))
-
-	// update node cursor
-	p.nbuf.nstart = uintptr(unsafe.Pointer(&p.nodes[0]))
-	p.nbuf.nend = p.nbuf.nstart + uintptr(cap(p.nodes))*unsafe.Sizeof(node{})
-	p.nbuf.ncur = p.nbuf.nstart + offset
-
-	// continue parse json
-	err = ErrorCode(native.ParseWithPadding(unsafe.Pointer(p)))
-	p.options = old
-	return err
+	return parseImpl(p)
 }
 
 func (p *Parser) reset() {
 	p.options = 0
-	p.padded = p.padded[:0]
+	if p.paddedBackup != nil {
+		p.padded = p.paddedBackup[:0]
+		p.paddedBackup = nil
+	} else if uintptr(cap(p.padded)) > maxPooledJsonPaddedCap {
+		p.padded = nil
+	} else {
+		p.padded = p.padded[:0]
+	}
 	// nodes is too large here, we will not reset it and use small backup nodes buffer
 	if p.backup != nil {
 		p.nodes = p.backup
@@ -238,6 +244,8 @@ func (p *Parser) reset() {
 	p._nbk = _nospaceBlock{}
 	p.Utf8Inv = false
 	p.isEface = false
+	p.sessionPadded = nil
+	p.unesc = nil
 }
 
 func (p *Parser) free() {

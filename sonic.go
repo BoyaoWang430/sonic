@@ -216,3 +216,7 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	}
 	return decoder.PretouchMany(allVts, opts...)
 }
+
+func init() {
+	decoder.RegisterNoCopyRawMessageType(reflect.TypeOf(NoCopyRawMessage(nil)))
+}

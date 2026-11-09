@@ -1,12 +1,14 @@
 package optdec
 
 import (
+	"math"
 	"fmt"
 	"reflect"
 
 	caching "github.com/bytedance/sonic/internal/optcaching"
 	"github.com/bytedance/sonic/internal/resolver"
 	"github.com/bytedance/sonic/internal/rt"
+	"github.com/bytedance/sonic/option"
 )
 
 const (
@@ -131,21 +133,37 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 		c.namedPtr = false
 		return c.compileStructBody(vt)
 	}
-
-	if c.depth >= c.opts.MaxInlineDepth+1 || (c.counts > 0 && vt.NumField() >= _MAX_FIELDS) {
-		return &recuriveDecoder{
-			typ: rt.UnpackType(vt),
-		}
-	} else {
-		return c.compileStructBody(vt)
+	if dec, ok := c.compiled[vt]; ok {
+		return dec
 	}
+	if c.depth > 1 && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth {
+		if val := programCache.Get(rt.UnpackType(vt)); val != nil {
+			if sd, ok := val.(*structDecoder); ok {
+				c.compiled[vt] = sd
+				return sd
+			}
+		}
+	}
+
+	maxDepth := c.opts.MaxInlineDepth
+	if maxDepth == option.DefaultMaxInlineDepth {
+		maxDepth = 16
+	}
+	if c.depth >= maxDepth+1 {
+		return c.newRecursiveDecoder(vt)
+	}
+	dec := c.compileStructBody(vt)
+	c.compiled[vt] = dec
+	return dec
 }
 
 func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 	fv := resolver.ResolveStruct(vt)
-	entries := make([]fieldEntry, 0, len(fv))
+	entries := make([]fieldEntry, len(fv))
+	decs := make([]decFunc, len(fv))
+	var wideOffsets []uintptr
 
-	for _, f := range fv {
+	for i, f := range fv {
 		var dec decFunc
 		/* dealt with field tag options */
 		if f.Opts&resolver.F_stringize != 0 {
@@ -163,15 +181,25 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 			}
 		}
 
-		entries = append(entries, fieldEntry{
-			FieldMeta: f,
-			fieldDec:  dec,
-		})
+		if f.Path[0].Size > math.MaxUint32 {
+			entries[i] = fieldEntry{
+				name:   f.Name,
+				offset: uint32(len(wideOffsets)),
+				kind:   fieldKindWideOffset,
+			}
+			wideOffsets = append(wideOffsets, f.Path[0].Size)
+		} else {
+			entries[i] = newFieldEntry(f.Name, f.Path[0].Size, dec)
+		}
+		decs[i] = dec
 	}
 	return &structDecoder{
-		fieldMap:   caching.NewFieldCache(fv),
-		fields:     entries,
+		fieldMap:    caching.NewFieldCache(fv),
+		fields:      entries,
+		fieldDecs:   decs,
+		wideOffsets: wideOffsets,
 		structName: vt.Name(),
 		typ:        vt,
+		goType:     rt.UnpackType(vt),
 	}
 }

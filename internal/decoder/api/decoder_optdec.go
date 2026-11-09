@@ -1,5 +1,5 @@
-//go:build go1.17 && !go1.28
-// +build go1.17,!go1.28
+//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.17 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+// +build amd64,go1.17,!go1.28 arm64,go1.17,!go1.28 riscv64,go1.26,!go1.28,riscv64.rva22u64
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -27,11 +27,18 @@ import (
 var (
 	pretouchImpl     = optdec.Pretouch
 	pretouchManyImpl = optdec.PretouchMany
-	decodeImpl       = optdec.Decode
+	decodeImpl                   = optdec.Decode
+	decodeSessionImpl            = optdec.DecodeWithSession
+	decodeStreamImpl             = optdec.DecodeStream
+	freeStreamSessionImpl        = optdec.FreeStreamSession
+	RegisterNoCopyRawMessageType = optdec.RegisterNoCopyRawMessageType
 )
 
 func init() {
-	// when in aarch64, we enable all optimization
+	// ARM64 and native RISC-V share optdec and enable all its optimizations.
 	envs.EnableOptDec()
 	envs.EnableFastMap()
 }
+
+type inputSession = optdec.InputSession
+type streamSession = optdec.StreamSession

@@ -3,6 +3,7 @@ package optdec
 import (
 	"encoding/json"
 	"math"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/resolver"
@@ -270,13 +271,24 @@ func (d *numberDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 
 type recuriveDecoder struct {
 	typ *rt.GoType
+	dec unsafe.Pointer
+}
+
+func (d *recuriveDecoder) bind(dec decFunc) {
+	box := new(decFunc)
+	*box = dec
+	atomic.StorePointer(&d.dec, unsafe.Pointer(box))
 }
 
 func (d *recuriveDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if p := atomic.LoadPointer(&d.dec); p != nil {
+		return (*(*decFunc)(p)).FromDom(vp, node, ctx)
+	}
 	dec, err := findOrCompile(d.typ)
 	if err != nil {
 		return err
 	}
+	d.bind(dec)
 	return dec.FromDom(vp, node, ctx)
 }
 

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/decoder/consts"
 	"github.com/bytedance/sonic/internal/decoder/errors"
 	"github.com/bytedance/sonic/internal/rt"
@@ -205,15 +206,14 @@ func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 	}
 
 	loaded := decoderJitLoader.LoadMany(items)
+	batch := make([]caching.ProgramBatchItem, 0, len(entries))
 	for i, p := range entries {
-		dec := ptodec(loaded[i])
-		_, err := programCache.Compute(p.vt, func(*rt.GoType, ...interface{}) (interface{}, error) {
-			return dec, nil
+		batch = append(batch, caching.ProgramBatchItem{
+			Vt: p.vt,
+			Fn: ptodec(loaded[i]),
 		})
-		if err != nil {
-			return err
-		}
 	}
+	programCache.PutMany(batch)
 
 	return nil
 }

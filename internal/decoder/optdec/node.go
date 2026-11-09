@@ -111,12 +111,16 @@ func (self *efacePool) ConvTnum(val json.Number, dst unsafe.Pointer) {
 /********************************************************/
 
 func canUseFastMap(opts uint64, root *rt.GoType) bool {
-	return envs.UseFastMap && (opts&(1<<_F_copy_string)) == 0 && (opts&(1<<_F_use_int64)) == 0 && (root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType)
+	return envs.UseFastMap && (opts&(1<<_F_use_int64)) == 0 && (root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType)
 }
 
 func NewContext(json string, pos int, opts uint64, root *rt.GoType) (Context, error) {
+	return NewContextWithSession(json, pos, opts, root, nil)
+}
+
+func NewContextWithSession(json string, pos int, opts uint64, root *rt.GoType, sess *InputSession) (Context, error) {
 	ctx := Context{
-		Parser: newParser(json, pos, opts),
+		Parser: newParserFromSession(json, pos, opts, sess),
 	}
 	if root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType {
 		ctx.Parser.isEface = true
@@ -184,12 +188,11 @@ func (val Node) Type() uint8 {
 }
 
 func (val Node) Next() uintptr {
-	if val.Type() != KObject && val.Type() != KArray {
-		return PtrOffset(val.cptr, 1)
-	}
 	cobj := ptrCast(val.cptr)
-	offset := int64(uint64(cobj.val) >> ConLenBits)
-	return PtrOffset(val.cptr, offset)
+	if uint8(cobj.typ)-KObject > 1 {
+		return val.cptr + unsafe.Sizeof(node{})
+	}
+	return val.cptr + uintptr(cobj.val>>ConLenBits)*unsafe.Sizeof(node{})
 }
 
 func (val *Node) next() {
@@ -446,32 +449,31 @@ func (val Node) AsBool() (bool, bool) {
 }
 
 func (val Node) AsStr(ctx *Context) (string, bool) {
-	switch val.Type() {
-	case KStringCommon:
-		s := val.StringRef(ctx)
-		if ctx.Options()&(1<<_F_copy_string) == 0 {
-			return s, true
-		}
-		return string(rt.Str2Mem(s)), true
-	case KStringEscaped:
-		return val.StringCopyEsc(ctx), true
-	default:
-		return "", false
+	cnode := ptrCast(val.cptr)
+	t := uint8(cnode.typ)
+	if t == KStringCommon {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.Parser.strCommon(offset, int(cnode.val), ctx.Parser.options&(1<<_F_copy_string) != 0), true
 	}
+	if t == KStringEscaped {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.Parser.strEscaped(offset, cnode.val), true
+	}
+	return "", false
 }
 
 func (val Node) AsStrRef(ctx *Context) (string, bool) {
-	switch val.Type() {
-	case KStringEscaped:
-		node := ptrCast(val.cptr)
-		offset := val.Position()
-		len := int(node.val)
-		return rt.Mem2Str(ctx.Parser.JsonBytes()[offset : offset+len]), true
-	case KStringCommon:
-		return val.StringRef(ctx), true
-	default:
-		return "", false
+	cnode := ptrCast(val.cptr)
+	t := uint8(cnode.typ)
+	if t == KStringCommon {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.Parser.strRefCommon(offset, int(cnode.val)), true
 	}
+	if t == KStringEscaped {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.Parser.strRefEscaped(offset, cnode.val), true
+	}
+	return "", false
 }
 
 func (val Node) AsStringText(ctx *Context) ([]byte, bool) {
@@ -500,7 +502,7 @@ func (val Node) Raw(ctx *Context) string {
 	node := ptrCast(val.cptr)
 	len := int(node.val)
 	offset := val.Position()
-	return ctx.Parser.Json[offset:int(offset+len)]
+	return ctx.Parser.strCommon(offset, len, ctx.Parser.options&(1<<_F_copy_string) != 0)
 }
 
 func (val Node) Position() int {
@@ -538,40 +540,142 @@ func (val Node) NonstrAsNumber(ctx *Context) (json.Number, bool) {
 	if !ok {
 		return "", false
 	}
-	return json.Number(ctx.Parser.Json[start:end]), true
+	return json.Number(ctx.Parser.strCommon(start, end-start, ctx.Parser.options&(1<<_F_copy_string) != 0)), true
 }
 
 func (val Node) AsRaw(ctx *Context) string {
-	// fast path for unescaped strings
+	return val.rawSpan(ctx.Parser)
+}
+
+func (val Node) rawSpan(p *Parser) string {
 	switch val.Type() {
-	case KNull:
-		return "null"
-	case KTrue:
-		return "true"
+	case KNull, KTrue:
+		pos := val.Position()
+		return p.rawSlice(pos, pos+4)
 	case KFalse:
-		return "false"
+		pos := val.Position()
+		return p.rawSlice(pos, pos+5)
 	case KStringCommon:
 		node := ptrCast(val.cptr)
 		len := int(node.val)
 		offset := val.Position()
-		// add start and end quote
-		ref := rt.Str2Mem(ctx.Parser.Json)[offset-1 : offset+len+1]
-		return rt.Mem2Str(ref)
-	case KRawNumber:
-		fallthrough
-	case KRaw:
-		return val.Raw(ctx)
+		return p.rawSlice(offset-1, offset+len+1)
+	case KRawNumber, KRaw:
+		node := ptrCast(val.cptr)
+		len := int(node.val)
+		offset := val.Position()
+		return p.rawSlice(offset, offset+len)
+	case KUint, KSint, KReal:
+		start := val.Position()
+		end, ok := SkipNumberFast(p.Json, start)
+		if !ok {
+			break
+		}
+		return p.rawSlice(start, end)
 	case KStringEscaped:
-		raw, _ := SkipOneFast(ctx.Parser.Json, val.Position()-1)
+		raw, _ := SkipOneFast(p.Json, val.Position()-1)
 		return raw
+	case KObject, KArray:
+		return val.containerAsRaw(p)
 	default:
-		raw, err := SkipOneFast(ctx.Parser.Json, val.Position())
+		raw, err := SkipOneFast(p.Json, val.Position())
 		if err != nil {
 			break
 		}
 		return raw
 	}
 	panic("should always be valid json here")
+}
+
+func (val Node) containerAsRaw(p *Parser) string {
+	s := p.Json
+	cnode := ptrCast(val.cptr)
+	start := int(cnode.typ >> PosBits)
+	span := int(cnode.val >> ConLenBits)
+	if span <= 0 {
+		raw, err := SkipOneFast(s, start)
+		if err != nil {
+			panic("should always be valid json here")
+		}
+		return raw
+	}
+	cur := val.cptr
+	end := cur + uintptr(span)*unsafe.Sizeof(node{})
+	depth := 0
+	for cur < end {
+		cn := ptrCast(cur)
+		ctyp := uint8(cn.typ)
+		if ctyp != KObject && ctyp != KArray {
+			break
+		}
+		cspan := int(cn.val >> ConLenBits)
+		csize := int(cn.val & ConLenMask)
+		depth++
+		if cspan <= 1 {
+			break
+		}
+		if (ctyp == KObject && cspan == 1+2*csize) || (ctyp == KArray && cspan == 1+csize) {
+			cur = end - unsafe.Sizeof(node{})
+			continue
+		}
+		child := cur + unsafe.Sizeof(node{})
+		for {
+			vptr := child
+			if ctyp == KObject {
+				vptr += unsafe.Sizeof(node{})
+			}
+			vnode := ptrCast(vptr)
+			var next uintptr
+			if uint8(vnode.typ)-KObject > 1 {
+				next = vptr + unsafe.Sizeof(node{})
+			} else {
+				next = vptr + uintptr(vnode.val>>ConLenBits)*unsafe.Sizeof(node{})
+			}
+			if next >= end {
+				cur = vptr
+				break
+			}
+			child = next
+		}
+	}
+	lnode := ptrCast(cur)
+	ltyp := uint8(lnode.typ)
+	lpos := int(lnode.typ >> PosBits)
+	var pos int
+	switch ltyp {
+	case KObject, KArray:
+		pos = lpos + 1
+	case KStringCommon:
+		pos = lpos + int(lnode.val) + 1
+	case KNull, KTrue:
+		pos = lpos + 4
+	case KFalse:
+		pos = lpos + 5
+	case KRawNumber, KRaw:
+		pos = lpos + int(lnode.val)
+	case KUint, KSint, KReal:
+		pos, _ = SkipNumberFast(s, lpos)
+	case KStringEscaped:
+		raw, err := SkipOneFast(s, lpos-1)
+		if err != nil {
+			panic("should always be valid json here")
+		}
+		pos = lpos - 1 + len(raw)
+	default:
+		raw, err := SkipOneFast(s, start)
+		if err != nil {
+			panic("should always be valid json here")
+		}
+		return raw
+	}
+	for depth > 0 && pos < len(s) {
+		c := s[pos]
+		pos++
+		if c == '}' || c == ']' {
+			depth--
+		}
+	}
+	return p.rawSlice(start, pos)
 }
 
 // reference from the input JSON as possible
@@ -587,9 +691,8 @@ func ptrCast(p uintptr) *node {
 func (val Node) StringCopyEsc(ctx *Context) string {
 	// check whether there are in padded
 	node := ptrCast(val.cptr)
-	len := int(node.val)
 	offset := val.Position()
-	return string(ctx.Parser.JsonBytes()[offset : offset+len])
+	return ctx.Parser.strEscaped(offset, node.val)
 }
 
 func (val Node) Object() Object {
@@ -613,7 +716,7 @@ func (val *Node) Equal(ctx *Context, lhs string) bool {
 	cstr := ptrCast(val.cptr)
 	offset := int(val.Position())
 	len := int(cstr.val)
-	return lhs == ctx.Parser.Json[offset:offset+len]
+	return lhs == ctx.Parser.strRefCommon(offset, len)
 }
 
 func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
@@ -878,8 +981,7 @@ func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
 	case KStringEscaped:
 		node := ptrCast(val.cptr)
 		offset := val.Position()
-		len := int(node.val)
-		origin = ctx.Parser.JsonBytes()[offset : offset+len]
+		origin = ctx.Parser.bytesEscaped(offset, node.val)
 	case KStringCommon:
 		origin = rt.Str2Mem(val.StringRef(ctx))
 	case KArray:
@@ -915,9 +1017,20 @@ func (node *Node) AsEface(ctx *Context) (interface{}, error) {
 		v := AsEfaceFast(&iter, ctx)
 		*node = iter.Peek()
 		return v, nil
-	} else {
-		return node.AsEfaceFallback(ctx)
 	}
+	if ctx.Parser != nil && ctx.Parser.isEface && (ctx.Parser.options&(1<<_F_use_int64)) == 0 && node.cptr == ctx.Root().cptr {
+		useNumber := (ctx.Parser.options & (1 << _F_use_number)) != 0
+		ctx.efacePool = newEfacePool(&ctx.Parser.nbuf.stat, useNumber)
+		if len(ctx.Stack.stack) <= int(ctx.Parser.nbuf.stat.max_depth)+1 {
+			ctx.Stack = newStack(int(ctx.Parser.nbuf.stat.max_depth))
+		}
+		iter := NewNodeIter(*node)
+		v := AsEfaceFast(&iter, ctx)
+		*node = iter.Peek()
+		ctx.efacePool = nil
+		return v, nil
+	}
+	return node.AsEfaceFallback(ctx)
 }
 
 func parseSingleNode(node Node, ctx *Context) interface{} {
@@ -1004,7 +1117,8 @@ func AsEfaceFast(iter *NodeIter, ctx *Context) interface{} {
 			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, unsafe.Pointer(&root))
 		}
 	case KStringCommon:
-		ctx.efacePool.ConvTstring(node.StringRef(ctx), unsafe.Pointer(&root))
+		s, _ := node.AsStr(ctx)
+		ctx.efacePool.ConvTstring(s, unsafe.Pointer(&root))
 	case KStringEscaped:
 		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), unsafe.Pointer(&root))
 	case KTrue:
@@ -1028,11 +1142,7 @@ func AsEfaceFast(iter *NodeIter, ctx *Context) interface{} {
 
 _object_key:
 	node = iter.Next()
-	if node.Type() == KStringCommon {
-		key = node.StringRef(ctx)
-	} else {
-		key = node.StringCopyEsc(ctx)
-	}
+	key, _ = node.AsStr(ctx)
 
 	// interface{} slot in map bucket
 	val = rt.Mapassign_faststr(rt.MapEfaceMapType, mp, key)
@@ -1080,7 +1190,8 @@ _object_key:
 		size = newSize
 		goto _arr_val
 	case KStringCommon:
-		ctx.efacePool.ConvTstring(node.StringRef(ctx), val)
+		s, _ := node.AsStr(ctx)
+		ctx.efacePool.ConvTstring(s, val)
 	case KStringEscaped:
 		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), val)
 	case KTrue:
@@ -1184,7 +1295,8 @@ _arr_val:
 		size = newSize
 		goto _arr_val
 	case KStringCommon:
-		ctx.efacePool.ConvTstring(node.StringRef(ctx), val)
+		s, _ := node.AsStr(ctx)
+		ctx.efacePool.ConvTstring(s, val)
 	case KStringEscaped:
 		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), val)
 	case KTrue:
@@ -1242,34 +1354,124 @@ _arr_val:
 }
 
 func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
+	p := ctx.Parser
+	opts := p.options
+	copyStr := opts&(1<<_F_copy_string) != 0
+	numSpecial := opts&((1<<_F_use_number)|(1<<_F_use_int64)) != 0
+
 	switch node.Type() {
 	case KObject:
 		obj := node.Object()
 		size := obj.Len()
 		m := make(map[string]interface{}, size)
-		*node = NewNode(obj.Children())
+		cur := obj.Children()
 		var gerr, err error
 		for i := 0; i < size; i++ {
-			key, _ := node.AsStr(ctx)
-			*node = NewNode(PtrOffset(node.cptr, 1))
+			knode := ptrCast(cur)
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				key = p.strCommon(int(knode.typ>>PosBits), int(knode.val), copyStr)
+			} else {
+				key = p.strEscaped(int(knode.typ>>PosBits), knode.val)
+			}
+			vptr := cur + unsafe.Sizeof(struct{ typ, val uint64 }{})
+			if !numSpecial {
+				vnode := ptrCast(vptr)
+				switch uint8(vnode.typ) {
+				case KNull:
+					m[key] = nil
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KTrue:
+					m[key] = true
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KFalse:
+					m[key] = false
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KStringCommon:
+					m[key] = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KStringEscaped:
+					m[key] = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KUint:
+					m[key] = float64(vnode.val)
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KSint:
+					m[key] = float64(int64(vnode.val))
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KReal:
+					m[key] = *(*float64)(unsafe.Pointer(&vnode.val))
+					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				}
+			}
+			*node = Node{cptr: vptr}
 			m[key], err = node.AsEfaceFallback(ctx)
+			cur = node.cptr
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
+		*node = Node{cptr: cur}
 		return m, gerr
 	case KArray:
 		arr := node.Array()
 		size := arr.Len()
 		a := make([]interface{}, size)
-		*node = NewNode(arr.Children())
+		cur := arr.Children()
 		var gerr, err error
 		for i := 0; i < size; i++ {
+			if !numSpecial {
+				vnode := ptrCast(cur)
+				switch uint8(vnode.typ) {
+				case KNull:
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KTrue:
+					a[i] = true
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KFalse:
+					a[i] = false
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KStringCommon:
+					a[i] = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KStringEscaped:
+					a[i] = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KUint:
+					a[i] = float64(vnode.val)
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KSint:
+					a[i] = float64(int64(vnode.val))
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				case KReal:
+					a[i] = *(*float64)(unsafe.Pointer(&vnode.val))
+					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					continue
+				}
+			}
+			*node = Node{cptr: cur}
 			a[i], err = node.AsEfaceFallback(ctx)
+			cur = node.cptr
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
+		*node = Node{cptr: cur}
 		return a, gerr
 	case KStringCommon:
 		str, _ := node.AsStr(ctx)

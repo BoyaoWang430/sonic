@@ -364,7 +364,7 @@ func decodeKeyTextUnmarshaler(dec *mapDecoder, raw string) (interface{}, error) 
 	// For pointer key types (e.g. map[*K]V), decode directly into *K.
 	if kt.Kind() == reflect.Ptr {
 		ret := reflect.New(kt.Elem()).Interface()
-		err = ret.(encoding.TextUnmarshaler).UnmarshalText(rt.Str2Mem(key))
+		err = ret.(encoding.TextUnmarshaler).UnmarshalText([]byte(key))
 		if err != nil {
 			return nil, err
 		}
@@ -373,7 +373,7 @@ func decodeKeyTextUnmarshaler(dec *mapDecoder, raw string) (interface{}, error) 
 
 	// For value key types (e.g. map[K]V), decode via *K then return K.
 	ret := reflect.New(kt)
-	err = ret.Interface().(encoding.TextUnmarshaler).UnmarshalText(rt.Str2Mem(key))
+	err = ret.Interface().(encoding.TextUnmarshaler).UnmarshalText([]byte(key))
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +413,7 @@ func decodeJsonNumberKey(dec *mapDecoder, raw string) (interface{}, error) {
 		return nil, error_value(raw, rt.JsonNumberType.Pack())
 	}
 
-	return json.Number(raw[0:end]), nil
+	return json.Number(string(rt.Str2Mem(raw[0:end]))), nil
 }
 
 type mapDecoder struct {

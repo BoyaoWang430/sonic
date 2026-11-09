@@ -20,9 +20,8 @@ import (
 	"bytes"
 	"io"
 	"sync"
+	"unsafe"
 
-	"github.com/bytedance/sonic/internal/native"
-	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/internal/utils"
 	"github.com/bytedance/sonic/option"
@@ -34,11 +33,13 @@ var (
 
 // StreamDecoder is the decoder context object for streaming input.
 type StreamDecoder struct {
-	r       io.Reader
-	buf     []byte
-	scanp   int
-	scanned int64
-	err     error
+	r          io.Reader
+	buf        []byte
+	scanp      int
+	scanned    int64
+	err        error
+	pendingErr error
+	streamSess *streamSession
 	Decoder
 }
 
@@ -65,55 +66,74 @@ func NewStreamDecoder(r io.Reader) *StreamDecoder {
 // Redundantly bytes may be read and left in its buffer, and can be used at next call.
 // Either io error from underlying io.Reader (except io.EOF)
 // or syntax error from data will be recorded and stop subsequently decoding.
-func (self *StreamDecoder) Decode(val interface{}) (err error) {
-	// read more data into buf
-	if self.More() {
-		var s = self.scanp
-	try_skip:
-		var e = len(self.buf)
-		var src = rt.Mem2Str(self.buf[s:e])
-		// try skip
-		var x = 0
-		if y := native.SkipOneFast(&src, &x); y < 0 {
-			if self.readMore() {
-				goto try_skip
-			}
-			if self.err == nil {
-				self.err = SyntaxError{e, self.s, types.ParsingError(-s), ""}
-				self.setErr(self.err)
-			}
-			return self.err
-		} else {
-			s = y + s
-			e = x + s
-		}
+func streamRefillCallback(arg unsafe.Pointer, compactTo int) (bool, error) {
+	return (*StreamDecoder)(arg).refillStream(compactTo)
+}
 
-		// must copy string here for safety
-		self.Decoder.Reset(string(self.buf[s:e]))
-		err = self.Decoder.Decode(val)
+func (self *StreamDecoder) Decode(val interface{}) (err error) {
+	if self.More() {
+		err = decodeStreamImpl(&self.buf, &self.scanp, self.f, val, &self.streamSess, unsafe.Pointer(self), streamRefillCallback)
 		if err != nil {
 			self.setErr(err)
-			return
+			return self.err
 		}
 
-		self.scanp = e
 		_, empty := self.scan()
 		if empty {
-			// no remain valid bytes, thus we just recycle buffer
+			self.scanned += int64(self.scanp)
+			self.scanp = 0
 			mem := self.buf
 			self.buf = nil
 			freeBytes(mem)
-		} else {
-			// remain undecoded bytes, move them onto head
-			n := copy(self.buf, self.buf[self.scanp:])
-			self.buf = self.buf[:n]
+			if self.streamSess != nil {
+				freeStreamSessionImpl(self.streamSess)
+				self.streamSess = nil
+			}
 		}
-
-		self.scanned += int64(self.scanp)
-		self.scanp = 0
 	}
 
 	return self.err
+}
+
+func (self *StreamDecoder) refillStream(compactTo int) (eof bool, readErr error) {
+	if self.err != nil {
+		return false, self.err
+	}
+	if self.pendingErr != nil {
+		rerr := self.pendingErr
+		self.pendingErr = nil
+		if rerr == io.EOF {
+			return true, nil
+		}
+		return false, rerr
+	}
+	if compactTo > 0 {
+		self.scanned += int64(compactTo)
+		n := copy(self.buf, self.buf[compactTo:])
+		self.buf = self.buf[:n]
+		self.scanp = 0
+	}
+	for {
+		l := len(self.buf)
+		realloc(&self.buf)
+		n, rerr := self.r.Read(self.buf[l:cap(self.buf)])
+		self.buf = self.buf[:l+n]
+		if n > 0 {
+			if rerr == io.EOF {
+				return true, nil
+			}
+			if rerr != nil {
+				self.pendingErr = rerr
+			}
+			return false, nil
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return true, nil
+			}
+			return false, rerr
+		}
+	}
 }
 
 // InputOffset returns the input stream byte offset of the current decoder position.
@@ -138,39 +158,15 @@ func (self *StreamDecoder) More() bool {
 	return err == nil && c != ']' && c != '}'
 }
 
-// More reports whether there is another element in the
-// current array or object being parsed.
-func (self *StreamDecoder) readMore() bool {
-	if self.err != nil {
-		return false
-	}
-
-	var err error
-	var n int
-	for {
-		// Grow buffer if not large enough.
-		l := len(self.buf)
-		realloc(&self.buf)
-
-		n, err = self.r.Read(self.buf[l:cap(self.buf)])
-		self.buf = self.buf[:l+n]
-
-		self.scanp = l
-		_, empty := self.scan()
-		if !empty {
-			return true
-		}
-
-		// buffer has been scanned, now report any error
-		if err != nil {
-			self.setErr(err)
-			return false
-		}
-	}
-}
-
 func (self *StreamDecoder) setErr(err error) {
 	self.err = err
+	self.pendingErr = nil
+	if self.streamSess != nil {
+		freeStreamSessionImpl(self.streamSess)
+		self.streamSess = nil
+	}
+	self.scanned += int64(self.scanp)
+	self.scanp = 0
 	mem := self.buf[:0]
 	self.buf = nil
 	freeBytes(mem)
@@ -187,6 +183,12 @@ func (self *StreamDecoder) peek() (byte, error) {
 		if err != nil {
 			self.setErr(err)
 			return 0, err
+		}
+		if self.pendingErr != nil {
+			perr := self.pendingErr
+			self.pendingErr = nil
+			self.setErr(perr)
+			return 0, perr
 		}
 		err = self.refill()
 	}
