@@ -56,9 +56,7 @@ func (self *_ProgramMap) copy() *_ProgramMap {
 		m: self.m,
 		b: make([]_ProgramEntry, len(self.b)),
 	}
-	for i, f := range self.b {
-		fork.b[i] = f
-	}
+	copy(fork.b, self.b)
 	return fork
 }
 
@@ -110,6 +108,49 @@ func (self *_ProgramMap) rehash() *_ProgramMap {
 	return r
 }
 
+type ProgramBatchItem struct {
+	Vt *rt.GoType
+	Fn interface{}
+}
+
+func (self *_ProgramMap) addMany(items []ProgramBatchItem) *_ProgramMap {
+	missing := 0
+	for i := range items {
+		if items[i].Vt != nil && self.get(items[i].Vt) == nil {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return nil
+	}
+	targetCount := atomic.LoadUint64(&self.n) + uint64(missing)
+	capNeeded := self.m + 1
+	for float64(targetCount)/float64(capNeeded) > _LoadFactor {
+		capNeeded <<= 1
+	}
+	var fork *_ProgramMap
+	if capNeeded == self.m+1 {
+		fork = self.copy()
+	} else {
+		fork = &_ProgramMap{
+			m: capNeeded - 1,
+			b: make([]_ProgramEntry, int(capNeeded)),
+		}
+		for i := uint32(0); i <= self.m; i++ {
+			if b := self.b[i]; b.vt != nil {
+				fork.insert(b.vt, b.fn)
+			}
+		}
+	}
+	for i := range items {
+		vt := items[i].Vt
+		if vt != nil && fork.get(vt) == nil {
+			fork.insert(vt, items[i].Fn)
+		}
+	}
+	return fork
+}
+
 func (self *_ProgramMap) insert(vt *rt.GoType, fn interface{}) {
 	h := vt.Hash
 	p := h & self.m
@@ -131,24 +172,34 @@ func (self *_ProgramMap) insert(vt *rt.GoType, fn interface{}) {
 	panic("no available slots")
 }
 
-/** RCU Program Cache **/
+/** RCU Program Cache with Per-Type Singleflight **/
+
+type inflightProgram struct {
+	wg   sync.WaitGroup
+	val  interface{}
+	err  error
+	done bool
+}
 
 type ProgramCache struct {
-	m sync.Mutex
-	p unsafe.Pointer
+	m        sync.Mutex
+	p        unsafe.Pointer
+	epoch    uint64
+	inflight map[*rt.GoType]*inflightProgram
 }
 
 func CreateProgramCache() *ProgramCache {
 	return &ProgramCache{
-		m: sync.Mutex{},
 		p: unsafe.Pointer(newProgramMap()),
 	}
 }
 
 func (self *ProgramCache) Reset() {
 	self.m.Lock()
-	defer self.m.Unlock()
-	self.p = unsafe.Pointer(newProgramMap())
+	self.epoch++
+	self.inflight = nil
+	atomic.StorePointer(&self.p, unsafe.Pointer(newProgramMap()))
+	self.m.Unlock()
 }
 
 func (self *ProgramCache) Get(vt *rt.GoType) interface{} {
@@ -156,24 +207,78 @@ func (self *ProgramCache) Get(vt *rt.GoType) interface{} {
 }
 
 func (self *ProgramCache) Compute(vt *rt.GoType, compute func(*rt.GoType, ...interface{}) (interface{}, error), ex ...interface{}) (interface{}, error) {
-	var err error
-	var val interface{}
-
-	/* use defer to prevent inlining of this function */
-	self.m.Lock()
-	defer self.m.Unlock()
-
-	/* double check with write lock held */
-	if val = self.Get(vt); val != nil {
+	if val := self.Get(vt); val != nil {
 		return val, nil
 	}
 
-	/* compute the value */
-	if val, err = compute(vt, ex...); err != nil {
-		return nil, err
-	}
+	for {
+		self.m.Lock()
+		if val := self.Get(vt); val != nil {
+			self.m.Unlock()
+			return val, nil
+		}
+		if call, ok := self.inflight[vt]; ok {
+			self.m.Unlock()
+			call.wg.Wait()
+			if call.done {
+				return call.val, call.err
+			}
+			continue
+		}
+		if self.inflight == nil {
+			self.inflight = make(map[*rt.GoType]*inflightProgram)
+		}
+		call := &inflightProgram{}
+		call.wg.Add(1)
+		self.inflight[vt] = call
+		startEpoch := self.epoch
+		self.m.Unlock()
 
-	/* update the RCU cache */
-	atomic.StorePointer(&self.p, unsafe.Pointer((*_ProgramMap)(atomic.LoadPointer(&self.p)).add(vt, val)))
-	return val, nil
+		finished := false
+		defer func() {
+			if !finished {
+				self.m.Lock()
+				if self.inflight[vt] == call {
+					delete(self.inflight, vt)
+				}
+				call.wg.Done()
+				self.m.Unlock()
+			}
+		}()
+
+		// Execute compilation outside self.m so distinct types compile concurrently.
+		val, err := compute(vt, ex...)
+
+		self.m.Lock()
+		finished = true
+		if self.inflight[vt] == call {
+			delete(self.inflight, vt)
+		}
+		if err == nil && self.epoch == startEpoch {
+			if existing := self.Get(vt); existing != nil {
+				val = existing
+			} else {
+				cur := (*_ProgramMap)(atomic.LoadPointer(&self.p))
+				atomic.StorePointer(&self.p, unsafe.Pointer(cur.add(vt, val)))
+			}
+		}
+		call.val = val
+		call.err = err
+		call.done = true
+		call.wg.Done()
+		self.m.Unlock()
+		return val, err
+	}
+}
+
+func (self *ProgramCache) PutMany(items []ProgramBatchItem) {
+	if len(items) == 0 {
+		return
+	}
+	self.m.Lock()
+	cur := (*_ProgramMap)(atomic.LoadPointer(&self.p))
+	if next := cur.addMany(items); next != nil {
+		atomic.StorePointer(&self.p, unsafe.Pointer(next))
+	}
+	self.m.Unlock()
 }

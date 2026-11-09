@@ -1,5 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28)
-// +build amd64,go1.17,!go1.28 arm64,go1.20,!go1.28
+//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -22,6 +21,7 @@ package sonic
 import (
 	"io"
 	"reflect"
+	"unsafe"
 
 	"github.com/bytedance/sonic/decoder"
 	"github.com/bytedance/sonic/encoder"
@@ -130,7 +130,37 @@ func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
 
 // Unmarshal is implemented by sonic
 func (cfg frozenConfig) Unmarshal(buf []byte, val interface{}) error {
+	if cfg.CopyString {
+		err := cfg.UnmarshalFromString(rt.Mem2Str(buf), val)
+		if err != nil {
+			return copyUnmarshalErrorSource(err, buf)
+		}
+		return nil
+	}
 	return cfg.UnmarshalFromString(string(buf), val)
+}
+
+func copyUnmarshalErrorSource(err error, buf []byte) error {
+	if len(buf) == 0 {
+		return err
+	}
+	b0 := uintptr(unsafe.Pointer(&buf[0]))
+	bEnd := b0 + uintptr(len(buf))
+	switch e := err.(type) {
+	case decoder.SyntaxError:
+		sp := uintptr(rt.IndexChar(e.Src, 0))
+		if sp >= b0 && sp < bEnd {
+			e.Src = string(buf)
+			return e
+		}
+	case *decoder.MismatchTypeError:
+		sp := uintptr(rt.IndexChar(e.Src, 0))
+		if sp >= b0 && sp < bEnd {
+			e.Src = string(buf)
+			return e
+		}
+	}
+	return err
 }
 
 // NewEncoder is implemented by sonic
@@ -171,27 +201,18 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 		return nil
 	}
 
-	if err := encoder.PretouchMany(vts, opts...); err != nil {
-		return err
-	}
-	if err := decoder.PretouchMany(vts, opts...); err != nil {
-		return err
-	}
-
-	ptrVts := make([]reflect.Type, 0, len(vts))
+	allVts := make([]reflect.Type, 0, len(vts)*2)
 	for _, vt := range vts {
+		allVts = append(allVts, vt)
 		if vt.Kind() == reflect.Ptr {
-			ptrVts = append(ptrVts, vt.Elem())
+			allVts = append(allVts, vt.Elem())
 		} else {
-			ptrVts = append(ptrVts, reflect.PtrTo(vt))
+			allVts = append(allVts, reflect.PtrTo(vt))
 		}
 	}
 
-	if err := encoder.PretouchMany(ptrVts, opts...); err != nil {
+	if err := encoder.PretouchMany(allVts, opts...); err != nil {
 		return err
 	}
-	if err := decoder.PretouchMany(ptrVts, opts...); err != nil {
-		return err
-	}
-	return nil
+	return decoder.PretouchMany(allVts, opts...)
 }
