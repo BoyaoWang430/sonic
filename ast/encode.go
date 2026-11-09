@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bytedance/gopkg/lang/dirtmake"
+	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
@@ -136,28 +137,45 @@ func freeBuffer(buf *[]byte) {
 }
 
 func (self *Node) encode(buf *[]byte) error {
-	if self.isRaw() {
+	return self.encodeFast(buf, self.loadt())
+}
+
+func (self *Node) encodeFast(buf *[]byte, t types.ValueType) error {
+	if t&_V_RAW != 0 {
+		if self.m == nil {
+			*buf = append(*buf, self.toString()...)
+			return nil
+		}
 		return self.encodeRaw(buf)
 	}
-	switch int(self.itype()) {
+	switch int(t & _MASK_LAZY) {
 	case V_NONE:
 		return ErrNotExist
 	case V_ERROR:
 		return self.Check()
 	case V_NULL:
-		return self.encodeNull(buf)
+		*buf = append(*buf, strNull...)
+		return nil
 	case V_TRUE:
-		return self.encodeTrue(buf)
+		*buf = append(*buf, bytesTrue...)
+		return nil
 	case V_FALSE:
-		return self.encodeFalse(buf)
+		*buf = append(*buf, bytesFalse...)
+		return nil
 	case V_ARRAY:
 		return self.encodeArray(buf)
 	case V_OBJECT:
 		return self.encodeObject(buf)
 	case V_STRING:
-		return self.encodeString(buf)
+		if self.l == 0 {
+			*buf = append(*buf, '"', '"')
+			return nil
+		}
+		quote(buf, self.toString())
+		return nil
 	case V_NUMBER:
-		return self.encodeNumber(buf)
+		*buf = append(*buf, self.toString()...)
+		return nil
 	case V_ANY:
 		return self.encodeInterface(buf)
 	default:
@@ -225,18 +243,53 @@ func (self *Node) encodeArray(buf *[]byte) error {
 
 	*buf = append(*buf, '[')
 
+	s := (*linkedNodes)(self.p)
+	total := s.Len()
+	headLen := total
+	if headLen > _DEFAULT_NODE_CAP {
+		headLen = _DEFAULT_NODE_CAP
+	}
+
 	var started bool
-	for i := 0; i < nb; i++ {
-		n := self.nodeAt(i)
-		if !n.Exists() {
+	for i := 0; i < headLen; i++ {
+		n := &s.head[i]
+		t := n.loadt()
+		if t == _V_NONE || t == V_ERROR {
 			continue
 		}
 		if started {
 			*buf = append(*buf, ',')
 		}
 		started = true
-		if err := n.encode(buf); err != nil {
+		if err := n.encodeFast(buf, t); err != nil {
 			return err
+		}
+	}
+	if total > _DEFAULT_NODE_CAP {
+		rem := total - _DEFAULT_NODE_CAP
+		for _, chunk := range s.tail {
+			limit := rem
+			if limit > _DEFAULT_NODE_CAP {
+				limit = _DEFAULT_NODE_CAP
+			}
+			for j := 0; j < limit; j++ {
+				n := &chunk[j]
+				t := n.loadt()
+				if t == _V_NONE || t == V_ERROR {
+					continue
+				}
+				if started {
+					*buf = append(*buf, ',')
+				}
+				started = true
+				if err := n.encodeFast(buf, t); err != nil {
+					return err
+				}
+			}
+			rem -= limit
+			if rem <= 0 {
+				break
+			}
 		}
 	}
 
@@ -245,14 +298,12 @@ func (self *Node) encodeArray(buf *[]byte) error {
 }
 
 func (self *Pair) encode(buf *[]byte) error {
-	if len(*buf) == 0 {
+	if len(self.Key) == 0 {
 		*buf = append(*buf, '"', '"', ':')
 		return self.Value.encode(buf)
 	}
 
-	quote(buf, self.Key)
-	*buf = append(*buf, ':')
-
+	quoteKey(buf, self.Key)
 	return self.Value.encode(buf)
 }
 
@@ -271,18 +322,63 @@ func (self *Node) encodeObject(buf *[]byte) error {
 
 	*buf = append(*buf, '{')
 
+	s := (*linkedPairs)(self.p)
+	total := s.Len()
+	headLen := total
+	if headLen > _DEFAULT_NODE_CAP {
+		headLen = _DEFAULT_NODE_CAP
+	}
+
 	var started bool
-	for i := 0; i < nb; i++ {
-		n := self.pairAt(i)
-		if n == nil || !n.Value.Exists() {
+	for i := 0; i < headLen; i++ {
+		n := &s.head[i]
+		t := n.Value.loadt()
+		if t == _V_NONE || t == V_ERROR {
 			continue
 		}
 		if started {
 			*buf = append(*buf, ',')
 		}
 		started = true
-		if err := n.encode(buf); err != nil {
+		if len(n.Key) == 0 {
+			*buf = append(*buf, '"', '"', ':')
+		} else {
+			quoteKey(buf, n.Key)
+		}
+		if err := n.Value.encodeFast(buf, t); err != nil {
 			return err
+		}
+	}
+	if total > _DEFAULT_NODE_CAP {
+		rem := total - _DEFAULT_NODE_CAP
+		for _, chunk := range s.tail {
+			limit := rem
+			if limit > _DEFAULT_NODE_CAP {
+				limit = _DEFAULT_NODE_CAP
+			}
+			for j := 0; j < limit; j++ {
+				n := &chunk[j]
+				t := n.Value.loadt()
+				if t == _V_NONE || t == V_ERROR {
+					continue
+				}
+				if started {
+					*buf = append(*buf, ',')
+				}
+				started = true
+				if len(n.Key) == 0 {
+					*buf = append(*buf, '"', '"', ':')
+				} else {
+					quoteKey(buf, n.Key)
+				}
+				if err := n.Value.encodeFast(buf, t); err != nil {
+					return err
+				}
+			}
+			rem -= limit
+			if rem <= 0 {
+				break
+			}
 		}
 	}
 

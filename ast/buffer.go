@@ -18,6 +18,7 @@ package ast
 
 import (
 	"sort"
+	"sync"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/caching"
@@ -26,9 +27,10 @@ import (
 type nodeChunk [_DEFAULT_NODE_CAP]Node
 
 type linkedNodes struct {
-	head nodeChunk
-	tail []*nodeChunk
-	size int
+	head    nodeChunk
+	tail    []*nodeChunk
+	tailBuf [2]*nodeChunk
+	size    int
 }
 
 func (self *linkedNodes) Cap() int {
@@ -93,7 +95,13 @@ func (self *linkedNodes) Pop() {
 }
 
 func (self *linkedNodes) Push(v Node) {
-	self.Set(self.size, v)
+	i := self.size
+	if i < _DEFAULT_NODE_CAP {
+		self.head[i] = v
+		self.size = i + 1
+		return
+	}
+	self.Set(i, v)
 }
 
 func (self *linkedNodes) Set(i int, v Node) {
@@ -122,6 +130,10 @@ func (self *linkedNodes) Set(i int, v Node) {
 
 func (self *linkedNodes) growTailLength(l int) {
 	if l <= len(self.tail) {
+		return
+	}
+	if self.tail == nil && l <= len(self.tailBuf) {
+		self.tail = self.tailBuf[:l]
 		return
 	}
 	c := cap(self.tail)
@@ -189,19 +201,54 @@ func (self *linkedNodes) FromSlice(con []Node) {
 type pairChunk [_DEFAULT_NODE_CAP]Pair
 
 type linkedPairs struct {
-	index map[uint64]int
-	head  pairChunk
-	tail  []*pairChunk
-	size  int
+	index   map[uint64]int
+	head    pairChunk
+	tail    []*pairChunk
+	tailBuf [2]*pairChunk
+	muBuf   [4]sync.RWMutex
+	muUsed  int
+	size    int
+}
+
+func (self *linkedPairs) allocMutex() *sync.RWMutex {
+	if self.muUsed < len(self.muBuf) {
+		m := &self.muBuf[self.muUsed]
+		self.muUsed++
+		return m
+	}
+	return new(sync.RWMutex)
 }
 
 func (self *linkedPairs) BuildIndex() {
 	if self.index == nil {
 		self.index = make(map[uint64]int, self.size)
 	}
-	for i := 0; i < self.size; i++ {
-		p := self.At(i)
-		self.index[p.hash] = i
+	n := self.size
+	if n <= _DEFAULT_NODE_CAP {
+		for i := 0; i < n; i++ {
+			p := &self.head[i]
+			self.index[caching.StrHash(p.Key)] = i
+		}
+		return
+	}
+	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
+		p := &self.head[i]
+		self.index[caching.StrHash(p.Key)] = i
+	}
+	idx := _DEFAULT_NODE_CAP
+	for _, chunk := range self.tail {
+		limit := _DEFAULT_NODE_CAP
+		if rem := n - idx; rem < limit {
+			limit = rem
+		}
+		for j := 0; j < limit; j++ {
+			p := &chunk[j]
+			self.index[caching.StrHash(p.Key)] = idx + j
+		}
+		idx += limit
+		if idx >= n {
+			break
+		}
 	}
 }
 
@@ -235,7 +282,22 @@ func (self *linkedPairs) At(i int) *Pair {
 }
 
 func (self *linkedPairs) Push(v Pair) {
+	if self.index == nil && self.size < _DEFAULT_NODE_CAP {
+		self.head[self.size] = v
+		self.size++
+		return
+	}
 	self.Set(self.size, v)
+}
+
+func (self *linkedPairs) push(key string, val Node) {
+	i := self.size
+	if i < _DEFAULT_NODE_CAP {
+		self.head[i] = Pair{Key: key, Value: val}
+		self.size = i + 1
+		return
+	}
+	self.set(i, Pair{Key: key, Value: val})
 }
 
 func (self *linkedPairs) Pop() {
@@ -249,15 +311,14 @@ func (self *linkedPairs) Pop() {
 func (self *linkedPairs) Unset(i int) {
 	if self.index != nil {
 		p := self.At(i)
-		delete(self.index, p.hash)
+		delete(self.index, caching.StrHash(p.Key))
 	}
 	self.set(i, Pair{})
 }
 
 func (self *linkedPairs) Set(i int, v Pair) {
 	if self.index != nil {
-		h := v.hash
-		self.index[h] = i
+		self.index[caching.StrHash(v.Key)] = i
 	}
 	self.set(i, v)
 }
@@ -290,6 +351,10 @@ func (self *linkedPairs) growTailLength(l int) {
 	if l <= len(self.tail) {
 		return
 	}
+	if self.tail == nil && l <= len(self.tailBuf) {
+		self.tail = self.tailBuf[:l]
+		return
+	}
 	c := cap(self.tail)
 	for c < l {
 		c += 1 + c>>_APPEND_GROW_SHIFT
@@ -320,9 +385,33 @@ func (self *linkedPairs) Get(key string) (*Pair, int) {
 		}
 	}
 linear_search:
-	for i := 0; i < self.size; i++ {
-		if n := self.At(i); n.Key == key {
+	if self.size <= _DEFAULT_NODE_CAP {
+		for i := 0; i < self.size; i++ {
+			if n := &self.head[i]; n.Key == key {
+				return n, i
+			}
+		}
+		return nil, -1
+	}
+	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
+		if n := &self.head[i]; n.Key == key {
 			return n, i
+		}
+	}
+	rem := self.size - _DEFAULT_NODE_CAP
+	for cIdx, chunk := range self.tail {
+		limit := _DEFAULT_NODE_CAP
+		if rem < limit {
+			limit = rem
+		}
+		for j := 0; j < limit; j++ {
+			if n := &chunk[j]; n.Key == key {
+				return n, (cIdx+1)*_DEFAULT_NODE_CAP + j
+			}
+		}
+		rem -= limit
+		if rem <= 0 {
+			break
 		}
 	}
 	return nil, -1
@@ -351,9 +440,32 @@ func (self *linkedPairs) ToSlice(con []Pair) {
 }
 
 func (self *linkedPairs) ToMap(con map[string]Node) {
-	for i := 0; i < self.size; i++ {
-		n := self.At(i)
-		con[n.Key] = n.Value
+	n := self.size
+	if n <= _DEFAULT_NODE_CAP {
+		for i := 0; i < n; i++ {
+			p := &self.head[i]
+			con[p.Key] = p.Value
+		}
+		return
+	}
+	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
+		p := &self.head[i]
+		con[p.Key] = p.Value
+	}
+	rem := n - _DEFAULT_NODE_CAP
+	for _, chunk := range self.tail {
+		limit := _DEFAULT_NODE_CAP
+		if rem < limit {
+			limit = rem
+		}
+		for j := 0; j < limit; j++ {
+			p := &chunk[j]
+			con[p.Key] = p.Value
+		}
+		rem -= limit
+		if rem <= 0 {
+			break
+		}
 	}
 }
 
@@ -361,10 +473,7 @@ func (self *linkedPairs) copyPairs(to []Pair, from []Pair, l int) {
 	copy(to, from)
 	if self.index != nil {
 		for i := 0; i < l; i++ {
-			// NOTICE: in case of user not pass hash, just cal it
-			h := caching.StrHash(from[i].Key)
-			from[i].hash = h
-			self.index[h] = i
+			self.index[caching.StrHash(from[i].Key)] = i
 		}
 	}
 }
@@ -404,8 +513,8 @@ func (self *linkedPairs) Less(i, j int) bool {
 func (self *linkedPairs) Swap(i, j int) {
 	a, b := self.At(i), self.At(j)
 	if self.index != nil {
-		self.index[a.hash] = j
-		self.index[b.hash] = i
+		self.index[caching.StrHash(a.Key)] = j
+		self.index[caching.StrHash(b.Key)] = i
 	}
 	*a, *b = *b, *a
 }

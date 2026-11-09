@@ -136,7 +136,7 @@ func (self *Node) Check() error {
 	} else if self.loadt() != V_ERROR {
 		return nil
 	} else {
-		return self
+		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
 	}
 }
 
@@ -146,7 +146,7 @@ func (self *Node) checkFast() error {
 	} else if self.t != V_ERROR {
 		return nil
 	} else {
-		return self
+		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
 	}
 }
 
@@ -199,7 +199,7 @@ func (self *Node) checkRaw() error {
 
 	t := self.loadt()
 	if t == V_ERROR {
-		return self
+		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
 	}
 
 	if t&_V_RAW != 0 {
@@ -1093,6 +1093,9 @@ func (self *Node) IndexOrGetWithIdx(idx int, key string) (*Node, int) {
 
 // Map loads all keys of an object node
 func (self *Node) Map() (map[string]interface{}, error) {
+	if self == nil {
+		return nil, ErrNotExist
+	}
 	if self.isAny() {
 		any := self.packAny()
 		if v, ok := any.(map[string]interface{}); ok {
@@ -1100,6 +1103,9 @@ func (self *Node) Map() (map[string]interface{}, error) {
 		} else {
 			return nil, ErrUnsupportType
 		}
+	}
+	if self.m == nil && self.loadt() == (types.V_OBJECT|_V_RAW) {
+		return self.rawMap(false)
 	}
 	if err := self.should(types.V_OBJECT); err != nil {
 		return nil, err
@@ -1112,6 +1118,9 @@ func (self *Node) Map() (map[string]interface{}, error) {
 
 // MapUseNumber loads all keys of an object node, with numeric nodes cast to json.Number
 func (self *Node) MapUseNumber() (map[string]interface{}, error) {
+	if self == nil {
+		return nil, ErrNotExist
+	}
 	if self.isAny() {
 		any := self.packAny()
 		if v, ok := any.(map[string]interface{}); ok {
@@ -1119,6 +1128,9 @@ func (self *Node) MapUseNumber() (map[string]interface{}, error) {
 		} else {
 			return nil, ErrUnsupportType
 		}
+	}
+	if self.m == nil && self.loadt() == (types.V_OBJECT|_V_RAW) {
+		return self.rawMap(true)
 	}
 	if err := self.should(types.V_OBJECT); err != nil {
 		return nil, err
@@ -1238,6 +1250,9 @@ func (self *Node) sortKeys(recurse bool) (err error) {
 
 // Array loads all indexes of an array node
 func (self *Node) Array() ([]interface{}, error) {
+	if self == nil {
+		return nil, ErrNotExist
+	}
 	if self.isAny() {
 		any := self.packAny()
 		if v, ok := any.([]interface{}); ok {
@@ -1245,6 +1260,9 @@ func (self *Node) Array() ([]interface{}, error) {
 		} else {
 			return nil, ErrUnsupportType
 		}
+	}
+	if self.m == nil && self.loadt() == (types.V_ARRAY|_V_RAW) {
+		return self.rawArray(false)
 	}
 	if err := self.should(types.V_ARRAY); err != nil {
 		return nil, err
@@ -1257,6 +1275,9 @@ func (self *Node) Array() ([]interface{}, error) {
 
 // ArrayUseNumber loads all indexes of an array node, with numeric nodes cast to json.Number
 func (self *Node) ArrayUseNumber() ([]interface{}, error) {
+	if self == nil {
+		return nil, ErrNotExist
+	}
 	if self.isAny() {
 		any := self.packAny()
 		if v, ok := any.([]interface{}); ok {
@@ -1264,6 +1285,9 @@ func (self *Node) ArrayUseNumber() ([]interface{}, error) {
 		} else {
 			return nil, ErrUnsupportType
 		}
+	}
+	if self.m == nil && self.loadt() == (types.V_ARRAY|_V_RAW) {
+		return self.rawArray(true)
 	}
 	if err := self.should(types.V_ARRAY); err != nil {
 		return nil, err
@@ -1322,11 +1346,65 @@ func (self *Node) unsafeArray() (*linkedNodes, error) {
 // Interface loads all children under all paths from this node,
 // and converts itself as generic type.
 // WARN: all numeric nodes are cast to float64
-func (self *Node) Interface() (interface{}, error) {
-	if err := self.checkRaw(); err != nil {
+func (self *Node) rawInterface(useNumber bool) (interface{}, error) {
+	parser := Parser{s: self.toString(), noLazy: true, noIndex: true}
+	v, perr, err := parser.parseInterface(useNumber)
+	if perr != 0 {
+		se := newSyntaxError(parser.syntaxError(perr))
+		*self = *se
+		return nil, se
+	}
+	if err != nil {
 		return nil, err
 	}
-	switch self.t {
+	return v, nil
+}
+
+func (self *Node) rawMap(useNumber bool) (map[string]interface{}, error) {
+	parser := Parser{s: self.toString(), noLazy: true, noIndex: true}
+	if perr := parser.object(); perr != 0 {
+		se := newSyntaxError(parser.syntaxError(perr))
+		*self = *se
+		return nil, se
+	}
+	v, perr, err := parser.decodeObjectInterface(useNumber)
+	if perr != 0 {
+		se := newSyntaxError(parser.syntaxError(perr))
+		*self = *se
+		return nil, se
+	}
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (self *Node) rawArray(useNumber bool) ([]interface{}, error) {
+	parser := Parser{s: self.toString(), noLazy: true, noIndex: true}
+	if perr := parser.array(); perr != 0 {
+		se := newSyntaxError(parser.syntaxError(perr))
+		*self = *se
+		return nil, se
+	}
+	v, perr, err := parser.decodeArrayInterface(useNumber)
+	if perr != 0 {
+		se := newSyntaxError(parser.syntaxError(perr))
+		*self = *se
+		return nil, se
+	}
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (self *Node) Interface() (interface{}, error) {
+	if self != nil && self.m == nil && self.loadt()&_V_RAW != 0 {
+		return self.rawInterface(false)
+	} else if err := self.checkRaw(); err != nil {
+		return nil, err
+	}
+	switch self.loadt() {
 	case V_ERROR:
 		return nil, self.Check()
 	case types.V_NULL:
@@ -1378,10 +1456,12 @@ func (self *Node) packAny() interface{} {
 // InterfaceUseNumber works same with Interface()
 // except numeric nodes are cast to json.Number
 func (self *Node) InterfaceUseNumber() (interface{}, error) {
-	if err := self.checkRaw(); err != nil {
+	if self != nil && self.m == nil && self.loadt()&_V_RAW != 0 {
+		return self.rawInterface(true)
+	} else if err := self.checkRaw(); err != nil {
 		return nil, err
 	}
-	switch self.t {
+	switch self.loadt() {
 	case V_ERROR:
 		return nil, self.Check()
 	case types.V_NULL:
@@ -1456,7 +1536,7 @@ func (self *Node) Load() error {
 	case _V_OBJECT_LAZY:
 		self.loadAllKey(true)
 	case V_ERROR:
-		return self
+		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
 	case V_NONE:
 		return nil
 	}
@@ -1647,6 +1727,7 @@ func (self *Node) loadAllIndex(loadOnce bool) error {
 	parser, stack := self.getParserAndArrayStack()
 	if !loadOnce {
 		parser.noLazy = true
+		parser.noIndex = true
 	} else {
 		parser.loadOnce = true
 	}
@@ -1665,6 +1746,7 @@ func (self *Node) loadAllKey(loadOnce bool) error {
 	parser, stack := self.getParserAndObjectStack()
 	if !loadOnce {
 		parser.noLazy = true
+		parser.noIndex = true
 		*self, err = parser.decodeObject(&stack.v)
 	} else {
 		parser.loadOnce = true
@@ -1706,10 +1788,117 @@ func (self *Node) removePairAt(i int) {
 	self.l--
 }
 
+func (self *Node) nodeToInterface() (interface{}, error) {
+	switch self.loadt() {
+	case types.V_NULL:
+		return nil, nil
+	case types.V_TRUE:
+		return true, nil
+	case types.V_FALSE:
+		return false, nil
+	case types.V_STRING:
+		return self.toString(), nil
+	case _V_NUMBER:
+		return self.toFloat64()
+	case types.V_OBJECT:
+		return self.toGenericObject()
+	case types.V_ARRAY:
+		return self.toGenericArray()
+	default:
+		return self.Interface()
+	}
+}
+
+func (self *Node) nodeToInterfaceUseNumber() (interface{}, error) {
+	switch self.loadt() {
+	case types.V_NULL:
+		return nil, nil
+	case types.V_TRUE:
+		return true, nil
+	case types.V_FALSE:
+		return false, nil
+	case types.V_STRING:
+		return self.toString(), nil
+	case _V_NUMBER:
+		return self.toNumber(), nil
+	case types.V_OBJECT:
+		return self.toGenericObjectUseNumber()
+	case types.V_ARRAY:
+		return self.toGenericArrayUseNumber()
+	default:
+		return self.InterfaceUseNumber()
+	}
+}
+
 func (self *Node) toGenericArray() ([]interface{}, error) {
 	nb := self.len()
 	if nb == 0 {
 		return []interface{}{}, nil
+	}
+	if !self.isLazy() {
+		if s := (*linkedNodes)(self.p); s != nil {
+			total := s.Len()
+			ret := make([]interface{}, 0, nb)
+			headLen := total
+			if headLen > _DEFAULT_NODE_CAP {
+				headLen = _DEFAULT_NODE_CAP
+			}
+			for i := 0; i < headLen; i++ {
+				v := &s.head[i]
+				vt := v.loadt()
+				if vt == V_NONE || vt == V_ERROR {
+					continue
+				}
+				switch vt {
+				case types.V_STRING:
+					ret = append(ret, v.toString())
+				case _V_NUMBER:
+					f, err := v.toFloat64()
+					if err != nil {
+						return nil, err
+					}
+					ret = append(ret, f)
+				case types.V_NULL:
+					ret = append(ret, nil)
+				case types.V_TRUE:
+					ret = append(ret, true)
+				case types.V_FALSE:
+					ret = append(ret, false)
+				default:
+					vv, err := v.nodeToInterface()
+					if err != nil {
+						return nil, err
+					}
+					ret = append(ret, vv)
+				}
+			}
+			if total > _DEFAULT_NODE_CAP {
+				idx := _DEFAULT_NODE_CAP
+				for _, chunk := range s.tail {
+					limit := total - idx
+					if limit > _DEFAULT_NODE_CAP {
+						limit = _DEFAULT_NODE_CAP
+					}
+					for j := 0; j < limit; j++ {
+						v := &chunk[j]
+						vt := v.loadt()
+						if vt == V_NONE || vt == V_ERROR {
+							continue
+						}
+						vv, err := v.nodeToInterface()
+						if err != nil {
+							return nil, err
+						}
+						ret = append(ret, vv)
+					}
+					idx += limit
+					if idx >= total {
+						break
+					}
+				}
+			}
+			return ret, nil
+		}
 	}
 	ret := make([]interface{}, 0, nb)
 
@@ -1731,6 +1920,54 @@ func (self *Node) toGenericArrayUseNumber() ([]interface{}, error) {
 	nb := self.len()
 	if nb == 0 {
 		return []interface{}{}, nil
+	}
+	if !self.isLazy() {
+		if s := (*linkedNodes)(self.p); s != nil {
+			total := s.Len()
+			ret := make([]interface{}, 0, nb)
+			headLen := total
+			if headLen > _DEFAULT_NODE_CAP {
+				headLen = _DEFAULT_NODE_CAP
+			}
+			for i := 0; i < headLen; i++ {
+				v := &s.head[i]
+				vt := v.loadt()
+				if vt == V_NONE || vt == V_ERROR {
+					continue
+				}
+				vv, err := v.nodeToInterfaceUseNumber()
+				if err != nil {
+					return nil, err
+				}
+				ret = append(ret, vv)
+			}
+			if total > _DEFAULT_NODE_CAP {
+				idx := _DEFAULT_NODE_CAP
+				for _, chunk := range s.tail {
+					limit := total - idx
+					if limit > _DEFAULT_NODE_CAP {
+						limit = _DEFAULT_NODE_CAP
+					}
+					for j := 0; j < limit; j++ {
+						v := &chunk[j]
+						vt := v.loadt()
+						if vt == V_NONE || vt == V_ERROR {
+							continue
+						}
+						vv, err := v.nodeToInterfaceUseNumber()
+						if err != nil {
+							return nil, err
+						}
+						ret = append(ret, vv)
+					}
+					idx += limit
+					if idx >= total {
+						break
+					}
+				}
+			}
+			return ret, nil
+		}
 	}
 	ret := make([]interface{}, 0, nb)
 
@@ -1767,6 +2004,87 @@ func (self *Node) toGenericObject() (map[string]interface{}, error) {
 		return map[string]interface{}{}, nil
 	}
 	ret := make(map[string]interface{}, nb)
+	if !self.isLazy() {
+		if s := (*linkedPairs)(self.p); s != nil {
+			total := s.Len()
+			headLen := total
+			if headLen > _DEFAULT_NODE_CAP {
+				headLen = _DEFAULT_NODE_CAP
+			}
+			for i := 0; i < headLen; i++ {
+				p := &s.head[i]
+				vt := p.Value.loadt()
+				if vt == V_NONE || vt == V_ERROR {
+					continue
+				}
+				switch vt {
+				case types.V_STRING:
+					ret[p.Key] = p.Value.toString()
+				case _V_NUMBER:
+					f, err := p.Value.toFloat64()
+					if err != nil {
+						return nil, err
+					}
+					ret[p.Key] = f
+				case types.V_NULL:
+					ret[p.Key] = nil
+				case types.V_TRUE:
+					ret[p.Key] = true
+				case types.V_FALSE:
+					ret[p.Key] = false
+				default:
+					vv, err := p.Value.nodeToInterface()
+					if err != nil {
+						return nil, err
+					}
+					ret[p.Key] = vv
+				}
+			}
+			if total > _DEFAULT_NODE_CAP {
+				rem := total - _DEFAULT_NODE_CAP
+				for _, chunk := range s.tail {
+					limit := rem
+					if limit > _DEFAULT_NODE_CAP {
+						limit = _DEFAULT_NODE_CAP
+					}
+					for j := 0; j < limit; j++ {
+						p := &chunk[j]
+						vt := p.Value.loadt()
+						if vt == V_NONE || vt == V_ERROR {
+							continue
+						}
+						switch vt {
+						case types.V_STRING:
+							ret[p.Key] = p.Value.toString()
+						case _V_NUMBER:
+							f, err := p.Value.toFloat64()
+							if err != nil {
+								return nil, err
+							}
+							ret[p.Key] = f
+						case types.V_NULL:
+							ret[p.Key] = nil
+						case types.V_TRUE:
+							ret[p.Key] = true
+						case types.V_FALSE:
+							ret[p.Key] = false
+						default:
+							vv, err := p.Value.nodeToInterface()
+							if err != nil {
+								return nil, err
+							}
+							ret[p.Key] = vv
+						}
+					}
+					rem -= limit
+					if rem <= 0 {
+						break
+					}
+				}
+			}
+			return ret, nil
+		}
+	}
 
 	/* convert each item */
 	it := self.properties()
@@ -1788,6 +2106,53 @@ func (self *Node) toGenericObjectUseNumber() (map[string]interface{}, error) {
 		return map[string]interface{}{}, nil
 	}
 	ret := make(map[string]interface{}, nb)
+	if !self.isLazy() {
+		if s := (*linkedPairs)(self.p); s != nil {
+			total := s.Len()
+			headLen := total
+			if headLen > _DEFAULT_NODE_CAP {
+				headLen = _DEFAULT_NODE_CAP
+			}
+			for i := 0; i < headLen; i++ {
+				p := &s.head[i]
+				vt := p.Value.loadt()
+				if vt == V_NONE || vt == V_ERROR {
+					continue
+				}
+				vv, err := p.Value.nodeToInterfaceUseNumber()
+				if err != nil {
+					return nil, err
+				}
+				ret[p.Key] = vv
+			}
+			if total > _DEFAULT_NODE_CAP {
+				rem := total - _DEFAULT_NODE_CAP
+				for _, chunk := range s.tail {
+					limit := rem
+					if limit > _DEFAULT_NODE_CAP {
+						limit = _DEFAULT_NODE_CAP
+					}
+					for j := 0; j < limit; j++ {
+						p := &chunk[j]
+						vt := p.Value.loadt()
+						if vt == V_NONE || vt == V_ERROR {
+							continue
+						}
+						vv, err := p.Value.nodeToInterfaceUseNumber()
+						if err != nil {
+							return nil, err
+						}
+						ret[p.Key] = vv
+					}
+					rem -= limit
+					if rem <= 0 {
+						break
+					}
+				}
+			}
+			return ret, nil
+		}
+	}
 
 	/* convert each item */
 	it := self.properties()
@@ -1924,19 +2289,67 @@ func (self *Node) toString() string {
 }
 
 func (node *Node) toFloat64() (float64, error) {
-	ret, err := node.toNumber().Float64()
-	if err != nil {
-		return 0, err
+	return parseFloat64Fast(node.toString())
+}
+
+func parseFloat64Fast(s string) (float64, error) {
+	n := len(s)
+	if n > 0 && n <= 19 {
+		i := 0
+		neg := false
+		if s[0] == '-' {
+			neg = true
+			i = 1
+		}
+		if i < n && (n-i == 1 || (s[i] >= '1' && s[i] <= '9')) {
+			var u uint64
+			for ; i < n; i++ {
+				d := s[i] - '0'
+				if d > 9 {
+					break
+				}
+				u = u*10 + uint64(d)
+			}
+			if i == n {
+				f := float64(u)
+				if neg {
+					return -f, nil
+				}
+				return f, nil
+			}
+		}
 	}
-	return ret, nil
+	return strconv.ParseFloat(s, 64)
 }
 
 func (node *Node) toInt64() (int64, error) {
-	ret, err := node.toNumber().Int64()
-	if err != nil {
-		return 0, err
+	s := node.toString()
+	n := len(s)
+	if n > 0 && n <= 19 {
+		i := 0
+		neg := false
+		if s[0] == '-' {
+			neg = true
+			i = 1
+		}
+		if i < n && n-i <= 18 && (n-i == 1 || (s[i] >= '1' && s[i] <= '9')) {
+			var u uint64
+			for ; i < n; i++ {
+				d := s[i] - '0'
+				if d > 9 {
+					break
+				}
+				u = u*10 + uint64(d)
+			}
+			if i == n {
+				if neg {
+					return -int64(u), nil
+				}
+				return int64(u), nil
+			}
+		}
 	}
-	return ret, nil
+	return strconv.ParseInt(s, 10, 64)
 }
 
 func newBytes(v []byte) Node {
@@ -1967,7 +2380,7 @@ func NewArray(v []Node) Node {
 	return newArray(s)
 }
 
-const _Threshold_Index = 16
+const _Threshold_Index = 32
 
 func newArray(v *linkedNodes) Node {
 	return Node{
@@ -2002,6 +2415,14 @@ func newObject(v *linkedPairs) Node {
 	}
 }
 
+func newObjectNoIndex(v *linkedPairs) Node {
+	return Node{
+		t: types.V_OBJECT,
+		l: uint(v.Len()),
+		p: unsafe.Pointer(v),
+	}
+}
+
 func (self *Node) setObject(v *linkedPairs) {
 	if v.size > _Threshold_Index {
 		v.BuildIndex()
@@ -2013,15 +2434,16 @@ func (self *Node) setObject(v *linkedPairs) {
 
 func (self *Node) parseRaw(full bool) {
 	lock := self.lock()
-	defer self.unlock()
 	if !self.isRaw() {
+		self.unlock()
 		return
 	}
 	raw := self.toString()
 	parser := NewParserObj(raw)
 	var e types.ParsingError
-	if full {
+	if full && !lock {
 		parser.noLazy = true
+		parser.noIndex = true
 		*self, e = parser.Parse()
 	} else if lock {
 		var n Node
@@ -2035,6 +2457,7 @@ func (self *Node) parseRaw(full bool) {
 	if e != 0 {
 		*self = *newSyntaxError(parser.syntaxError(e))
 	}
+	self.unlock()
 }
 
 func (self *Node) assign(n Node) {

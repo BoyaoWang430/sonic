@@ -17,6 +17,7 @@
 package ast
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -49,16 +50,24 @@ type Parser struct {
 	p         int
 	s         string
 	noLazy    bool
+	noIndex   bool
 	loadOnce  bool
 	skipValue bool
 	dbuf      *byte
+	muPool    *linkedPairs
 }
 
 /** Parser Private Methods **/
 
 func (self *Parser) delim() types.ParsingError {
-	n := len(self.s)
-	p := self.lspace(self.p)
+	s := self.s
+	n := len(s)
+	p := self.p
+	if p < n && s[p] == ':' {
+		self.p = p + 1
+		return 0
+	}
+	p = self.lspace(p)
 
 	/* check for EOF */
 	if p >= n {
@@ -66,7 +75,7 @@ func (self *Parser) delim() types.ParsingError {
 	}
 
 	/* check for the delimiter */
-	if self.s[p] != ':' {
+	if s[p] != ':' {
 		return types.ERR_INVALID_CHAR
 	}
 
@@ -114,11 +123,20 @@ func (self *Parser) array() types.ParsingError {
 }
 
 func (self *Parser) lspace(sp int) int {
-	ns := len(self.s)
-	for ; sp < ns && utils.IsSpace(self.s[sp]); sp += 1 {
+	if uint(sp) < uint(len(self.s)) && self.s[sp] > ' ' {
+		return sp
 	}
+	return lspaceSlow(self.s, sp)
+}
 
-	return sp
+func lspaceSlow(s string, sp int) int {
+	if uint(sp) >= uint(len(s)) {
+		return sp
+	}
+	if p := skipBlank(s, sp); p >= 0 {
+		return p
+	}
+	return len(s)
 }
 
 func (self *Parser) backward() {
@@ -207,23 +225,27 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 		return Node{t: types.V_OBJECT}, 0
 	}
 
+	if self.loadOnce {
+		self.muPool = ret
+	}
+
 	/* decode each pair */
 	for {
 		var val Node
-		var njs types.JsonState
 		var err types.ParsingError
 
 		/* decode the key */
-		if njs = self.decodeValue(); njs.Vt != types.V_STRING {
+		start, ep := self.decodeKey()
+		if start < 0 {
 			return Node{}, types.ERR_INVALID_CHAR
 		}
 
 		/* extract the key */
 		idx := self.p - 1
-		key := self.s[njs.Iv:idx]
+		key := self.s[start:idx]
 
 		/* check for escape sequence */
-		if njs.Ep != -1 {
+		if ep != -1 {
 			if key, err = unquote.String(key); err != 0 {
 				return Node{}, err
 			}
@@ -257,7 +279,7 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 
 		/* add the value to result */
 		// FIXME: ret's address may change here, thus previous referred node in ret may be invalid !!
-		ret.Push(NewPair(key, val))
+		ret.push(key, val)
 		self.p = self.lspace(self.p)
 
 		/* check for EOF */
@@ -271,6 +293,9 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 			self.p++
 		case '}':
 			self.p++
+			if self.noIndex {
+				return newObjectNoIndex(ret), 0
+			}
 			return newObject(ret), 0
 		default:
 			// if val.isLazy() {
@@ -301,6 +326,15 @@ func (self *Parser) decodeString(iv int64, ep int) (Node, types.ParsingError) {
 	}
 }
 
+func (self *Parser) decodeStringStr(iv int64, ep int) (string, types.ParsingError) {
+	p := self.p - 1
+	s := self.s[iv:p]
+	if ep == -1 {
+		return s, 0
+	}
+	return unquote.String(s)
+}
+
 /** Parser Interface **/
 
 func (self *Parser) Pos() int {
@@ -311,6 +345,93 @@ func (self *Parser) Pos() int {
 // NOTICE: the specific parsing lazy dependens parser's option
 // It only parse first layer and first child for Object or Array be default
 func (self *Parser) Parse() (Node, types.ParsingError) {
+	if self.dbuf == nil {
+		s := self.s
+		n := len(s)
+		p := self.p
+		if uint(p) < uint(n) && s[p] <= ' ' {
+			if s[p] == ' ' && p+1 < n && s[p+1] > ' ' {
+				p++
+			} else {
+				p = lspaceSlow(s, p)
+			}
+		}
+		if uint(p) < uint(n) {
+			c := s[p]
+			switch c {
+			case '"':
+				start := p + 1
+				limit := start + 16
+				if limit > n {
+					limit = n
+				}
+				i := start
+				for i < limit {
+					b := s[i]
+					if b == '"' {
+						self.p = i + 1
+						return NewString(s[start:i]), 0
+					}
+					if b == '\\' {
+						break
+					}
+					i++
+				}
+				return self.decodeStringTail(start, i)
+			case 't':
+				if p+4 <= n && s[p+1] == 'r' && s[p+2] == 'u' && s[p+3] == 'e' {
+					self.p = p + 4
+					return trueNode, 0
+				}
+			case 'f':
+				if p+5 <= n && s[p+1] == 'a' && s[p+2] == 'l' && s[p+3] == 's' && s[p+4] == 'e' {
+					self.p = p + 5
+					return falseNode, 0
+				}
+			case 'n':
+				if p+4 <= n && s[p+1] == 'u' && s[p+2] == 'l' && s[p+3] == 'l' {
+					self.p = p + 4
+					return nullNode, 0
+				}
+			case '{':
+				self.p = p + 1
+				goto parse_object
+			case '[':
+				self.p = p + 1
+				goto parse_array
+			case '0':
+				if p+1 == n {
+					self.p = p + 1
+					return NewNumber(s[p : p+1]), 0
+				}
+				if p+1 < n {
+					d := s[p+1]
+					if d == ',' || d == '}' || d == ']' || d == ' ' || d == '\n' || d == '\r' || d == '\t' {
+						self.p = p + 1
+						return NewNumber(s[p : p+1]), 0
+					}
+				}
+			default:
+				if c >= '1' && c <= '9' {
+					i := p + 1
+					for i < n && s[i] >= '0' && s[i] <= '9' {
+						i++
+					}
+					if i == n {
+						self.p = i
+						return NewNumber(s[p:i]), 0
+					}
+					if i < n {
+						d := s[i]
+						if d == ',' || d == '}' || d == ']' || d == ' ' || d == '\n' || d == '\r' || d == '\t' {
+							self.p = i
+							return NewNumber(s[p:i]), 0
+						}
+					}
+				}
+			}
+		}
+	}
 	switch val := self.decodeValue(); val.Vt {
 	case types.V_EOF:
 		return Node{}, types.ERR_EOF
@@ -323,10 +444,42 @@ func (self *Parser) Parse() (Node, types.ParsingError) {
 	case types.V_STRING:
 		return self.decodeString(val.Iv, val.Ep)
 	case types.V_ARRAY:
+		goto parse_array
+	case types.V_OBJECT:
+		goto parse_object
+	case types.V_DOUBLE:
+		return NewNumber(self.s[val.Ep:self.p]), 0
+	case types.V_INTEGER:
+		return NewNumber(self.s[val.Ep:self.p]), 0
+	default:
+		return Node{}, types.ParsingError(-val.Vt)
+	}
+
+parse_array:
+	{
 		s := self.p - 1
-		if p := skipBlank(self.s, self.p); p >= self.p && self.s[p] == ']' {
+		p := self.p
+		if uint(p) < uint(len(self.s)) && self.s[p] == ']' {
 			self.p = p + 1
 			return Node{t: types.V_ARRAY}, 0
+		}
+		if self.loadOnce && !self.noLazy {
+			self.p = s
+			s, e := self.skipFast()
+			if e != 0 {
+				return Node{}, e
+			}
+			return self.newRawNode(self.s[s:self.p], types.V_ARRAY, true), 0
+		}
+		if uint(p) < uint(len(self.s)) && self.s[p] <= ' ' {
+			p = skipBlank(self.s, p)
+		}
+		if p >= self.p && uint(p) < uint(len(self.s)) {
+			if self.s[p] == ']' {
+				self.p = p + 1
+				return Node{t: types.V_ARRAY}, 0
+			}
+			self.p = p
 		}
 		if self.noLazy {
 			if self.loadOnce {
@@ -334,21 +487,34 @@ func (self *Parser) Parse() (Node, types.ParsingError) {
 			}
 			return self.decodeArray(new(linkedNodes))
 		}
-		// NOTICE: loadOnce always keep raw json for object or array
-		if self.loadOnce {
+		return newLazyArray(self), 0
+	}
+
+parse_object:
+	{
+		s := self.p - 1
+		p := self.p
+		if uint(p) < uint(len(self.s)) && self.s[p] == '}' {
+			self.p = p + 1
+			return Node{t: types.V_OBJECT}, 0
+		}
+		if self.loadOnce && !self.noLazy {
 			self.p = s
 			s, e := self.skipFast()
 			if e != 0 {
 				return Node{}, e
 			}
-			return newRawNode(self.s[s:self.p], types.V_ARRAY, true), 0
+			return self.newRawNode(self.s[s:self.p], types.V_OBJECT, true), 0
 		}
-		return newLazyArray(self), 0
-	case types.V_OBJECT:
-		s := self.p - 1
-		if p := skipBlank(self.s, self.p); p >= self.p && self.s[p] == '}' {
-			self.p = p + 1
-			return Node{t: types.V_OBJECT}, 0
+		if uint(p) < uint(len(self.s)) && self.s[p] <= ' ' {
+			p = skipBlank(self.s, p)
+		}
+		if p >= self.p && uint(p) < uint(len(self.s)) {
+			if self.s[p] == '}' {
+				self.p = p + 1
+				return Node{t: types.V_OBJECT}, 0
+			}
+			self.p = p
 		}
 		// NOTICE: loadOnce always keep raw json for object or array
 		if self.noLazy {
@@ -357,21 +523,7 @@ func (self *Parser) Parse() (Node, types.ParsingError) {
 			}
 			return self.decodeObject(new(linkedPairs))
 		}
-		if self.loadOnce {
-			self.p = s
-			s, e := self.skipFast()
-			if e != 0 {
-				return Node{}, e
-			}
-			return newRawNode(self.s[s:self.p], types.V_OBJECT, true), 0
-		}
 		return newLazyObject(self), 0
-	case types.V_DOUBLE:
-		return NewNumber(self.s[val.Ep:self.p]), 0
-	case types.V_INTEGER:
-		return NewNumber(self.s[val.Ep:self.p]), 0
-	default:
-		return Node{}, types.ParsingError(-val.Vt)
 	}
 }
 
@@ -392,22 +544,22 @@ func (self *Parser) searchKey(match string) types.ParsingError {
 		return _ERR_NOT_FOUND
 	}
 
-	var njs types.JsonState
 	var err types.ParsingError
 	/* decode each pair */
 	for {
 
 		/* decode the key */
-		if njs = self.decodeValue(); njs.Vt != types.V_STRING {
+		start, ep := self.decodeKey()
+		if start < 0 {
 			return types.ERR_INVALID_CHAR
 		}
 
 		/* extract the key */
 		idx := self.p - 1
-		key := self.s[njs.Iv:idx]
+		key := self.s[start:idx]
 
 		/* check for escape sequence */
-		if njs.Ep != -1 {
+		if ep != -1 {
 			if key, err = unquote.String(key); err != 0 {
 				return err
 			}
@@ -575,20 +727,20 @@ func (self *Node) skipNextPair() *Pair {
 
 	/* decode one pair */
 	var val Node
-	var njs types.JsonState
 	var err types.ParsingError
 
 	/* decode the key */
-	if njs = parser.decodeValue(); njs.Vt != types.V_STRING {
+	start, ep := parser.decodeKey()
+	if start < 0 {
 		return newErrorPair(parser.syntaxError(types.ERR_INVALID_CHAR))
 	}
 
 	/* extract the key */
 	idx := parser.p - 1
-	key := parser.s[njs.Iv:idx]
+	key := parser.s[start:idx]
 
 	/* check for escape sequence */
-	if njs.Ep != -1 {
+	if ep != -1 {
 		if key, err = unquote.String(key); err != 0 {
 			return newErrorPair(parser.syntaxError(err))
 		}
@@ -611,7 +763,7 @@ func (self *Node) skipNextPair() *Pair {
 	}
 
 	/* add the value to result */
-	ret.Push(NewPair(key, val))
+	ret.push(key, val)
 	self.l++
 	parser.p = parser.lspace(parser.p)
 
@@ -636,38 +788,226 @@ func (self *Node) skipNextPair() *Pair {
 
 /** Parser Factory **/
 
+func (self *Parser) parseInterface(useNumber bool) (interface{}, types.ParsingError, error) {
+	if self.dbuf == nil {
+		s := self.s
+		n := len(s)
+		p := self.p
+		if uint(p) < uint(n) && s[p] <= ' ' {
+			if s[p] == ' ' && p+1 < n && s[p+1] > ' ' {
+				p++
+			} else {
+				p = lspaceSlow(s, p)
+			}
+		}
+		if uint(p) < uint(n) {
+			c := s[p]
+			switch c {
+			case '"':
+				start := p + 1
+				limit := start + 16
+				if limit > n {
+					limit = n
+				}
+				i := start
+				for i < limit {
+					b := s[i]
+					if b == '"' {
+						self.p = i + 1
+						return s[start:i], 0, nil
+					}
+					if b == '\\' {
+						break
+					}
+					i++
+				}
+				str, perr := self.decodeStringTailStr(start, i)
+				return str, perr, nil
+			case 't':
+				if p+4 <= n && s[p+1] == 'r' && s[p+2] == 'u' && s[p+3] == 'e' {
+					self.p = p + 4
+					return true, 0, nil
+				}
+			case 'f':
+				if p+5 <= n && s[p+1] == 'a' && s[p+2] == 'l' && s[p+3] == 's' && s[p+4] == 'e' {
+					self.p = p + 5
+					return false, 0, nil
+				}
+			case 'n':
+				if p+4 <= n && s[p+1] == 'u' && s[p+2] == 'l' && s[p+3] == 'l' {
+					self.p = p + 4
+					return nil, 0, nil
+				}
+			case '{':
+				self.p = p + 1
+				return self.decodeObjectInterface(useNumber)
+			case '[':
+				self.p = p + 1
+				return self.decodeArrayInterface(useNumber)
+			case '0':
+				if p+1 == n || (p+1 < n && (s[p+1] == ',' || s[p+1] == '}' || s[p+1] == ']' || s[p+1] == ' ' || s[p+1] == '\n' || s[p+1] == '\r' || s[p+1] == '\t')) {
+					self.p = p + 1
+					if useNumber {
+						return json.Number(s[p : p+1]), 0, nil
+					}
+					return float64(0), 0, nil
+				}
+			default:
+				if c >= '1' && c <= '9' {
+					u := uint64(c - '0')
+					i := p + 1
+					for i < n && s[i] >= '0' && s[i] <= '9' {
+						u = u*10 + uint64(s[i]-'0')
+						i++
+					}
+					if i == n || (i < n && (s[i] == ',' || s[i] == '}' || s[i] == ']' || s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t')) {
+						self.p = i
+						if useNumber {
+							return json.Number(s[p:i]), 0, nil
+						}
+						if i-p <= 19 {
+							return float64(u), 0, nil
+						}
+						f, err := parseFloat64Fast(s[p:i])
+						return f, 0, err
+					}
+				}
+			}
+		}
+	}
+	switch val := self.decodeValue(); val.Vt {
+	case types.V_EOF:
+		return nil, types.ERR_EOF, nil
+	case types.V_NULL:
+		return nil, 0, nil
+	case types.V_TRUE:
+		return true, 0, nil
+	case types.V_FALSE:
+		return false, 0, nil
+	case types.V_STRING:
+		str, perr := self.decodeStringStr(val.Iv, val.Ep)
+		return str, perr, nil
+	case types.V_ARRAY:
+		return self.decodeArrayInterface(useNumber)
+	case types.V_OBJECT:
+		return self.decodeObjectInterface(useNumber)
+	case types.V_DOUBLE, types.V_INTEGER:
+		numStr := self.s[val.Ep:self.p]
+		if useNumber {
+			return json.Number(numStr), 0, nil
+		}
+		f, err := parseFloat64Fast(numStr)
+		return f, 0, err
+	default:
+		return nil, types.ParsingError(-val.Vt), nil
+	}
+}
+
+func (self *Parser) decodeObjectInterface(useNumber bool) (map[string]interface{}, types.ParsingError, error) {
+	sp := self.p
+	ns := len(self.s)
+	if self.p = self.lspace(sp); self.p >= ns {
+		return nil, types.ERR_EOF, nil
+	}
+	if self.s[self.p] == '}' {
+		self.p++
+		return map[string]interface{}{}, 0, nil
+	}
+	ret := make(map[string]interface{})
+	for {
+		start, ep := self.decodeKey()
+		if start < 0 {
+			return nil, types.ERR_INVALID_CHAR, nil
+		}
+		idx := self.p - 1
+		key := self.s[start:idx]
+		if ep != -1 {
+			var perr types.ParsingError
+			if key, perr = unquote.String(key); perr != 0 {
+				return nil, perr, nil
+			}
+		}
+		if perr := self.delim(); perr != 0 {
+			return nil, perr, nil
+		}
+		val, perr, err := self.parseInterface(useNumber)
+		if perr != 0 || err != nil {
+			return nil, perr, err
+		}
+		ret[key] = val
+		self.p = self.lspace(self.p)
+		if self.p >= ns {
+			return nil, types.ERR_EOF, nil
+		}
+		switch self.s[self.p] {
+		case ',':
+			self.p++
+		case '}':
+			self.p++
+			return ret, 0, nil
+		default:
+			return nil, types.ERR_INVALID_CHAR, nil
+		}
+	}
+}
+
+func (self *Parser) decodeArrayInterface(useNumber bool) ([]interface{}, types.ParsingError, error) {
+	sp := self.p
+	ns := len(self.s)
+	if self.p = self.lspace(sp); self.p >= ns {
+		return nil, types.ERR_EOF, nil
+	}
+	if self.s[self.p] == ']' {
+		self.p++
+		return []interface{}{}, 0, nil
+	}
+	ret := make([]interface{}, 0, 4)
+	for {
+		val, perr, err := self.parseInterface(useNumber)
+		if perr != 0 || err != nil {
+			return nil, perr, err
+		}
+		ret = append(ret, val)
+		self.p = self.lspace(self.p)
+		if self.p >= ns {
+			return nil, types.ERR_EOF, nil
+		}
+		switch self.s[self.p] {
+		case ',':
+			self.p++
+		case ']':
+			self.p++
+			return ret, 0, nil
+		default:
+			return nil, types.ERR_INVALID_CHAR, nil
+		}
+	}
+}
+
 // Loads parse all json into interface{}
 func Loads(src string) (int, interface{}, error) {
-	ps := &Parser{s: src}
-	np, err := ps.Parse()
-
-	/* check for errors */
-	if err != 0 {
-		return 0, nil, ps.ExportError(err)
-	} else {
-		x, err := np.Interface()
-		if err != nil {
-			return 0, nil, err
-		}
-		return ps.Pos(), x, nil
+	ps := Parser{s: src, noLazy: true, noIndex: true}
+	x, perr, err := ps.parseInterface(false)
+	if perr != 0 {
+		return 0, nil, ps.ExportError(perr)
 	}
+	if err != nil {
+		return 0, nil, err
+	}
+	return ps.Pos(), x, nil
 }
 
 // LoadsUseNumber parse all json into interface{}, with numeric nodes cast to json.Number
 func LoadsUseNumber(src string) (int, interface{}, error) {
-	ps := &Parser{s: src}
-	np, err := ps.Parse()
-
-	/* check for errors */
-	if err != 0 {
-		return 0, nil, err
-	} else {
-		x, err := np.InterfaceUseNumber()
-		if err != nil {
-			return 0, nil, err
-		}
-		return ps.Pos(), x, nil
+	ps := Parser{s: src, noLazy: true, noIndex: true}
+	x, perr, err := ps.parseInterface(true)
+	if perr != 0 {
+		return 0, nil, perr
 	}
+	if err != nil {
+		return 0, nil, err
+	}
+	return ps.Pos(), x, nil
 }
 
 // NewParser returns pointer of new allocated parser
@@ -713,6 +1053,22 @@ func backward(src string, i int) int {
 	return i
 }
 
+func (self *Parser) newRawNode(str string, typ types.ValueType, lock bool) Node {
+	ret := Node{
+		t: typ | _V_RAW,
+		p: rt.StrPtr(str),
+		l: uint(len(str)),
+	}
+	if lock {
+		if self.muPool != nil {
+			ret.m = self.muPool.allocMutex()
+		} else {
+			ret.m = new(sync.RWMutex)
+		}
+	}
+	return ret
+}
+
 func newRawNode(str string, typ types.ValueType, lock bool) Node {
 	ret := Node{
 		t: typ | _V_RAW,
@@ -750,6 +1106,9 @@ func switchRawType(c byte) types.ValueType {
 }
 
 func (self *Node) loadt() types.ValueType {
+	if self.m == nil {
+		return self.t
+	}
 	return (types.ValueType)(atomic.LoadInt64(&self.t))
 }
 

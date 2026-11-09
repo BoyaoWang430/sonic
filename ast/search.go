@@ -66,6 +66,79 @@ func (self *Searcher) GetByPath(path ...interface{}) (Node, error) {
 	return self.getByPath(path...)
 }
 
+// GetManyByPath searches multiple paths in a single shared-prefix traversal and
+// returns results strictly in caller request order. A missing individual path
+// yields an empty V_NONE Node (!Exists()) at its slot without aborting sibling
+// paths; malformed JSON returns a SyntaxError.
+func (self *Searcher) GetManyByPath(paths ...[]interface{}) ([]Node, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	plan, err := CompilePathPlan(paths...)
+	if err != nil {
+		panic("path must be either int(>=0) or string")
+	}
+	return self.GetManyWithPlan(plan)
+}
+
+// GetManyByPathCopy is like GetManyByPath with CopyReturn forced true so each
+// matched Node owns an independent heap string copy without sibling retention.
+func (self *Searcher) GetManyByPathCopy(paths ...[]interface{}) ([]Node, error) {
+	self.CopyReturn = true
+	return self.GetManyByPath(paths...)
+}
+
+// GetManyWithPlan executes a precompiled PathPlan against the Searcher's input.
+func (self *Searcher) GetManyWithPlan(plan *PathPlan) ([]Node, error) {
+	if plan == nil || plan.NumPaths() == 0 {
+		return nil, nil
+	}
+	n := plan.NumPaths()
+	var stackSpans [16]locatedSpan
+	var spans []locatedSpan
+	if n <= len(stackSpans) {
+		spans = stackSpans[:n]
+	} else {
+		spans = make([]locatedSpan, n)
+	}
+	view := inputView{src: self.parser.s, base: 0}
+	if err := locateWithPlan(view, plan, self.ValidateJSON, spans); err != nil {
+		return nil, err
+	}
+
+	nodes := make([]Node, n)
+	for i := 0; i < n; i++ {
+		sp := spans[i]
+		if !sp.found || sp.start < 0 {
+			continue
+		}
+		t := switchRawType(view.src[sp.start])
+		if t == _V_NONE {
+			continue
+		}
+		var raw string
+		if self.CopyReturn {
+			// Allocate an independent backing string per Node so retaining one
+			// small node never pins large sibling results or the source buffer.
+			raw = string([]byte(view.src[sp.start:sp.end]))
+		} else {
+			raw = view.src[sp.start:sp.end]
+		}
+		nodes[i] = newRawNode(raw, t, self.ConcurrentRead)
+	}
+	return nodes, nil
+}
+
+// SearchMany locates a batch of JSON paths over src in a single shared-prefix
+// pass and returns Nodes in caller request order.
+func SearchMany(src string, opts SearchOptions, paths ...[]interface{}) ([]Node, error) {
+	s := Searcher{
+		parser:        Parser{s: src, noLazy: false},
+		SearchOptions: opts,
+	}
+	return s.GetManyByPath(paths...)
+}
+
 func (self *Searcher) getByPath(path ...interface{}) (Node, error) {
 	var err types.ParsingError
 	var start int
