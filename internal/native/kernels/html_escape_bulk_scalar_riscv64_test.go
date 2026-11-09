@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 func checkScalarHTMLEscape(t *testing.T, src string, capacity, srcAlign, dstAlign, wantConsumed int, want string) {
@@ -17,7 +17,7 @@ func checkScalarHTMLEscape(t *testing.T, src string, capacity, srcAlign, dstAlig
 	source := bytes.Repeat([]byte{guard}, srcStart+len(src)+8)
 	copy(source[srcStart:], src)
 	dest := bytes.Repeat([]byte{guard}, dstStart+capacity+8)
-	input := unsafe.String(&source[srcStart], len(src))
+	input := rt.String(&source[srcStart], len(src))
 	output := dest[dstStart : dstStart+capacity]
 	consumed, written := HTMLEscape(input, output)
 	if consumed != wantConsumed || written != len(want) {

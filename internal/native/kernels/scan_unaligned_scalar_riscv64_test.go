@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 func TestScanStringUnalignedAndOverlap(t *testing.T) {
@@ -55,7 +55,7 @@ func TestUTF8UnalignedAndOverlap(t *testing.T) {
 				for tail := 0; tail < 8; tail++ {
 					content := strings.Repeat("a", prefix) + body + strings.Repeat("z", tail)
 					storage, ptr := alignedStringBlockInput(content, align)
-					src := unsafe.String(ptr, len(content))
+					src := rt.String(ptr, len(content))
 					for _, start := range []int{0, len(src) / 2, len(src)} {
 						checkUTF8AgainstStdlib(t, src, start)
 						var invalid []int
@@ -69,7 +69,7 @@ func TestUTF8UnalignedAndOverlap(t *testing.T) {
 						}
 						for slots := 0; slots < 4; slots++ {
 							positions := make([]int, slots)
-							wn, wc, wf := len(src), min(slots, len(invalid)), slots < len(invalid)
+							wn, wc, wf := len(src), minInt(slots, len(invalid)), slots < len(invalid)
 							if wf {
 								wn = invalid[slots]
 							}

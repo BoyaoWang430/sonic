@@ -5,7 +5,7 @@ package kernels
 import (
 	"runtime"
 	"testing"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 func TestScalarUTF8BulkTransitions(t *testing.T) {
@@ -16,7 +16,7 @@ func TestScalarUTF8BulkTransitions(t *testing.T) {
 			for i := range input {
 				input[i] = 'a'
 			}
-			src := unsafe.String(unsafe.SliceData(input), len(input))
+			src := rt.String(rt.SliceData(input), len(input))
 			checkUTF8AgainstStdlib(t, src, 0)
 			// The first non-ASCII byte can occur in any word of a bulk
 			// load. Include valid runes spanning word and bulk boundaries,
@@ -30,7 +30,7 @@ func TestScalarUTF8BulkTransitions(t *testing.T) {
 					checkUTF8AgainstStdlib(t, src, 0)
 					if marker == "\xff" {
 						const base = 113
-						next, count, full := utf8Scan(unsafe.SliceData(input), size, base, nil, 0)
+						next, count, full := utf8Scan(rt.SliceData(input), size, base, nil, 0)
 						if next != base+pos || count != 0 || !full {
 							t.Fatalf("align=%d size=%d invalid=%d: (%d, %d, %v), want (%d, 0, true)", align, size, pos, next, count, full, base+pos)
 						}
@@ -68,8 +68,8 @@ func TestScalarUTF8BulkCapacityAndResume(t *testing.T) {
 					out[i] = -77
 				}
 				tail := input[start:]
-				next, count, full := utf8Scan(unsafe.SliceData(tail), len(tail), base+start, &out[1], slots)
-				wantCount := min(slots, len(invalid)-consumed)
+				next, count, full := utf8Scan(rt.SliceData(tail), len(tail), base+start, &out[1], slots)
+				wantCount := minInt(slots, len(invalid)-consumed)
 				wantFull := consumed+wantCount < len(invalid)
 				wantNext := base + size
 				if wantFull {

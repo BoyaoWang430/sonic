@@ -300,8 +300,11 @@ func TestB01_A01_A02_EdgeContracts(t *testing.T) {
 		t.Fatalf("duplicate requested Node shared mutable state: got %d", id3)
 	}
 
-	// A02: PatchByPath must validate full single-root JSON and reject trailing garbage
-	// or syntax errors in unvisited sibling branches.
+	// A02: PatchByPath must validate full single-root JSON and reject trailing garbage,
+	// truncated root JSON, or syntax errors in unvisited sibling branches.
+	if _, err := PatchByPath([]byte(`{"a":1`), PathPatch{Path: []interface{}{"a"}, Value: 2}); err == nil {
+		t.Fatal("expected PatchByPath to reject truncated root JSON")
+	}
 	if _, err := PatchByPath([]byte(`{"a":1} trailing`), PathPatch{Path: []interface{}{"a"}, Value: 2}); err == nil {
 		t.Fatal("expected PatchByPath to reject trailing garbage")
 	}
@@ -311,5 +314,49 @@ func TestB01_A01_A02_EdgeContracts(t *testing.T) {
 	emptyPlan := MustCompilePathPlan()
 	if _, err := PatchWithPlan([]byte(`{"a":1} extra`), emptyPlan); err == nil {
 		t.Fatal("expected PatchWithPlan with empty plan to reject trailing garbage")
+	}
+
+	// [P2] Querying an ancestor and a descendant simultaneously must preserve full
+	// JSON validation of the ancestor subtree, reject trailing commas in objects,
+	// and enforce cumulative recursion depth limits.
+	if _, err := SearchMany(
+		`{"a":{"b":1,"x":truX}}`,
+		SearchOptions{ValidateJSON: true},
+		[]interface{}{},
+		[]interface{}{"a", "b"},
+	); err == nil {
+		t.Fatal("expected SearchMany on ancestor+descendant to reject invalid sibling truX inside intermediate object")
+	}
+	if _, err := SearchMany(
+		`{"a":[1,truX]}`,
+		SearchOptions{ValidateJSON: true},
+		[]interface{}{},
+		[]interface{}{"a", 0},
+	); err == nil {
+		t.Fatal("expected SearchMany on ancestor+descendant to reject invalid sibling truX inside intermediate array")
+	}
+	if _, err := SearchMany(
+		`{"a":1,}`,
+		SearchOptions{ValidateJSON: true},
+		[]interface{}{},
+		[]interface{}{"a"},
+	); err == nil {
+		t.Fatal("expected SearchMany to reject trailing comma in object when querying root and 'a'")
+	}
+	if _, err := SearchMany(
+		`{"a":1,}`,
+		SearchOptions{ValidateJSON: false},
+		[]interface{}{"b"},
+	); err == nil {
+		t.Fatal("expected SearchMany to reject trailing comma in object when scanning past 'a'")
+	}
+	deepTooMany := strings.Repeat("[", 4097) + "0" + strings.Repeat("]", 4097)
+	if _, err := SearchMany(
+		deepTooMany,
+		SearchOptions{ValidateJSON: true},
+		[]interface{}{0},
+		[]interface{}{0, 0},
+	); err == nil {
+		t.Fatal("expected SearchMany to enforce cumulative MAX_RECURSE across branch descent and target validation")
 	}
 }

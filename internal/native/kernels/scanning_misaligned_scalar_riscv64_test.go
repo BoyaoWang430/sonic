@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )
@@ -22,8 +22,8 @@ func TestScalarMaskAlignments(t *testing.T) {
 			for i := 0; i < size; i += 2 {
 				data[i] = " \t\r\n\"\\,}]"[rng.Intn(9)]
 			}
-			src := unsafe.String(unsafe.SliceData(data), len(data))
-			width := min(size, 64)
+			src := rt.String(rt.SliceData(data), len(data))
+			width := minInt(size, 64)
 			var events, controls, nonspace, boundaries uint64
 			for i := 0; i < width; i++ {
 				c, bit := src[i], uint64(1)<<i
@@ -97,7 +97,7 @@ func TestScalarContainerByteReference(t *testing.T) {
 				want, wantErr := scalarContainerReference(input)
 				for align := 0; align < 16; align++ {
 					copy(storage[align:], input)
-					src := unsafe.String(unsafe.SliceData(storage), align+len(input))
+					src := rt.String(rt.SliceData(storage), align+len(input))
 					end, err := SkipContainer(src, align)
 					if end != align+want || err != wantErr {
 						t.Fatalf("container align=%d input=%q: (%d,%v), want (%d,%v)", align, input, end, err, align+want, wantErr)

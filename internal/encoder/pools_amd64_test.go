@@ -1,13 +1,15 @@
-//go:build ignore
-// +build ignore
+//go:build amd64 && go1.16 && !go1.28
+// +build amd64,go1.16,!go1.28
 
 package encoder
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 )
@@ -166,4 +168,9 @@ func TestPretouchManyMutualRefValueCycleEncodeError(t *testing.T) {
 	assert.Error(t, err)
 	_, ok := err.(*json.UnsupportedValueError)
 	assert.True(t, ok)
+}
+
+func TestEncoderBackendSelection(t *testing.T) {
+	wantVM := os.Getenv("SONIC_ENCODER_USE_JIT") == ""
+	assert.Equal(t, wantVM, vars.UseVM)
 }

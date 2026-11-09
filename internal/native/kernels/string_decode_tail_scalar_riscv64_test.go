@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )
@@ -16,7 +16,7 @@ import (
 type stringDecodeTailResult struct{ end, written, escaped, pos, code int }
 
 func callStringDecodeTail(src, dst []byte, mode uint64) stringDecodeTailResult {
-	a, b, c, d, e := stringDecode(unsafe.SliceData(src), len(src), unsafe.SliceData(dst), mode)
+	a, b, c, d, e := stringDecode(rt.SliceData(src), len(src), rt.SliceData(dst), mode)
 	return stringDecodeTailResult{a, b, c, d, e}
 }
 

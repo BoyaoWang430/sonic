@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )
@@ -30,7 +31,7 @@ func BenchmarkNativeScanStringTailMatrix(b *testing.B) {
 				if int((uintptr(unsafe.Pointer(ptr))+1)&7) != scanAlign {
 					b.Fatal("incorrect body alignment")
 				}
-				input := unsafe.String(ptr, len(quoted))
+				input := rt.String(ptr, len(quoted))
 				wantEscape := strings.IndexByte(quoted, '\\')
 				check := func(end, escape, pos int, code types.ParsingError) {
 					if end != len(quoted) || escape != wantEscape || pos != -1 || code != 0 {

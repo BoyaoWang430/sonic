@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 // Check independent alignments, output capacities, and write boundaries.
@@ -24,7 +24,11 @@ func TestMisalignedStringCopies(t *testing.T) {
 			} {
 				_, full := scalarCopyTableReference(src, op.name, 7*len(src)+1)
 				fullLen := len(full)
-				for _, capacity := range []int{0, len(src) / 2, len(src), max(0, fullLen-1), fullLen, fullLen + 7} {
+				prevLen := fullLen - 1
+				if prevLen < 0 {
+					prevLen = 0
+				}
+				for _, capacity := range []int{0, len(src) / 2, len(src), prevLen, fullLen, fullLen + 7} {
 					wantN, wantText := scalarCopyTableReference(src, op.name, capacity)
 					wantW := len(wantText)
 					want := bytes.Repeat([]byte{0xa5}, capacity)
@@ -33,7 +37,7 @@ func TestMisalignedStringCopies(t *testing.T) {
 						input := bytes.Repeat([]byte{0x91}, len(src)+16)
 						copy(input[srcOffset:], src)
 						before := bytes.Clone(input)
-						s := unsafe.String(&input[srcOffset], len(src))
+						s := rt.String(&input[srcOffset], len(src))
 						for dstOffset := 0; dstOffset < 8; dstOffset++ {
 							storage := bytes.Repeat([]byte{0xa5}, capacity+16)
 							dst := storage[dstOffset : dstOffset+capacity]

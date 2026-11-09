@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-	"unsafe"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 type scalarEscapingPart struct {
@@ -39,7 +39,7 @@ func checkScalarEscapingTail(t *testing.T, operation func(string, []byte) (int, 
 	srcStorage := bytes.Repeat([]byte{guard}, srcStart+len(source)+8)
 	copy(srcStorage[srcStart:], source)
 	dstStorage := bytes.Repeat([]byte{guard}, dstStart+capacity+8)
-	src := unsafe.String(&srcStorage[srcStart], len(source))
+	src := rt.String(&srcStorage[srcStart], len(source))
 	dst := dstStorage[dstStart : dstStart+capacity]
 	consumed, written := operation(src, dst)
 	if consumed != wantConsumed || written != len(want) || string(dst[:written]) != want {
