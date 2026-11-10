@@ -29,12 +29,16 @@ func checkUnquote(t *testing.T, src, want string, flags uint64, wantPos int, wan
 	for _, alias := range []bool{false, true} {
 		storage := bytes.Repeat([]byte{0xa5}, len(src)+32)
 		dst := storage[16 : 16+len(src)]
-		input := src
+		var (
+			written, pos int
+			err          types.ParsingError
+		)
 		if alias {
 			copy(dst, src)
-			input = rt.String(rt.SliceData(dst), len(dst))
+			written, pos, err = UnquoteBuffer(rt.SliceData(dst), len(dst), rt.SliceData(dst), flags)
+		} else {
+			written, pos, err = Unquote(src, dst, flags)
 		}
-		written, pos, err := Unquote(input, dst, flags)
 		if err != wantErr || pos != wantPos || written < 0 || written > len(dst) {
 			t.Fatalf("Unquote(%q, flags=%d alias=%v)=(%d,%d,%v), want pos=%d err=%v", src, flags, alias, written, pos, err, wantPos, wantErr)
 		}

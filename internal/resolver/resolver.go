@@ -58,6 +58,7 @@ type FieldMeta struct {
 	Opts                 FieldOpts
 	Type                 reflect.Type
 	IsZero               func(reflect.Value) bool
+	PointerIsZero        bool
 	KeyNeedsSanitize     bool
 }
 
@@ -254,6 +255,7 @@ func handleOmitZero(fv StdField, fm *FieldMeta) {
 	if fv.omitZero {
 		fm.Opts |= F_omitzero
 		fm.IsZero = fv.isZero
+		fm.PointerIsZero = fv.pointerIsZero
 	}
 }
 

@@ -70,8 +70,6 @@ pairs = [
     ("/utf8", "utf8.go", "utf8_fallback.go"),
     ("/unquote", "unquote.go", "unquote_fallback.go"),
     ("/internal/native/number", "scan_go.go", "scan_generic.go"),
-    ("/internal/decoder/optdec", "parse_cparity_runs.go", "parse_exec_native.go"),
-    ("/internal/encoder/alg", "maporder_index.go", "maporder_legacy.go"),
     ("/internal/encoder/alg", "spec.go", "spec_compat.go"),
 ]
 cases = [

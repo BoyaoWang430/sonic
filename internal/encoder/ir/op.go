@@ -30,6 +30,7 @@ import (
 
 const (
 	_InsFlagNeedsSanitize uint64 = 1 << 48
+	_InsFlagCanAddr       uint64 = 1 << 48
 	OpSize                       = unsafe.Sizeof(Instr{})
 )
 
@@ -326,6 +327,17 @@ func newInsVField(op Op, fv *resolver.FieldMeta) Instr {
 	}
 }
 
+func newInsVFieldAddr(op Op, fv *resolver.FieldMeta, canAddr bool) Instr {
+	u := packOp(op)
+	if canAddr {
+		u |= _InsFlagCanAddr
+	}
+	return Instr{
+		u: u,
+		p: unsafe.Pointer(fv),
+	}
+}
+
 func (self Instr) Op() Op {
 	return Op(self.u >> 56)
 }
@@ -336,6 +348,10 @@ func (self Instr) Vi() int {
 
 func (self Instr) VField() *resolver.FieldMeta {
 	return (*resolver.FieldMeta)(self.p)
+}
+
+func (self Instr) CanAddr() bool {
+	return self.u&_InsFlagCanAddr != 0
 }
 
 func (self Instr) VFields() []StructFieldSpec {
@@ -472,6 +488,10 @@ func (self *Program) Fields(specs []StructFieldSpec) {
 
 func (self *Program) VField(op Op, fv *resolver.FieldMeta) {
 	*self = append(*self, newInsVField(op, fv))
+}
+
+func (self *Program) VFieldAddr(op Op, fv *resolver.FieldMeta, canAddr bool) {
+	*self = append(*self, newInsVFieldAddr(op, fv, canAddr))
 }
 
 func (self *Program) Vp(op Op, vt reflect.Type, pv bool) {

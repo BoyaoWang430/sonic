@@ -36,11 +36,6 @@ if (( build_only )); then export CGO_ENABLED=0; fi
 unset SONIC_USE_OPTDEC SONIC_USE_FASTMAP SONIC_ENCODER_USE_VM
 cd "$root"
 "$go_bin" version
-version=$("$go_bin" env GOVERSION)
-link_flags=()
-if [[ $version =~ go1\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 23 )); then
-    link_flags=(-ldflags=-checklinkname=0)
-fi
 exec_flags=()
 if (( build_only )); then exec_flags=(-exec=true); fi
 deps=$("$go_bin" list -deps . ./ast ./encoder ./decoder ./utf8 ./unquote)
@@ -70,23 +65,15 @@ echo 'Parser selection check: ARM64 Runs selected without custom build tags.'
 package_lines=$("$go_bin" list ./...)
 packages=()
 while IFS= read -r pkg; do
-    case "$pkg" in
-        github.com/bytedance/sonic/internal/jit|github.com/bytedance/sonic/internal/jit/*|\
-        github.com/bytedance/sonic/internal/decoder/jitdec|github.com/bytedance/sonic/internal/decoder/jitdec/*|\
-        github.com/bytedance/sonic/internal/encoder/x86|github.com/bytedance/sonic/internal/encoder/x86/*|\
-        github.com/bytedance/sonic/internal/native/avx2|github.com/bytedance/sonic/internal/native/avx2/*|\
-        github.com/bytedance/sonic/internal/native/sse|github.com/bytedance/sonic/internal/native/sse/*)
-            printf 'Exclude x86-only implementation package: %s\n' "$pkg" ;;
-        *) packages+=("$pkg") ;;
-    esac
+    packages+=("$pkg")
 done <<< "$package_lines"
-"$go_bin" test "${link_flags[@]}" "${exec_flags[@]}" "${packages[@]}"
+"$go_bin" test "${exec_flags[@]}" "${packages[@]}"
 SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
-    "$go_bin" test "${link_flags[@]}" "${exec_flags[@]}" "${packages[@]}"
+    "$go_bin" test "${exec_flags[@]}" "${packages[@]}"
 # Older toolchains may not support newer workspace modules. In build-only mode,
 # callers can use GOWORK=off to validate the main module's minimum Go version.
 if [[ ${GOWORK:-} != off ]]; then
-    "$go_bin" test "${link_flags[@]}" "${exec_flags[@]}" ./issue_test ./generic_test
+    "$go_bin" test "${exec_flags[@]}" ./issue_test ./generic_test
     SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
-        "$go_bin" test "${link_flags[@]}" "${exec_flags[@]}" ./issue_test ./generic_test
+        "$go_bin" test "${exec_flags[@]}" ./issue_test ./generic_test
 fi

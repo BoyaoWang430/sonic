@@ -8,7 +8,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"unsafe"
 )
 
 // Runs requires the owned padding supplied by newParser. Put that entire
@@ -32,7 +31,7 @@ func TestARMParserPaddedStringGuardPages(t *testing.T) {
 				for _, options := range []uint64{0, uint64(OptionValidateString)} {
 					want := cParityRunsTuneParser(source, 0, 8, options)
 					wantCode := want.parse()
-					wantUsed := int((want.nbuf.ncur - want.nbuf.nstart) / unsafe.Sizeof(node{}))
+					wantUsed := want.nbuf.nlen
 					size := len(source) + len(padding)
 					for _, edge := range []int{0, len(page) - size} {
 						input := page[edge : edge+size : edge+size]
@@ -40,10 +39,9 @@ func TestARMParserPaddedStringGuardPages(t *testing.T) {
 						copy(input[len(source):], padding)
 						p := cParityRunsTuneParser(source, 0, 8, options)
 						p.padded = input
-						p.start = uintptr(unsafe.Pointer(&input[0]))
-						p.cur, p.end = p.start, p.start+uintptr(len(source))
+						p.pos, p.end = 0, len(source)
 						code := p.parse()
-						used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+						used := p.nbuf.nlen
 						if code != wantCode || p.Pos() != want.Pos() || used != wantUsed || !bytes.Equal(p.padded, want.padded) {
 							t.Fatalf("prefix=%d length=%d suffix=%q options=%d edge=%d: code/pos/used=(%d,%d,%d), want=(%d,%d,%d)",
 								prefix, length, suffix, options, edge, code, p.Pos(), used, wantCode, want.Pos(), wantUsed)

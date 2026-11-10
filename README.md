@@ -6,10 +6,9 @@ A blazingly fast JSON serializing &amp; deserializing library, accelerated by JI
 
 ## Requirement
 
-- Go: 1.18~1.27
-  - Notice: Go1.24.0 is not supported due to the [issue](https://github.com/golang/go/issues/71672); please use a higher Go version or pass the build flag `-ldflags="-checklinkname=0"`.
+- Go: 1.20~1.27
 - OS: Linux / MacOS / Windows
-- CPU: AMD64 / (ARM64, need go1.20 above)
+- CPU: AMD64 / ARM64 / RISC-V (RVA22 / RVA23)
 
 ## Features
 

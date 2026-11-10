@@ -2,8 +2,6 @@
 
 package optdec
 
-import "unsafe"
-
 func nativeParserUsed(p *Parser) int {
-	return int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+	return p.nbuf.nlen
 }

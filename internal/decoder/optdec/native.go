@@ -86,19 +86,17 @@ type _nospaceBlock struct {
 
 // should consistent with native/parser.c
 type nodeBuf struct {
-	ncur   uintptr
+	nlen   int
 	parent int64
 	depth  uint64
-	nstart uintptr
-	nend   uintptr
+	ncap   int
 	iskey  bool
 	stat   jsonStat
 }
 
 func (self *nodeBuf) init(nodes []node) {
-	self.ncur = uintptr(unsafe.Pointer(&nodes[0]))
-	self.nstart = self.ncur
-	self.nend = self.ncur + uintptr(cap(nodes))*unsafe.Sizeof(node{})
+	self.nlen = 0
+	self.ncap = cap(nodes)
 	self.parent = -1
 }
 
@@ -111,11 +109,10 @@ type Parser struct {
 	backup []node
 
 	options uint64
-	// JSON cursor
-	start uintptr
-	cur   uintptr
-	end   uintptr
-	_nbk  _nospaceBlock
+	// JSON cursor offsets (relative to JsonBytes()[0])
+	pos  int
+	end  int
+	_nbk _nospaceBlock
 
 	// node buffer cursor
 	nbuf          nodeBuf
@@ -162,7 +159,7 @@ func newParser(data string, pos int, opt uint64) *Parser {
 }
 
 func (p *Parser) Pos() int {
-	return int(p.cur - p.start)
+	return p.pos
 }
 
 func (p *Parser) JsonBytes() []byte {
@@ -232,8 +229,7 @@ func (p *Parser) reset() {
 		p.nodes = p.backup
 		p.backup = nil
 	}
-	p.start = 0
-	p.cur = 0
+	p.pos = 0
 	p.end = 0
 	p.Json = ""
 	p.nbuf = nodeBuf{}

@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )
@@ -20,7 +19,7 @@ func TestRVVParserSmallNodeBuffer(t *testing.T) {
 		p.nodes = make([]node, capacity)
 		p.nbuf.init(p.nodes)
 		code := p.parse()
-		used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+		used := p.nbuf.nlen
 		if code != 0 || p.Pos() != len(input) {
 			t.Errorf("capacity %d: code=%d pos=%d", capacity, code, p.Pos())
 		}

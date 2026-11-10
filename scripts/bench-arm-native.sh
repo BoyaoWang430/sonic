@@ -142,8 +142,7 @@ else:
     if "github.com/bytedance/sonic/internal/native/kernels" not in selected.splitlines():
         raise RuntimeError("candidate did not select shared kernels")
     jobs = []
-    version_match = re.search(r"go1\.(\d+)", metadata["go_version"])
-    ldflags = ["-ldflags=-checklinkname=0"] if version_match and int(version_match[1]) >= 23 else []
+    ldflags = []
     for group, (pkg, regex, expected, smoke, expected_tests) in groups.items():
         for variant, path in (("baseline", old), ("candidate", root)):
             name = variant + "-" + group

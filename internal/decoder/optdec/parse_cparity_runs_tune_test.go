@@ -18,8 +18,7 @@ func cParityRunsTuneParser(src string, offset, capacity int, options uint64) *Pa
 	copy(storage[offset:], src)
 	copy(storage[offset+len(src):], padding)
 	p := &Parser{Json: src, padded: storage[offset:], nodes: make([]node, capacity), options: options, isEface: true}
-	p.start = uintptr(unsafe.Pointer(&p.padded[0]))
-	p.cur, p.end = p.start, p.start+uintptr(len(src))
+	p.pos, p.end = 0, len(src)
 	p.nbuf.init(p.nodes)
 	return p
 }
@@ -71,7 +70,7 @@ func TestCParityRunsStringProbeBoundary(t *testing.T) {
 					for offset := 0; offset < 32; offset++ {
 						p := cParityRunsTuneParser(src, offset, 8, options)
 						code := p.parse()
-						used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+						used := p.nbuf.nlen
 						if code != wantCode || p.Pos() != wantPos || used != 3 || p.nodes[2] != wantNode ||
 							!bytes.Equal(p.padded[len(prefix):len(src)], wantBytes[len(prefix):len(src)]) {
 							t.Fatalf("prefix=%d offset=%d options=%d priorEscaped=%v suffix=%q: code=%d pos=%d used=%d node=%+v, want %d/%d/3/%+v",

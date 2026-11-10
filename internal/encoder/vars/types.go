@@ -24,6 +24,8 @@ import (
 
 var (
 	ByteType                 = reflect.TypeOf(byte(0))
+	ByteSliceType            = reflect.TypeOf([]byte(nil))
+	EmptyInterfaceType       = reflect.TypeOf((*any)(nil)).Elem()
 	StringAnyMapType         = reflect.TypeOf(map[string]any(nil))
 	JsonNumberType           = reflect.TypeOf(json.Number(""))
 	JsonUnsupportedValueType = reflect.TypeOf(new(json.UnsupportedValueError))

@@ -20,12 +20,7 @@ func (d *sliceDecoder) setNil(vp unsafe.Pointer) {
 }
 
 func (d *sliceDecoder) setEmpty(vp unsafe.Pointer) {
-	rv := reflect.NewAt(d.typ, vp).Elem()
-	if rv.IsNil() {
-		rv.Set(d.emptySlice)
-	} else {
-		rv.SetLen(0)
-	}
+	reflect.NewAt(d.typ, vp).Elem().Set(d.emptySlice)
 }
 
 func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {

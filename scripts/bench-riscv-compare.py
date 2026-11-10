@@ -111,7 +111,7 @@ for group, (pkg, regex, expected) in groups.items():
             metadata["kernel_packages"][variant] = selected_pkg
         name = variant + "-" + group
         binary = out / (name + ".test")
-        run(name + ".build", [a.go, "test", "-c", "-ldflags=-checklinkname=0", "-o", binary, selected_pkg], path, profile)
+        run(name + ".build", [a.go, "test", "-c", "-o", binary, selected_pkg], path, profile)
         jobs.append((name, binary, selected_regex, expected, profile))
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 # Discover fixtures and run each once before any timed measurements.

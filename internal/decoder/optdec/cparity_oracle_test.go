@@ -13,7 +13,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"unsafe"
 )
 
 // This fixture is also compiled unchanged with the retained generated-C parser.
@@ -117,7 +116,7 @@ func TestCParityOracle(t *testing.T) {
 					p.isEface = eface
 					code := p.parse()
 					stat := p.nbuf.stat
-					used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+					used := p.nbuf.nlen
 					if used < 0 || used > len(p.nodes) {
 						t.Fatalf("case %d invalid tape size %d", i, used)
 					}

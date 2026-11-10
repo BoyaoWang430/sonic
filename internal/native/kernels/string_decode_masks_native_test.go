@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 func TestStringDecodeMaskChunks(t *testing.T) {
@@ -55,7 +54,7 @@ func TestStringDecodeShortSpansInPlace(t *testing.T) {
 			for offset := 0; offset < 8; offset++ {
 				storage, input, ptr := decodeAlignedRegion(len(body), offset)
 				copy(input, body)
-				written, pos, code := Unquote(rt.String(ptr, len(input)), input, 0)
+				written, pos, code := UnquoteBuffer(ptr, len(input), ptr, 0)
 				if written != len(want) || pos != -1 || code != 0 || string(input[:written]) != want ||
 					string(input[written:]) != body[written:] {
 					t.Fatalf("short span gap=%d contraction=%d offset=%d: written=%d pos=%d code=%d output=%q",

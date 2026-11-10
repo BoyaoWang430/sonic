@@ -327,11 +327,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceEface:
 				if vtyp == KArray && len(*(*[]interface{})(elem)) == 0 {
 					if uint32(vnode.val) == 0 {
-						if *(*[]interface{})(elem) == nil {
-							*(*[]interface{})(elem) = []interface{}{}
-						} else {
-							*(*[]interface{})(elem) = (*(*[]interface{})(elem))[:0]
-						}
+						*(*[]interface{})(elem) = []interface{}{}
 						continue
 					}
 					n := Node{ptr: vptr}
@@ -344,11 +340,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceI64:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						if *(*[]int64)(elem) == nil {
-							*(*[]int64)(elem) = []int64{}
-						} else {
-							*(*[]int64)(elem) = (*(*[]int64)(elem))[:0]
-						}
+						*(*[]int64)(elem) = []int64{}
 						continue
 					}
 					n := Node{ptr: vptr}
@@ -361,11 +353,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceI32:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						if *(*[]int32)(elem) == nil {
-							*(*[]int32)(elem) = []int32{}
-						} else {
-							*(*[]int32)(elem) = (*(*[]int32)(elem))[:0]
-						}
+						*(*[]int32)(elem) = []int32{}
 						continue
 					}
 					n := Node{ptr: vptr}
@@ -378,11 +366,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceU64:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						if *(*[]uint64)(elem) == nil {
-							*(*[]uint64)(elem) = []uint64{}
-						} else {
-							*(*[]uint64)(elem) = (*(*[]uint64)(elem))[:0]
-						}
+						*(*[]uint64)(elem) = []uint64{}
 						continue
 					}
 					n := Node{ptr: vptr}
@@ -395,11 +379,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceU32:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						if *(*[]uint32)(elem) == nil {
-							*(*[]uint32)(elem) = []uint32{}
-						} else {
-							*(*[]uint32)(elem) = (*(*[]uint32)(elem))[:0]
-						}
+						*(*[]uint32)(elem) = []uint32{}
 						continue
 					}
 					n := Node{ptr: vptr}
@@ -412,11 +392,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceString:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						if *(*[]string)(elem) == nil {
-							*(*[]string)(elem) = []string{}
-						} else {
-							*(*[]string)(elem) = (*(*[]string)(elem))[:0]
-						}
+						*(*[]string)(elem) = []string{}
 						continue
 					}
 					n := Node{ptr: vptr}

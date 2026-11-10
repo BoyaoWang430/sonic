@@ -5,7 +5,6 @@ package optdec
 import (
 	"fmt"
 	"runtime"
-	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
@@ -61,9 +60,8 @@ func newParserImpl(data string, pos int, opt uint64) *Parser {
 	}
 	p.padded = append(p.padded, p.Json...)
 	p.padded = append(p.padded, padding...)
-	p.start = uintptr(unsafe.Pointer(rt.SliceData(p.padded)))
-	p.cur = p.start
-	p.end = p.start + uintptr(len(p.Json))
+	p.pos = 0
+	p.end = len(p.Json)
 	p.options = opt
 	p.nbuf.init(p.nodes)
 	return p
@@ -78,9 +76,8 @@ func newParserFromSession(data string, pos int, opt uint64, sess *InputSession) 
 	p.Json = data[pos:]
 	sub := sess.padded[pos-sess.base:]
 	p.sessionPadded = sub
-	p.start = uintptr(unsafe.Pointer(rt.SliceData(sub)))
-	p.cur = p.start
-	p.end = p.start + uintptr(len(p.Json))
+	p.pos = 0
+	p.end = len(p.Json)
 	p.options = opt
 	p.nbuf.init(p.nodes)
 	return p
@@ -100,12 +97,11 @@ func parserCorrectedSource(p *Parser, original string, pos int) string {
 func (p *Parser) growNodeTape() {
 	// The scanner has already written the last available node. Restart
 	// from its packed state after copying exactly the initialized prefix.
-	offset := p.nbuf.ncur - p.nbuf.nstart
-	curLen := int(offset / unsafe.Sizeof(node{}))
+	curLen := p.nbuf.nlen
 	if curLen != len(p.nodes) {
 		panic(fmt.Sprintf("current len: %d, real len: %d cap: %d", curLen, len(p.nodes), cap(p.nodes)))
 	}
-	remCap := curLen + calMaxNodeCap(len(p.Json)-int(p.cur-p.start))
+	remCap := curLen + calMaxNodeCap(len(p.Json)-p.pos)
 	nextCap := curLen * 4
 	if nextCap < 64 {
 		nextCap = 64
@@ -120,9 +116,7 @@ func (p *Parser) growNodeTape() {
 		p.backup = p.nodes
 	}
 	p.nodes = grown
-	p.nbuf.nstart = uintptr(unsafe.Pointer(rt.SliceData(p.nodes)))
-	p.nbuf.nend = p.nbuf.nstart + uintptr(cap(p.nodes))*unsafe.Sizeof(node{})
-	p.nbuf.ncur = p.nbuf.nstart + offset
+	p.nbuf.ncap = cap(p.nodes)
 }
 
 func parseImpl(p *Parser) ErrorCode {

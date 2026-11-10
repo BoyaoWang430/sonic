@@ -38,7 +38,7 @@ jobs:
 
       - name: Unit Test
         run: |
-          GOMAXPROCS=4 go test -race -covermode=atomic -coverprofile=coverage.txt $(go list ./... | grep -v -E 'loader|jit|avx|x86|sse')
+          GOMAXPROCS=4 go test -race -covermode=atomic -coverprofile=coverage.txt ./...
 
       - name: Data Race
         run: |

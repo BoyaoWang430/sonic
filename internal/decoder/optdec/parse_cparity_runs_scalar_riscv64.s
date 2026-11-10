@@ -20,11 +20,10 @@
 // never live across a helper call. FP (X8), g (X27), SP, RA (except through
 // CALL), and the assembler scratch X31 are not otherwise used.
 
-#define WB_CUR (Parser_nbuf+nodeBuf_ncur)
+#define WB_LEN (Parser_nbuf+nodeBuf_nlen)
 #define WB_PARENT (Parser_nbuf+nodeBuf_parent)
 #define WB_DEPTH (Parser_nbuf+nodeBuf_depth)
-#define WB_START (Parser_nbuf+nodeBuf_nstart)
-#define WB_END (Parser_nbuf+nodeBuf_nend)
+#define WB_CAP (Parser_nbuf+nodeBuf_ncap)
 #define WB_ISKEY (Parser_nbuf+nodeBuf_iskey)
 #define WS_OBJECT (Parser_nbuf+nodeBuf_stat+jsonStat_object)
 #define WS_ARRAY (Parser_nbuf+nodeBuf_stat+jsonStat_array)
@@ -39,8 +38,11 @@
 // Match C's reservation of one spare node after every scalar/key write:
 // X15 is the next-but-one node and X16 the end of the node buffer.
 #define RUNS_CAPACITY \
-	ADD $16, X22, X15; \
-	MOV WB_END(X9), X16
+	MOV nodesBase+24(FP), X16; \
+	MOV WB_CAP(X9), X15; \
+	SLL $4, X15; \
+	ADD X15, X16, X16; \
+	ADD $16, X22, X15
 
 // These constants survive the entire parser invocation; cold Go returns
 // reinitialize them on the next entry.
@@ -50,20 +52,24 @@
 
 // The assembly handles contiguous scalar/key runs. Go owns container entry,
 // closure, allocation, Unicode decoding and cold numeric/literal handling.
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-24
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
 	NO_LOCAL_POINTERS
 	MOV p+0(FP), X9
 	MOV state+8(FP), X18
 	MOV Parser_options(X9), X20
-	MOV Parser_cur(X9), X21
-	MOV WB_CUR(X9), X22
-	MOV Parser_start(X9), X24
+	MOV rawBase+16(FP), X24
+	MOV Parser_pos(X9), X21
+	ADD X24, X21, X21
 	MOV Parser_end(X9), X25
+	ADD X24, X25, X25
+	MOV nodesBase+24(FP), X11
+	MOV WB_LEN(X9), X22
+	SLL $4, X22
+	ADD X11, X22, X22
 	MOV $const_KNull, X23
 	MOV WB_PARENT(X9), X10
 	MOV $-1, X19
 	BEQ X10, X19, runs_parent_loaded
-	MOV WB_START(X9), X11
 	SLL $4, X10
 	ADD X10, X11, X23
 runs_parent_loaded:
@@ -165,7 +171,7 @@ runs_value_object:
 	MOV WB_PARENT(X9), X12
 	MOV X11, 0(X22)
 	MOV X12, 8(X22)
-	MOV WB_START(X9), X13
+	MOV nodesBase+24(FP), X13
 	SUB X13, X22, X13
 	SRL $4, X13
 	MOV X13, WB_PARENT(X9)
@@ -183,7 +189,7 @@ runs_value_array:
 	MOV WB_PARENT(X9), X12
 	MOV X11, 0(X22)
 	MOV X12, 8(X22)
-	MOV WB_START(X9), X13
+	MOV nodesBase+24(FP), X13
 	SUB X13, X22, X13
 	SRL $4, X13
 	MOV X13, WB_PARENT(X9)
@@ -292,6 +298,7 @@ runs_resume_string:
 	ADD X26, X24, X12
 	ADD $1, X12
 	MOV cParityRunsState_stringDst(X18), X11
+	ADD X24, X11, X11
 	CALL runs_string_continue<>(SB)
 	JMP runs_resume_string_result
 runs_resume_string_error:
@@ -302,6 +309,7 @@ runs_resume_string_result:
 	BEQ X28, X19, runs_key_string_result
 	JMP runs_value_string_result
 runs_unicode_yield:
+	SUB X24, X12, X12
 	MOV X12, cParityRunsState_stringDst(X18)
 	MOV X28, cParityRunsState_context(X18)
 	MOV $const_cParityRunsUnicode, X10
@@ -426,7 +434,7 @@ runs_close_depth_ok:
 	ADD X14, X16, X14
 	AND $0xfff, X14, X14
 	BEQZ X14, runs_close_yield
-	MOV WB_START(X9), X11
+	MOV nodesBase+24(FP), X11
 	SLL $4, X10
 	ADD X10, X11, X23
 	JMP runs_parent_continue
@@ -464,9 +472,13 @@ runs_ok:
 runs_yield:
 	MOV X26, cParityRunsState_pos(X18)
 runs_done:
-	MOV X21, Parser_cur(X9)
-	MOV X22, WB_CUR(X9)
-	MOV X10, event+16(FP)
+	SUB X24, X21, X21
+	MOV X21, Parser_pos(X9)
+	MOV nodesBase+24(FP), X11
+	SUB X11, X22, X22
+	SRL $4, X22, X22
+	MOV X22, WB_LEN(X9)
+	MOV X10, event+32(FP)
 	RET
 
 // Input: X21 is the numeric body (after an optional minus), X13 is negative.

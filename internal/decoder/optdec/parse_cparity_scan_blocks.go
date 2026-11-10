@@ -9,8 +9,7 @@ import (
 
 // cParitySkipSpace consumes and returns the first nonspace byte. Scalar probes
 // leave the cached block intact, matching skip_space_impl's cursor contract.
-//go:nocheckptr
-func cParitySkipSpace(block *cParityNonspaceBlock, cur *unsafe.Pointer) byte {
+func cParitySkipSpace(base unsafe.Pointer, block *cParityNonspaceBlock, cur *unsafe.Pointer) byte {
 	p := *cur
 	c := *(*byte)(p)
 	p = unsafe.Add(p, 1)
@@ -25,22 +24,25 @@ func cParitySkipSpace(block *cParityNonspaceBlock, cur *unsafe.Pointer) byte {
 		return c
 	}
 
-	offset := uintptr(p) - block.cur
-	if offset < 64 {
-		mask := block.bits & (^uint64(0) << offset)
-		if mask != 0 {
-			at := unsafe.Pointer(block.cur + uintptr(bits.TrailingZeros64(mask)))
-			*cur = unsafe.Add(at, 1)
-			return *(*byte)(at)
+	if block.offPlus64 != 0 {
+		blockPtr := unsafe.Add(base, int(block.offPlus64)-64)
+		offset := uintptr(p) - uintptr(blockPtr)
+		if offset < 64 {
+			mask := block.bits & (^uint64(0) << offset)
+			if mask != 0 {
+				at := unsafe.Add(blockPtr, bits.TrailingZeros64(mask))
+				*cur = unsafe.Add(at, 1)
+				return *(*byte)(at)
+			}
+			p = unsafe.Add(blockPtr, 64)
 		}
-		p = unsafe.Pointer(block.cur + 64)
 	}
 	for {
 		// The fixed-width SIMD leaf implements the C shuffle table:
 		// only space/tab/LF/CR match. NUL and all high bytes are nonspace.
 		mask := cParityNonspace64(p)
 		if mask != 0 {
-			block.bits, block.cur = mask, uintptr(p)
+			block.bits, block.offPlus64 = mask, uint64(uintptr(p)-uintptr(base)+64)
 			at := unsafe.Add(p, bits.TrailingZeros64(mask))
 			*cur = unsafe.Add(at, 1)
 			return *(*byte)(at)

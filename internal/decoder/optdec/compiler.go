@@ -357,20 +357,66 @@ func (c *compiler) compileInterface(vt reflect.Type) decFunc {
 	}
 }
 
+func typeNeedsFreshElemSlot(vt reflect.Type) bool {
+	return typeNeedsFreshElemSlotSeen(vt, nil)
+}
+
+func typeNeedsFreshElemSlotSeen(vt reflect.Type, seen map[reflect.Type]bool) bool {
+	if vt == nil || vt.Kind() == reflect.Interface {
+		return false
+	}
+	if vt.Implements(jsonUnmarshalerType) || vt.Implements(encodingTextUnmarshalerType) {
+		return true
+	}
+	if vt.Kind() != reflect.Ptr && (reflect.PtrTo(vt).Implements(jsonUnmarshalerType) || reflect.PtrTo(vt).Implements(encodingTextUnmarshalerType)) {
+		return true
+	}
+	switch vt.Kind() {
+	case reflect.Struct:
+		if seen == nil {
+			seen = make(map[reflect.Type]bool)
+		}
+		if seen[vt] {
+			return false
+		}
+		seen[vt] = true
+		for i := 0; i < vt.NumField(); i++ {
+			sf := vt.Field(i)
+			if !sf.IsExported() && !sf.Anonymous {
+				continue
+			}
+			if sf.Tag.Get("json") == "-" {
+				continue
+			}
+			if typeNeedsFreshElemSlotSeen(sf.Type, seen) {
+				return true
+			}
+		}
+	case reflect.Array:
+		return typeNeedsFreshElemSlotSeen(vt.Elem(), seen)
+	}
+	return false
+}
+
 func (c *compiler) compileMap(vt reflect.Type) decFunc {
 	c.enter(vt)
 	defer c.exit(vt)
+	kt := vt.Key()
+	et := vt.Elem()
+	freshElem := typeNeedsFreshElemSlot(et)
+
 	// check the key unmarshaler at first
 	decKey := tryCompileKeyUnmarshaler(vt)
 	if decKey != nil {
 		return &mapDecoder{
-			mapType:  vt,
-			keyType:  vt.Key(),
-			elemType: vt.Elem(),
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(vt.Elem()),
-			keyDec:   decKey,
-			elemDec:  c.compile(vt.Elem()),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			keyDec:    decKey,
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	}
 
@@ -381,108 +427,114 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 		return &mapStringDecoder{}
 	}
 
-	// Some common integer map later
-	kt := vt.Key()
-	et := vt.Elem()
-
 	if kt.Kind() == reflect.String && kt != jsonNumberType {
 		return &mapStrKeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
-			typ:      vt,
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			typ:       vt,
+			freshElem: freshElem,
 		}
 	}
 
 	switch kt.Kind() {
 	case reflect.Int64:
 		return &mapI64KeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	case reflect.Int32:
 		return &mapI32KeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	case reflect.Int:
 		if kt.Size() == 8 {
 			return &mapI64KeyDecoder{
-				mapType:  vt,
-				keyType:  kt,
-				elemType: et,
-				zeroMap:  reflect.Zero(vt),
-				zeroElem: reflect.Zero(et),
-				elemDec:  c.compile(et),
+				mapType:   vt,
+				keyType:   kt,
+				elemType:  et,
+				zeroMap:   reflect.Zero(vt),
+				zeroElem:  reflect.Zero(et),
+				elemDec:   c.compile(et),
+				freshElem: freshElem,
 			}
 		}
 		return &mapI32KeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	case reflect.Uint64:
 		return &mapU64KeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	case reflect.Uint32:
 		return &mapU32KeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	case reflect.Uint, reflect.Uintptr:
 		if kt.Size() == 8 {
 			return &mapU64KeyDecoder{
-				mapType:  vt,
-				keyType:  kt,
-				elemType: et,
-				zeroMap:  reflect.Zero(vt),
-				zeroElem: reflect.Zero(et),
-				elemDec:  c.compile(et),
+				mapType:   vt,
+				keyType:   kt,
+				elemType:  et,
+				zeroMap:   reflect.Zero(vt),
+				zeroElem:  reflect.Zero(et),
+				elemDec:   c.compile(et),
+				freshElem: freshElem,
 			}
 		}
 		return &mapU32KeyDecoder{
-			mapType:  vt,
-			keyType:  kt,
-			elemType: et,
-			zeroMap:  reflect.Zero(vt),
-			zeroElem: reflect.Zero(et),
-			elemDec:  c.compile(et),
+			mapType:   vt,
+			keyType:   kt,
+			elemType:  et,
+			zeroMap:   reflect.Zero(vt),
+			zeroElem:  reflect.Zero(et),
+			elemDec:   c.compile(et),
+			freshElem: freshElem,
 		}
 	}
 
 	// Generic map
 	return &mapDecoder{
-		mapType:  vt,
-		keyType:  kt,
-		elemType: et,
-		zeroMap:  reflect.Zero(vt),
-		zeroElem: reflect.Zero(et),
-		keyDec:   c.compileMapKey(vt),
-		elemDec:  c.compile(et),
+		mapType:   vt,
+		keyType:   kt,
+		elemType:  et,
+		zeroMap:   reflect.Zero(vt),
+		zeroElem:  reflect.Zero(et),
+		keyDec:    c.compileMapKey(vt),
+		elemDec:   c.compile(et),
+		freshElem: freshElem,
 	}
 }
 

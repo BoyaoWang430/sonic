@@ -24,7 +24,7 @@ func TestStringDecodeShortSpansGuardPages(t *testing.T) {
 			for i := range output {
 				output[i] = 0xa5
 			}
-			written, pos, code := Unquote(rt.String(rt.SliceData(input), len(input)), output, 0)
+			written, pos, code := UnquoteBuffer(rt.SliceData(input), len(input), rt.SliceData(output), 0)
 			if written != len(want) || pos != -1 || code != 0 || string(output[:written]) != want {
 				t.Fatalf("guarded short span gap=%d contraction=%d: written=%d pos=%d code=%d",
 					gap, contraction, written, pos, code)
@@ -34,7 +34,7 @@ func TestStringDecodeShortSpansGuardPages(t *testing.T) {
 					t.Fatalf("guarded short span wrote beyond output: gap=%d contraction=%d", gap, contraction)
 				}
 			}
-			written, pos, code = Unquote(rt.String(rt.SliceData(input), len(input)), input, 0)
+			written, pos, code = UnquoteBuffer(rt.SliceData(input), len(input), rt.SliceData(input), 0)
 			if written != len(want) || pos != -1 || code != 0 || string(input[:written]) != want ||
 				string(input[written:]) != body[written:] {
 				t.Fatalf("guarded in-place short span gap=%d contraction=%d: written=%d pos=%d code=%d",

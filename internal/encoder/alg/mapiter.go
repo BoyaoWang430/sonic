@@ -194,11 +194,17 @@ func startStringAnyMapSorted(m map[string]any) (*MapIterator, error) {
 
 // IteratorStart initializes a MapIterator from a pointer `mp` to a map variable of type `vt`.
 func IteratorStart(vt reflect.Type, mp unsafe.Pointer, fv uint64) (*MapIterator, error) {
-	if mp == nil || *(*unsafe.Pointer)(mp) == nil {
+	if mp == nil {
 		return newIterator(), nil
 	}
-	if vt == vars.StringAnyMapType && (fv&(1<<BitSortMapKeys)) != 0 {
-		return startStringAnyMapSorted(*(*map[string]any)(mp))
+	if vt == vars.StringAnyMapType {
+		m := *(*map[string]any)(mp)
+		if m == nil {
+			return newIterator(), nil
+		}
+		if (fv & (1 << BitSortMapKeys)) != 0 {
+			return startStringAnyMapSorted(m)
+		}
 	}
 	return IteratorStartValue(reflect.NewAt(vt, mp).Elem(), fv)
 }

@@ -6,10 +6,9 @@
 
 ## 依赖
 
-- Go: 1.18~1.27
-  - 注意：Go1.24.0 由于 [issue](https://github.com/golang/go/issues/71672) 不可用，请升级到更高 Go 版本，或添加编译选项 `--ldflags="-checklinkname=0"` 
+- Go: 1.20~1.27
 - OS: Linux / MacOS / Windows
-- CPU: AMD64 / (ARM64, 需要 Go1.20 以上）
+- CPU: AMD64 / ARM64 / RISC-V (RVA22 / RVA23)
 
 ## 接口
 

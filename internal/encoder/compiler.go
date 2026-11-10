@@ -309,9 +309,13 @@ func (self *Compiler) compileOps(p *ir.Program, sp int, vt reflect.Type) {
 	}
 }
 
-func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op ir.Op, fn func(*ir.Program, int, reflect.Type)) {
+func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op ir.Op, nilType reflect.Type, fn func(*ir.Program, int, reflect.Type)) {
 	x := p.PC()
-	p.Add(ir.OP_is_nil)
+	if nilType != nil {
+		p.Rtt(ir.OP_is_nil, nilType)
+	} else {
+		p.Add(ir.OP_is_nil)
+	}
 	fn(p, sp, vt)
 	e := p.PC()
 	p.Add(ir.OP_goto)
@@ -321,7 +325,7 @@ func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op 
 }
 
 func (self *Compiler) compilePtr(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_null, self.compilePtrBody)
+	self.compileNil(p, sp, vt, ir.OP_null, nil, self.compilePtrBody)
 }
 
 func (self *Compiler) compilePtrBody(p *ir.Program, sp int, vt reflect.Type) {
@@ -333,7 +337,7 @@ func (self *Compiler) compilePtrBody(p *ir.Program, sp int, vt reflect.Type) {
 }
 
 func (self *Compiler) compileMap(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_empty_obj, self.compileMapBody)
+	self.compileNil(p, sp, vt, ir.OP_empty_obj, vt, self.compileMapBody)
 }
 
 func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
@@ -453,7 +457,7 @@ func (self *Compiler) compileMapBodyUtextPtr(p *ir.Program, vk reflect.Type) {
 }
 
 func (self *Compiler) compileSlice(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_empty_arr, self.compileSliceBody)
+	self.compileNil(p, sp, vt, ir.OP_empty_arr, reflect.SliceOf(vt), self.compileSliceBody)
 }
 
 func (self *Compiler) compileSliceBody(p *ir.Program, sp int, vt reflect.Type) {
@@ -468,12 +472,13 @@ func (self *Compiler) compileSliceArray(p *ir.Program, sp int, vt reflect.Type) 
 	if self.compileFloatSlice(p, sp, vt) {
 		return
 	}
+	st := reflect.SliceOf(vt)
 	p.Tag(sp)
 	p.Int(ir.OP_byte, '[')
 	e := p.PC()
-	p.Add(ir.OP_is_nil)
+	p.Rtt(ir.OP_is_nil_p1, st)
 	p.Add(ir.OP_save)
-	p.Rtt(ir.OP_slice_len, reflect.SliceOf(vt))
+	p.Rtt(ir.OP_slice_len, st)
 	i := p.PC()
 	p.Rtt(ir.OP_slice_next, vt)
 	self.compileOne(p, sp+1, vt, true)
@@ -787,17 +792,20 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 			flushSpecs()
 
 			/* index to the field relative to the saved root struct pointer */
+			hasDeref := false
 			for idx, o := range fv.Path {
 				off := int(o.Size)
 				if idx == 0 {
 					off += int(baseOffset)
 				}
 				if p.Int(ir.OP_index, off); o.Kind == resolver.F_deref {
+					hasDeref = true
 					s = append(s, p.PC())
 					p.Add(ir.OP_is_nil)
 					p.Add(ir.OP_deref)
 				}
 			}
+			fieldCanAddr := self.pv || hasDeref
 
 			/* check for "omitempty" option */
 			if fv.Type.Kind() != reflect.Struct && fv.Type.Kind() != reflect.Array && (fv.Opts&resolver.F_omitempty) != 0 {
@@ -814,7 +822,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 			/* check for "omitzero" option */
 			if fv.Opts&resolver.F_omitzero != 0 {
 				s = append(s, p.PC())
-				p.VField(ir.OP_is_zero, &fvs[i])
+				p.VFieldAddr(ir.OP_is_zero, &fvs[i], fieldCanAddr)
 			}
 
 			/* A non-skippable field guarantees a comma before every later field. */
@@ -839,7 +847,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 
 			/* check for "stringnize" option */
 			if (fv.Opts & resolver.F_stringize) == 0 {
-				self.compileOne(p, sp+1, ft, self.pv)
+				self.compileOne(p, sp+1, ft, fieldCanAddr)
 			} else {
 				self.compileStructFieldStr(p, sp+1, ft)
 			}
@@ -939,7 +947,7 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 	case reflect.Uint64:
 		p.Add(ir.OP_is_zero_8)
 	case reflect.Uintptr:
-		p.Add(ir.OP_is_nil)
+		p.Add(ir.OP_is_zero_ints())
 	case reflect.Float32:
 		p.Add(ir.OP_is_zero_4)
 	case reflect.Float64:
@@ -947,7 +955,7 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 	case reflect.String:
 		p.Add(ir.OP_is_nil_p1)
 	case reflect.Interface:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 	case reflect.Map:
 		p.Rtt(ir.OP_is_zero_map, vt)
 	case reflect.Ptr:
@@ -962,16 +970,16 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 func (self *Compiler) compileStructFieldOmitNilPtr(p *ir.Program, vt reflect.Type) bool {
 	switch vt.Kind() {
 	case reflect.Interface:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 		return true
 	case reflect.Map:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 		return true
 	case reflect.Ptr:
 		p.Add(ir.OP_is_nil)
 		return true
 	case reflect.Slice:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 		return true
 	default:
 		return false
@@ -992,7 +1000,7 @@ func (self *Compiler) compileInterface(p *ir.Program, vt reflect.Type) {
 	}
 
 	x := p.PC()
-	p.Add(ir.OP_is_nil)
+	p.Rtt(ir.OP_is_nil, vt)
 	p.Rtt(ir.OP_iface, vt)
 
 	/* the "null" value */

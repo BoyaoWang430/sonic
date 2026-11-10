@@ -27,17 +27,18 @@ import (
 )
 
 type StdField struct {
-	name        string
-	nameBytes   []byte
-	nameNonEsc  string
-	nameEscHTML string
-	tag         bool
-	index       []int
-	typ         reflect.Type
-	omitEmpty   bool
-	omitZero    bool
-	isZero      func(reflect.Value) bool
-	quoted      bool
+	name          string
+	nameBytes     []byte
+	nameNonEsc    string
+	nameEscHTML   string
+	tag           bool
+	index         []int
+	typ           reflect.Type
+	omitEmpty     bool
+	omitZero      bool
+	pointerIsZero bool
+	isZero        func(reflect.Value) bool
+	quoted        bool
 }
 
 type StdStructFields struct {
@@ -166,6 +167,7 @@ func typeFields(t reflect.Type) StdStructFields {
 								return v.Interface().(isZeroer).IsZero()
 							}
 						case reflect.PointerTo(t).Implements(isZeroerType):
+							field.pointerIsZero = true
 							field.isZero = func(v reflect.Value) bool {
 								if !v.CanAddr() {
 									// Temporarily box v so we can take the address.

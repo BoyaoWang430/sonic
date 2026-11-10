@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
-	"unsafe"
 )
 
 type wholeNumericErrorState struct {
@@ -67,7 +66,7 @@ func TestCParityWholeNumericErrorResume(t *testing.T) {
 				p.isEface = true
 				code := p.parse()
 				stat := p.nbuf.stat
-				used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+				used := p.nbuf.nlen
 				if used < 0 || used > len(p.nodes) {
 					t.Fatalf("case=%d options=%d capacity=%d bad tape size %d", i, opt, capacity, used)
 				}

@@ -218,7 +218,7 @@ func (s *StreamSession) growNodes() {
 }
 
 func (s *StreamSession) emitNode(typ, val uint64) int {
-	if s.nodeLen >= len(s.p.nodes) {
+	if s.nodeLen+1 >= len(s.p.nodes) {
 		s.growNodes()
 	}
 	idx := s.nodeLen

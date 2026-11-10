@@ -147,7 +147,7 @@ metadata = {
     "go_env": json.loads((out / "go-env.json").read_text()),
     "inherited_goflags_cleared": goflags, "baseline": "Go fallback selected by a lower target profile",
     "comparison_scope": "Includes compiler target differences as well as backend differences",
-    "build_args": ["test", "-c", "-ldflags=-checklinkname=0"],
+    "build_args": ["test", "-c"],
     "run_env": {k: os.environ.get(k, "<unset>") for k in (
         "GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GODEBUG", "SONIC_NO_ASYNC_GC", "SONIC_SYNC_GC",
         "SONIC_USE_OPTDEC", "SONIC_USE_FASTMAP", "SONIC_ENCODER_USE_VM")},
@@ -173,7 +173,7 @@ done
 
 for run in "${runs[@]}"; do
     configure_run "$run"
-    run_logged "$run.build" env GORISCV64="$profile" "$go_bin" test -c -ldflags=-checklinkname=0 -o "$out/$run.test" "$pkg"
+    run_logged "$run.build" env GORISCV64="$profile" "$go_bin" test -c -o "$out/$run.test" "$pkg"
     "$go_bin" version -m "$out/$run.test" > "$out/$run.build-info.txt"
 done
 for run in "${runs[@]}"; do

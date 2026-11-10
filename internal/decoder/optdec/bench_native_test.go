@@ -125,7 +125,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 			n := minBenchInt(batch, b.N-done)
 			for _, p := range parsers[:n] {
 				copy(p.padded, src)
-				p.cur = p.start
+				p.pos = 0
 				p.nbuf = nodeBuf{}
 				p.nbuf.init(p.nodes)
 				p._nbk = _nospaceBlock{}

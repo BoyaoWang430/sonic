@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"unsafe"
 )
 
 // A read-only lexer can inspect tokens ahead of the grammar, but accepting a
@@ -77,7 +76,7 @@ func TestCParityHybridLookaheadOracle(t *testing.T) {
 					p.nbuf.init(p.nodes)
 					p.isEface = eface
 					code := p.parse()
-					used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+					used := p.nbuf.nlen
 					if used < 0 || used > len(p.nodes) {
 						t.Fatalf("case=%d capacity=%d invalid tape size %d", i, capacity, used)
 					}

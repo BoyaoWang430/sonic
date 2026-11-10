@@ -13,11 +13,11 @@ import "unsafe"
 type cParityRunsState struct {
 	phase     uint64
 	context   uint64     // String-resume context: root, object value, array value, or key.
-	pos       uintptr    // Active key/value/open token start; unused for close events.
+	pos       int        // Active key/value/open token start offset; unused for close events.
 	hasEsc    uint64     // Persistent across tokens: C errors can retain the prior flag.
 	num       cParityNum // Persistent across tokens: C errors can retain the prior number.
 	stringErr int        // Unicode continuation error only
-	stringDst uintptr
+	stringDst int        // Offset into JsonBytes() for next escaped string output byte
 }
 
 // The continuation context is shared with the assembly through go_asm.h.
@@ -51,18 +51,18 @@ const (
 )
 
 // cParityParseRunsAsm returns a C error/done code or a hierarchy/cold event.
-// It publishes input/tape cursors before every return. Private scanner calls
+// It publishes input/tape cursor offsets before every return. Private scanner calls
 // pass registers without Go argument frames; Go never participates per block.
 // Open/close events have consumed their delimiter. Close has no state payload:
 // the parent's tape node includes its kind and completed child count.
-// Number restores cur to the body after an optional minus;
-// Literal leaves cur after t/f/n. Neither has emitted the pending scalar.
-// Only Unicode returns an incomplete string: cur addresses its backslash and
-// stringDst the next output byte; StringResume alone reads saved context.
+// Number restores pos to the body after an optional minus;
+// Literal leaves pos after t/f/n. Neither has emitted the pending scalar.
+// Only Unicode returns an incomplete string: pos addresses its backslash and
+// stringDst the next output byte offset; StringResume alone reads saved context.
 //
 //go:noescape
 //go:nocheckptr
-func cParityParseRunsAsm(p *Parser, state *cParityRunsState) (event int)
+func cParityParseRunsAsm(p *Parser, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
 
 func cParityParseWithPadding(p *Parser) ErrorCode {
 	var state cParityRunsState
@@ -72,7 +72,7 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 		// plus the current parent's type and the key-capacity-failure flag.
 		iskey := buf.iskey
 		buf.iskey = false
-		used := int((buf.ncur - buf.nstart) / unsafe.Sizeof(node{}))
+		used := buf.nlen
 		switch p.nodes[used-1].typ & TypeMask {
 		case KObject:
 			state.phase = cParityRunsObjectStart
@@ -86,9 +86,12 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 			}
 		}
 	}
+	raw := p.JsonBytes()
+	rawBase := unsafe.SliceData(raw)
+	nodesBase := unsafe.SliceData(p.nodes)
 	var code ErrorCode
 	for {
-		event := cParityParseRunsAsm(p, &state)
+		event := cParityParseRunsAsm(p, &state, rawBase, nodesBase)
 		if event <= SONIC_STACK_OVERFLOW {
 			code = ErrorCode(event)
 			break
@@ -104,15 +107,12 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 			}
 			state.phase = cParityRunsParentContinue
 		case cParityRunsUnicode:
-			raw := p.JsonBytes()
-			curOff := int(p.cur - p.start)
-			dstOff := int(state.stringDst - p.start)
-			base := unsafe.Pointer(unsafe.SliceData(raw))
-			srcPtr := unsafe.Add(base, curOff)
-			dstPtr := unsafe.Add(base, dstOff)
+			base := unsafe.Pointer(rawBase)
+			srcPtr := unsafe.Add(base, p.pos)
+			dstPtr := unsafe.Add(base, state.stringDst)
 			nextSrc, nextDst, stringCode := cParityDecodeUnicode(srcPtr, dstPtr, true)
-			p.cur += uintptr(nextSrc) - uintptr(srcPtr)
-			state.stringDst += uintptr(nextDst) - uintptr(dstPtr)
+			p.pos += int(uintptr(nextSrc) - uintptr(srcPtr))
+			state.stringDst += int(uintptr(nextDst) - uintptr(dstPtr))
 			state.stringErr = stringCode
 			state.phase = cParityRunsStringResume
 		case cParityRunsLiteral:
@@ -134,18 +134,17 @@ done:
 // partial node/statistics, and apply error/capacity ordering. Successful nested
 // values resume ordinary parent grammar; no numeric result returns to assembly.
 func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
-	// Assembly leaves cur at the number body, which may be invalid input.
+	// Assembly leaves pos at the number body, which may be invalid input.
 	// The token's first byte retains its sign, so no separate cross-language
 	// negative flag is needed.
 	raw := p.JsonBytes()
 	negative := raw[state.pos] == '-'
-	curOff := int(p.cur - p.start)
 	base := unsafe.Pointer(unsafe.SliceData(raw))
-	startCur := unsafe.Add(base, curOff)
+	startCur := unsafe.Add(base, p.pos)
 	cur := startCur
 	var code ErrorCode
 	if p.options&(1<<_F_use_number) != 0 {
-		remain := int(p.end - p.cur)
+		remain := p.end - p.pos
 		if !negative {
 			remain++
 		}
@@ -166,26 +165,25 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 		if code != SONIC_OK {
 			kind := state.num.typ
 			if kind != KUint && kind != KSint && kind != KReal {
-				p.cur += uintptr(cur) - uintptr(startCur)
+				p.pos += int(uintptr(cur) - uintptr(startCur))
 				return code
 			}
 		}
 	}
-	p.cur += uintptr(cur) - uintptr(startCur)
+	p.pos += int(uintptr(cur) - uintptr(startCur))
 
 	num := state.num
 	buf := &p.nbuf
-	ncur := buf.ncur
-	nIdx := int((ncur - buf.nstart) / unsafe.Sizeof(node{}))
+	nIdx := buf.nlen
 	p.nodes[nIdx] = node{typ: num.typ | uint64(state.pos)<<PosBits, val: num.val}
-	buf.ncur = ncur + unsafe.Sizeof(node{})
+	buf.nlen = nIdx + 1
 	buf.stat.number++
 	// C publishes values before returning decode errors. Only success checks
 	// the reserved spare node, so a decode error takes precedence over growth.
 	if code != SONIC_OK {
 		return code
 	}
-	if ncur+2*unsafe.Sizeof(node{}) > buf.nend {
+	if nIdx+2 > buf.ncap {
 		return SONIC_VISIT_FAILED
 	}
 	return SONIC_OK
@@ -194,7 +192,7 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 // The fixed-width assembly probe has already rejected this literal. Go locates
 // the first mismatch, consumes that byte, publishes C's partial literal node,
 // and terminates parsing without an assembly resume or a capacity check.
-func cParityRunsFailLiteral(p *Parser, pos uintptr) ErrorCode {
+func cParityRunsFailLiteral(p *Parser, pos int) ErrorCode {
 	raw := p.JsonBytes()
 	suffix, kind := "ull", uint64(KNull)
 	switch raw[pos] {
@@ -203,18 +201,15 @@ func cParityRunsFailLiteral(p *Parser, pos uintptr) ErrorCode {
 	case 'f':
 		suffix, kind = "alse", KFalse
 	}
-	curOff := int(p.cur - p.start)
 	for i := 0; i < len(suffix); i++ {
-		c := raw[curOff]
-		curOff++
-		p.cur++
+		c := raw[p.pos]
+		p.pos++
 		if c != suffix[i] {
 			break
 		}
 	}
-	ncur := p.nbuf.ncur
-	nIdx := int((ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+	nIdx := p.nbuf.nlen
 	p.nodes[nIdx].typ = kind | uint64(pos)<<PosBits // The null/bool payload stays unspecified.
-	p.nbuf.ncur = ncur + unsafe.Sizeof(node{})
+	p.nbuf.nlen = nIdx + 1
 	return SONIC_INVALID_LITERAL
 }

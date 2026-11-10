@@ -145,9 +145,15 @@ func EncodeTextMarshaler(buf *[]byte, val encoding.TextMarshaler, opt uint64) er
 	return nil
 }
 
-func IsZero(val unsafe.Pointer, fv *resolver.FieldMeta) bool {
+func IsZero(val unsafe.Pointer, fv *resolver.FieldMeta, canAddr bool) bool {
 	rv := reflect.NewAt(fv.Type, val).Elem()
-	b1 := fv.IsZero == nil && rv.IsZero()
-	b2 := fv.IsZero != nil && fv.IsZero(rv)
-	return b1 || b2
+	if fv.IsZero == nil {
+		return rv.IsZero()
+	}
+	if !canAddr && fv.PointerIsZero {
+		v2 := reflect.New(fv.Type).Elem()
+		v2.Set(rv)
+		rv = v2
+	}
+	return fv.IsZero(rv)
 }

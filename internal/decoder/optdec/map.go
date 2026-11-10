@@ -35,8 +35,14 @@ func (d *mapStringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	return node.AsMapString(ctx, vp)
 }
 
-func decodeMapEntry(mv, kv, ev, zeroElem reflect.Value, ep unsafe.Pointer, elemDec decFunc, valn Node, ctx *context) error {
-	if existing := mv.MapIndex(kv); existing.IsValid() {
+func decodeMapEntry(mv, kv, ev, zeroElem reflect.Value, ep unsafe.Pointer, elemType reflect.Type, freshElem bool, elemDec decFunc, valn Node, ctx *context) error {
+	if freshElem {
+		ev = reflect.New(elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+		if existing := mv.MapIndex(kv); existing.IsValid() {
+			ev.Set(existing)
+		}
+	} else if existing := mv.MapIndex(kv); existing.IsValid() {
 		ev.Set(existing)
 	} else {
 		ev.Set(zeroElem)
@@ -49,13 +55,14 @@ func decodeMapEntry(mv, kv, ev, zeroElem reflect.Value, ep unsafe.Pointer, elemD
 /** Decoder for map with string key **/
 
 type mapStrKeyDecoder struct {
-	mapType  reflect.Type
-	keyType  reflect.Type
-	elemType reflect.Type
-	zeroMap  reflect.Value
-	zeroElem reflect.Value
-	elemDec  decFunc
-	typ      reflect.Type
+	mapType   reflect.Type
+	keyType   reflect.Type
+	elemType  reflect.Type
+	zeroMap   reflect.Value
+	zeroElem  reflect.Value
+	elemDec   decFunc
+	typ       reflect.Type
+	freshElem bool
 }
 
 func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -84,8 +91,12 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	kv := reflect.New(d.keyType).Elem()
-	ev := reflect.New(d.elemType).Elem()
-	ep := ev.Addr().UnsafePointer()
+	var ev reflect.Value
+	var ep unsafe.Pointer
+	if !d.freshElem {
+		ev = reflect.New(d.elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+	}
 
 	var gerr error
 	next := obj.Children()
@@ -95,7 +106,7 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		kv.SetString(key)
 
 		valn := NewNode(PtrOffset(next, 1))
-		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemDec, valn, ctx)
+		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
 		}
@@ -111,12 +122,13 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 /** Decoder for map with int32 or int64 key **/
 
 type mapI32KeyDecoder struct {
-	mapType  reflect.Type
-	keyType  reflect.Type
-	elemType reflect.Type
-	zeroMap  reflect.Value
-	zeroElem reflect.Value
-	elemDec  decFunc
+	mapType   reflect.Type
+	keyType   reflect.Type
+	elemType  reflect.Type
+	zeroMap   reflect.Value
+	zeroElem  reflect.Value
+	elemDec   decFunc
+	freshElem bool
 }
 
 func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -145,8 +157,12 @@ func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	kv := reflect.New(d.keyType).Elem()
-	ev := reflect.New(d.elemType).Elem()
-	ep := ev.Addr().UnsafePointer()
+	var ev reflect.Value
+	var ep unsafe.Pointer
+	if !d.freshElem {
+		ev = reflect.New(d.elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+	}
 
 	next := obj.Children()
 	var gerr error
@@ -164,7 +180,7 @@ func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 
 		kv.SetInt(k)
 		valn := NewNode(PtrOffset(next, 1))
-		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemDec, valn, ctx)
+		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
 		}
@@ -179,12 +195,13 @@ func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 }
 
 type mapI64KeyDecoder struct {
-	mapType  reflect.Type
-	keyType  reflect.Type
-	elemType reflect.Type
-	zeroMap  reflect.Value
-	zeroElem reflect.Value
-	elemDec  decFunc
+	mapType   reflect.Type
+	keyType   reflect.Type
+	elemType  reflect.Type
+	zeroMap   reflect.Value
+	zeroElem  reflect.Value
+	elemDec   decFunc
+	freshElem bool
 }
 
 func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -213,8 +230,12 @@ func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	kv := reflect.New(d.keyType).Elem()
-	ev := reflect.New(d.elemType).Elem()
-	ep := ev.Addr().UnsafePointer()
+	var ev reflect.Value
+	var ep unsafe.Pointer
+	if !d.freshElem {
+		ev = reflect.New(d.elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+	}
 
 	var gerr error
 	next := obj.Children()
@@ -233,7 +254,7 @@ func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 
 		kv.SetInt(key)
 		valn := NewNode(PtrOffset(next, 1))
-		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemDec, valn, ctx)
+		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
 		}
@@ -249,12 +270,13 @@ func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 /** Decoder for map with unt32 or uint64 key **/
 
 type mapU32KeyDecoder struct {
-	mapType  reflect.Type
-	keyType  reflect.Type
-	elemType reflect.Type
-	zeroMap  reflect.Value
-	zeroElem reflect.Value
-	elemDec  decFunc
+	mapType   reflect.Type
+	keyType   reflect.Type
+	elemType  reflect.Type
+	zeroMap   reflect.Value
+	zeroElem  reflect.Value
+	elemDec   decFunc
+	freshElem bool
 }
 
 func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -283,8 +305,12 @@ func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	kv := reflect.New(d.keyType).Elem()
-	ev := reflect.New(d.elemType).Elem()
-	ep := ev.Addr().UnsafePointer()
+	var ev reflect.Value
+	var ep unsafe.Pointer
+	if !d.freshElem {
+		ev = reflect.New(d.elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+	}
 
 	var gerr error
 	next := obj.Children()
@@ -302,7 +328,7 @@ func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 
 		kv.SetUint(k)
 		valn := NewNode(PtrOffset(next, 1))
-		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemDec, valn, ctx)
+		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
 		}
@@ -316,12 +342,13 @@ func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 }
 
 type mapU64KeyDecoder struct {
-	mapType  reflect.Type
-	keyType  reflect.Type
-	elemType reflect.Type
-	zeroMap  reflect.Value
-	zeroElem reflect.Value
-	elemDec  decFunc
+	mapType   reflect.Type
+	keyType   reflect.Type
+	elemType  reflect.Type
+	zeroMap   reflect.Value
+	zeroElem  reflect.Value
+	elemDec   decFunc
+	freshElem bool
 }
 
 func (d *mapU64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -350,8 +377,12 @@ func (d *mapU64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	kv := reflect.New(d.keyType).Elem()
-	ev := reflect.New(d.elemType).Elem()
-	ep := ev.Addr().UnsafePointer()
+	var ev reflect.Value
+	var ep unsafe.Pointer
+	if !d.freshElem {
+		ev = reflect.New(d.elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+	}
 
 	var gerr error
 	next := obj.Children()
@@ -369,7 +400,7 @@ func (d *mapU64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 
 		kv.SetUint(key)
 		valn := NewNode(PtrOffset(next, 1))
-		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemDec, valn, ctx)
+		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
 		}
@@ -468,9 +499,14 @@ func decodeKeyTextUnmarshaler(dec *mapDecoder, raw string, kv reflect.Value) err
 		return nil
 	}
 
-	// For value key types (e.g. map[K]V), decode via *K into kv directly.
-	kv.Set(reflect.Zero(kt))
-	return kv.Addr().Interface().(encoding.TextUnmarshaler).UnmarshalText([]byte(key))
+	// For value key types (e.g. map[K]V), allocate a fresh key per entry so callbacks retaining their receiver do not alias across entries.
+	ret := reflect.New(kt)
+	err = ret.Interface().(encoding.TextUnmarshaler).UnmarshalText([]byte(key))
+	if err != nil {
+		return err
+	}
+	kv.Set(ret.Elem())
+	return nil
 }
 
 func decodeFloat32Key(dec *mapDecoder, raw string, kv reflect.Value) error {
@@ -517,13 +553,14 @@ func decodeJsonNumberKey(dec *mapDecoder, raw string, kv reflect.Value) error {
 }
 
 type mapDecoder struct {
-	mapType  reflect.Type
-	keyType  reflect.Type
-	elemType reflect.Type
-	zeroMap  reflect.Value
-	zeroElem reflect.Value
-	keyDec   decKey
-	elemDec  decFunc
+	mapType   reflect.Type
+	keyType   reflect.Type
+	elemType  reflect.Type
+	zeroMap   reflect.Value
+	zeroElem  reflect.Value
+	keyDec    decKey
+	elemDec   decFunc
+	freshElem bool
 }
 
 func (d *mapDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -552,8 +589,12 @@ func (d *mapDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	}
 
 	kv := reflect.New(d.keyType).Elem()
-	ev := reflect.New(d.elemType).Elem()
-	ep := ev.Addr().UnsafePointer()
+	var ev reflect.Value
+	var ep unsafe.Pointer
+	if !d.freshElem {
+		ev = reflect.New(d.elemType).Elem()
+		ep = ev.Addr().UnsafePointer()
+	}
 
 	next := obj.Children()
 	var gerr error
@@ -572,7 +613,7 @@ func (d *mapDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 		}
 
 		valn := NewNode(PtrOffset(next, 1))
-		err = decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemDec, valn, ctx)
+		err = decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
 		}

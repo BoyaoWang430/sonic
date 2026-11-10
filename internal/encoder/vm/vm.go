@@ -489,7 +489,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 			buf = *b
 		case ir.OP_is_nil:
-			if is_nil(p) {
+			if is_nil(p, ins.Vr()) {
 				pc = ins.Vi()
 				continue
 			}
@@ -603,8 +603,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 			buf = *b
 		case ir.OP_is_zero_map:
-			v := *(*unsafe.Pointer)(p)
-			if v == nil || reflect.NewAt(ins.Vr(), p).Elem().Len() == 0 {
+			if reflect.NewAt(ins.Vr(), p).Elem().Len() == 0 {
 				pc = ins.Vi()
 				continue
 			}
@@ -685,7 +684,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 		case ir.OP_is_zero:
 			fv := ins.VField()
-			if prim.IsZero(p, fv) {
+			if prim.IsZero(p, fv, ins.CanAddr()) {
 				pc = ins.Vi()
 				continue
 			}
@@ -768,8 +767,20 @@ func has_opts(opts uint64, bit int) bool {
 	return opts&(1<<bit) != 0
 }
 
-func is_nil(p unsafe.Pointer) bool {
-	return *(*unsafe.Pointer)(p) == nil
+func is_nil(p unsafe.Pointer, vt reflect.Type) bool {
+	if vt == nil {
+		return *(*unsafe.Pointer)(p) == nil
+	}
+	switch vt {
+	case vars.EmptyInterfaceType:
+		return *(*any)(p) == nil
+	case vars.StringAnyMapType:
+		return *(*map[string]any)(p) == nil
+	case vars.ByteSliceType:
+		return *(*[]byte)(p) == nil
+	default:
+		return reflect.NewAt(vt, p).Elem().IsNil()
+	}
 }
 
 func appendPaddedKey(buf []byte, keyPtr *byte, keyLen int) []byte {

@@ -258,7 +258,7 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	fv &^= (1 << alg.BitPointerValue)
 	vt := rv.Type()
 	switch rv.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.UnsafePointer:
+	case reflect.Ptr, reflect.UnsafePointer:
 		slot, idx := sb.PushPtr(rv.UnsafePointer())
 		err := EncodeValuePointer(buf, vt, slot, sb, fv)
 		sb.PopPtr(idx)

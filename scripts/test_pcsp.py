@@ -82,12 +82,9 @@ def main():
     run_cmd("sed -e 's/{{PACKAGE}}/sse/g' %s > ./internal/native/sse/traceback_test.go" %TRACE_TEST_FILE)
     run_cmd("sed -e 's/{{PACKAGE}}/avx2/g' %s > ./internal/native/avx2/traceback_test.go" %TRACE_TEST_FILE)
 
-    # check whether we need an extra ldflags
-    ext_flag = ' -ldflags=-checklinkname=0 ' if check_ge_go_1_23() else ' '
-
     # test the pcsp with Golang
     run_cmd("go version")
-    run_cmd(f"go test -v{ext_flag}-run=TestTraceback ./... > test.log")
+    run_cmd("go test -v -run=TestTraceback ./... > test.log")
     run_cmd("grep -q \"runtime: \" test.log && exit 1 || exit 0")
 
     clear_files()

@@ -10,10 +10,10 @@ import (
 // This experimental scanner follows parse_with_padding.c, including its padded
 // reads and malformed-input ordering. Callers provide the same 64-byte suffix.
 type cParityNonspaceBlock struct {
-	// This overlays the native ABI's pointer-free _nbk storage. Parser.padded
-	// owns the heap allocation, and parseImpl keeps that owner alive through use.
-	cur  uintptr
-	bits uint64
+	// offPlus64 stores (blockOffset + 64) relative to rawBase so the zero
+	// value represents an uninitialized block at rawBase - 64.
+	offPlus64 uint64
+	bits      uint64
 }
 
 func cParityIsSpace(c byte) bool {

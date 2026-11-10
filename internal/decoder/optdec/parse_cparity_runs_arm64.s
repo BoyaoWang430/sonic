@@ -10,11 +10,10 @@
 // R25 input start; R26 input end. Helpers update R22 and preserve R12, R16/R17,
 // R19-R21 and R23-R26. They are stackless leaves using only private registers;
 // Go calls only the outer parser. R18/R28/R29 are reserved, R27 is scratch.
-#define WB_CUR (Parser_nbuf+nodeBuf_ncur)
+#define WB_LEN (Parser_nbuf+nodeBuf_nlen)
 #define WB_PARENT (Parser_nbuf+nodeBuf_parent)
 #define WB_DEPTH (Parser_nbuf+nodeBuf_depth)
-#define WB_START (Parser_nbuf+nodeBuf_nstart)
-#define WB_END (Parser_nbuf+nodeBuf_nend)
+#define WB_CAP (Parser_nbuf+nodeBuf_ncap)
 #define WB_ISKEY (Parser_nbuf+nodeBuf_iskey)
 #define WS_OBJECT (Parser_nbuf+nodeBuf_stat+jsonStat_object)
 #define WS_ARRAY (Parser_nbuf+nodeBuf_stat+jsonStat_array)
@@ -28,8 +27,10 @@
 
 // Match C's reservation of one spare node after every scalar/key write.
 #define RUNS_CAPACITY \
+	MOVD nodesBase+24(FP), R5; \
+	MOVD WB_CAP(R19), R6; \
+	ADD R6<<4, R5, R6; \
 	ADD $16, R23, R5; \
-	MOVD WB_END(R19), R6; \
 	CMP R6, R5
 
 // These constants survive the entire parser invocation. Helpers and the core
@@ -105,21 +106,24 @@
 // The assembly handles contiguous scalar/key runs. Go owns container entry,
 // closure, allocation, Unicode decoding and cold numeric/literal handling.
 // All internal scanner calls use the private register convention above.
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-24
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
 	NO_LOCAL_POINTERS
 	MOVD p+0(FP), R19
 	MOVD state+8(FP), R20
 	ADD $Parser__nbk, R19, R12
 	MOVD Parser_options(R19), R21
-	MOVD Parser_cur(R19), R22
-	MOVD WB_CUR(R19), R23
-	MOVD Parser_start(R19), R25
+	MOVD rawBase+16(FP), R25
+	MOVD Parser_pos(R19), R22
+	ADD R25, R22, R22
 	MOVD Parser_end(R19), R26
+	ADD R25, R26, R26
+	MOVD nodesBase+24(FP), R1
+	MOVD WB_LEN(R19), R23
+	ADD R23<<4, R1, R23
 	MOVD $const_KNull, R24
 	MOVD WB_PARENT(R19), R0
 	CMN $1, R0
 	BEQ runs_parent_loaded
-	MOVD WB_START(R19), R1
 	ADD R0<<4, R1, R24
 runs_parent_loaded:
 	RUNS_SCAN_INIT
@@ -218,7 +222,7 @@ runs_value_object:
 	ORR R16<<32, R1, R1
 	MOVD WB_PARENT(R19), R2
 	STP (R1, R2), (R23)
-	MOVD WB_START(R19), R3
+	MOVD nodesBase+24(FP), R3
 	SUB R3, R23, R3
 	LSR $4, R3
 	MOVD R3, WB_PARENT(R19)
@@ -235,7 +239,7 @@ runs_value_array:
 	ORR R16<<32, R1, R1
 	MOVD WB_PARENT(R19), R2
 	STP (R1, R2), (R23)
-	MOVD WB_START(R19), R3
+	MOVD nodesBase+24(FP), R3
 	SUB R3, R23, R3
 	LSR $4, R3
 	MOVD R3, WB_PARENT(R19)
@@ -341,6 +345,7 @@ runs_resume_string:
 	ADD R16, R25, R2
 	ADD $1, R2
 	MOVD cParityRunsState_stringDst(R20), R1
+	ADD R25, R1, R1
 	CALL runs_string_continue<>(SB)
 	JMP runs_resume_string_result
 runs_resume_string_error:
@@ -351,6 +356,7 @@ runs_resume_string_result:
 	BEQ runs_key_string_result
 	JMP runs_value_string_result
 runs_unicode_yield:
+	SUB R25, R2, R2
 	MOVD R2, cParityRunsState_stringDst(R20)
 	MOVD R17, cParityRunsState_context(R20)
 	MOVD $const_cParityRunsUnicode, R0
@@ -472,7 +478,7 @@ runs_close_depth_ok:
 	ADD R5, R7, R5
 	TST $0xfff, R5
 	BEQ runs_close_yield
-	MOVD WB_START(R19), R1
+	MOVD nodesBase+24(FP), R1
 	ADD R2<<4, R1, R24
 	JMP runs_parent_continue
 runs_close_yield:
@@ -509,9 +515,13 @@ runs_ok:
 runs_yield:
 	MOVD R16, cParityRunsState_pos(R20)
 runs_done:
-	MOVD R22, Parser_cur(R19)
-	MOVD R23, WB_CUR(R19)
-	MOVD R0, event+16(FP)
+	SUB R25, R22, R22
+	MOVD R22, Parser_pos(R19)
+	MOVD nodesBase+24(FP), R1
+	SUB R1, R23, R23
+	LSR $4, R23, R23
+	MOVD R23, WB_LEN(R19)
+	MOVD R0, event+32(FP)
 	RET
 
 // Input: R22 is the numeric body (after an optional minus), R3 is negative.
@@ -1082,7 +1092,9 @@ runs_space_second:
 	CMP $13, R0
 	BNE runs_space_return
 runs_space_cached:
-	MOVD cParityNonspaceBlock_cur(R12), R1
+	MOVD cParityNonspaceBlock_offPlus64(R12), R1
+	ADD R25, R1, R1
+	SUB $64, R1, R1
 	SUB R1, R22, R2
 	CMP $64, R2
 	BHS runs_space_scan
@@ -1113,7 +1125,9 @@ runs_space_scan:
 	ADD $64, R22
 	B runs_space_scan
 runs_space_refilled:
-	MOVD R22, cParityNonspaceBlock_cur(R12)
+	SUB R25, R22, R1
+	ADD $64, R1, R1
+	MOVD R1, cParityNonspaceBlock_offPlus64(R12)
 	MOVD R4, cParityNonspaceBlock_bits(R12)
 	MOVD R22, R1
 runs_space_cache_hit:

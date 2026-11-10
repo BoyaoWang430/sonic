@@ -42,10 +42,7 @@ func (ctx *Context) allocEfaceSlice(size int) []interface{} {
 
 func prepareSlice[T any](vp *[]T, size int) []T {
 	if size == 0 {
-		if *vp == nil {
-			return []T{}
-		}
-		return (*vp)[:0]
+		return []T{}
 	}
 	old := *vp
 	if cap(old) >= size {
@@ -727,12 +724,7 @@ func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 	dst := (*[]interface{})(vp)
 	var s []interface{}
 	if size == 0 {
-		if *dst == nil {
-			s = []interface{}{}
-		} else {
-			s = (*dst)[:0]
-		}
-		*dst = s
+		*dst = []interface{}{}
 		return nil
 	}
 	if cap(*dst) >= size {

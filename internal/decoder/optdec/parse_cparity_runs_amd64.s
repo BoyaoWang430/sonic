@@ -21,11 +21,10 @@
 //  Y13: broadcast '\\' (0x5c)
 //  Y14: broadcast '"'  (0x22)
 
-#define WB_CUR (Parser_nbuf+nodeBuf_ncur)
+#define WB_LEN (Parser_nbuf+nodeBuf_nlen)
 #define WB_PARENT (Parser_nbuf+nodeBuf_parent)
 #define WB_DEPTH (Parser_nbuf+nodeBuf_depth)
-#define WB_START (Parser_nbuf+nodeBuf_nstart)
-#define WB_END (Parser_nbuf+nodeBuf_nend)
+#define WB_CAP (Parser_nbuf+nodeBuf_ncap)
 #define WB_ISKEY (Parser_nbuf+nodeBuf_iskey)
 #define WS_OBJECT (Parser_nbuf+nodeBuf_stat+jsonStat_object)
 #define WS_ARRAY (Parser_nbuf+nodeBuf_stat+jsonStat_array)
@@ -36,12 +35,16 @@
 #define WS_MAX_DEPTH (Parser_nbuf+nodeBuf_stat+jsonStat_max_depth)
 #define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
 #define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
-#define NBK_CUR (Parser__nbk+cParityNonspaceBlock_cur)
+#define NBK_OFF (Parser__nbk+cParityNonspaceBlock_offPlus64)
 #define NBK_BITS (Parser__nbk+cParityNonspaceBlock_bits)
 
 #define RUNS_CAPACITY \
+	MOVQ nodesBase+24(FP), AX; \
+	MOVQ WB_CAP(R12), CX; \
+	SHLQ $4, CX; \
+	ADDQ AX, CX; \
 	LEAQ 16(BP), AX; \
-	CMPQ AX, WB_END(R12)
+	CMPQ AX, CX
 
 #define RUNS_SCAN_INIT \
 	CMPB ·hasAVX2(SB), $0; \
@@ -58,20 +61,25 @@ runs_scan_init_sse: \
 	MOVOU cParityRunsQuoteVec<>(SB), X14; \
 runs_scan_init_done:
 
-// func cParityParseRunsAsm(p *Parser, state *cParityRunsState) (event int)
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $48-24
+// func cParityParseRunsAsm(p *Parser, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $56-40
 	NO_LOCAL_POINTERS
 	MOVQ BP, 0(SP)
 	MOVQ p+0(FP), R12
 	MOVQ state+8(FP), R13
-	MOVQ Parser_cur(R12), SI
-	MOVQ WB_CUR(R12), BP
+	MOVQ rawBase+16(FP), SI
+	MOVQ SI, 48(SP)
+	ADDQ Parser_pos(R12), SI
+	MOVQ nodesBase+24(FP), AX
+	MOVQ WB_LEN(R12), BP
+	SHLQ $4, BP
+	ADDQ AX, BP
 
 	MOVQ $const_KNull, AX
 	MOVQ WB_PARENT(R12), BX
 	CMPQ BX, $-1
 	JE   runs_parent_loaded
-	MOVQ WB_START(R12), AX
+	MOVQ nodesBase+24(FP), AX
 	SHLQ $4, BX
 	ADDQ BX, AX
 runs_parent_loaded:
@@ -93,7 +101,7 @@ runs_parent_loaded:
 	MOVQ $const_cParityRunsContextRoot, 32(SP)
 	CALL runs_space<>(SB)
 	MOVQ SI, BX
-	SUBQ Parser_start(R12), BX
+	SUBQ rawBase+16(FP), BX
 	DECQ BX
 	MOVQ BX, 24(SP)
 	JMP  runs_value
@@ -110,7 +118,7 @@ runs_object_key:
 	CMPQ AX, $34
 	JNE  runs_error_key
 	MOVQ SI, BX
-	SUBQ Parser_start(R12), BX
+	SUBQ rawBase+16(FP), BX
 	DECQ BX
 	MOVQ BX, 24(SP)
 	MOVQ $const_cParityRunsContextKey, 32(SP)
@@ -148,7 +156,7 @@ runs_object_value:
 	MOVQ $const_cParityRunsContextObject, 32(SP)
 	CALL runs_space<>(SB)
 	MOVQ SI, BX
-	SUBQ Parser_start(R12), BX
+	SUBQ rawBase+16(FP), BX
 	DECQ BX
 	MOVQ BX, 24(SP)
 	JMP  runs_value
@@ -156,7 +164,7 @@ runs_object_value:
 runs_array_value:
 	MOVQ $const_cParityRunsContextArray, 32(SP)
 	MOVQ SI, BX
-	SUBQ Parser_start(R12), BX
+	SUBQ rawBase+16(FP), BX
 	DECQ BX
 	MOVQ BX, 24(SP)
 
@@ -189,7 +197,7 @@ runs_value_object:
 	MOVQ WB_PARENT(R12), DX
 	MOVQ DX, 8(BP)
 	MOVQ BP, AX
-	SUBQ WB_START(R12), AX
+	SUBQ nodesBase+24(FP), AX
 	SHRQ $4, AX
 	MOVQ AX, WB_PARENT(R12)
 	MOVQ BP, 16(SP)
@@ -206,7 +214,7 @@ runs_value_array:
 	MOVQ WB_PARENT(R12), DX
 	MOVQ DX, 8(BP)
 	MOVQ BP, AX
-	SUBQ WB_START(R12), AX
+	SUBQ nodesBase+24(FP), AX
 	SHRQ $4, AX
 	MOVQ AX, WB_PARENT(R12)
 	MOVQ BP, 16(SP)
@@ -288,7 +296,9 @@ runs_value_escape_saved:
 runs_value_string_eof:
 	CMPQ 32(SP), $0
 	JNE  runs_emit_string
-	CMPQ Parser_end(R12), SI
+	MOVQ rawBase+16(FP), CX
+	ADDQ Parser_end(R12), CX
+	CMPQ CX, SI
 	JGE  runs_emit_string
 	MOVQ $const_SONIC_EOF, AX
 runs_emit_string:
@@ -313,9 +323,10 @@ runs_resume_string:
 	MOVQ cParityRunsState_stringErr(R13), AX
 	TESTQ AX, AX
 	JNZ  runs_resume_string_error
-	MOVQ Parser_start(R12), DX
+	MOVQ rawBase+16(FP), DX
 	LEAQ 1(DX)(CX*1), DX
-	MOVQ cParityRunsState_stringDst(R13), DI
+	MOVQ rawBase+16(FP), DI
+	ADDQ cParityRunsState_stringDst(R13), DI
 	CALL runs_string_continue<>(SB)
 	JMP  runs_resume_string_result
 runs_resume_string_error:
@@ -327,6 +338,7 @@ runs_resume_string_result:
 	JMP  runs_value_string_result
 
 runs_unicode_yield:
+	SUBQ rawBase+16(FP), DX
 	MOVQ DX, cParityRunsState_stringDst(R13)
 	MOVQ 32(SP), CX
 	MOVQ CX, cParityRunsState_context(R13)
@@ -442,7 +454,7 @@ runs_close_depth_ok:
 	TESTL $0xfff, DI
 	JZ   runs_close_yield
 	SHLQ $4, AX
-	ADDQ WB_START(R12), AX
+	ADDQ nodesBase+24(FP), AX
 	MOVQ AX, 16(SP)
 	JMP  runs_parent_continue
 runs_close_yield:
@@ -481,10 +493,13 @@ runs_yield:
 	MOVQ 24(SP), CX
 	MOVQ CX, cParityRunsState_pos(R13)
 runs_done:
-	MOVQ SI, Parser_cur(R12)
-	MOVQ BP, WB_CUR(R12)
+	SUBQ rawBase+16(FP), SI
+	MOVQ SI, Parser_pos(R12)
+	SUBQ nodesBase+24(FP), BP
+	SHRQ $4, BP
+	MOVQ BP, WB_LEN(R12)
 	MOVQ 0(SP), BP
-	MOVQ AX, event+16(FP)
+	MOVQ AX, event+32(FP)
 	CMPB ·hasAVX2(SB), $0
 	JE   runs_done_ret
 	VZEROUPPER
@@ -1165,7 +1180,9 @@ runs_space_second:
 	CMPB AL, $13
 	JNE  runs_space_return
 runs_space_cached:
-	MOVQ NBK_CUR(R12), BX
+	MOVQ NBK_OFF(R12), BX
+	ADDQ 56(SP), BX
+	SUBQ $64, BX
 	MOVQ SI, CX
 	SUBQ BX, CX
 	CMPQ CX, $64
@@ -1217,7 +1234,10 @@ runs_space_scan_sse:
 	JMP  runs_space_scan_sse
 
 runs_space_refilled:
-	MOVQ SI, NBK_CUR(R12)
+	MOVQ SI, BX
+	SUBQ 56(SP), BX
+	ADDQ $64, BX
+	MOVQ BX, NBK_OFF(R12)
 	MOVQ DX, NBK_BITS(R12)
 	MOVQ SI, BX
 runs_space_cache_hit:

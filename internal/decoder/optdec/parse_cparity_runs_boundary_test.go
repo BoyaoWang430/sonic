@@ -36,7 +36,7 @@ func TestCParityRunsLiteralErrorBoundary(t *testing.T) {
 			t.Run(context.name+"/"+literal.name, func(t *testing.T) {
 				src := context.prefix + literal.text + context.suffix
 				p := cParityRunsTuneParser(src, 0, context.nodes, 0)
-				start, end := p.nbuf.nstart, p.nbuf.nend
+				startPtr, endCap := unsafe.SliceData(p.nodes), p.nbuf.ncap
 				const sentinel = uint64(0x8badf00dcafebabe)
 				p.nodes[context.nodes-1] = node{typ: ^uint64(0), val: sentinel}
 
@@ -44,11 +44,11 @@ func TestCParityRunsLiteralErrorBoundary(t *testing.T) {
 				if code != SONIC_INVALID_LITERAL || p.Pos() != len(context.prefix)+literal.consumed {
 					t.Fatalf("code=%d pos=%d, want literal error at %d", code, p.Pos(), len(context.prefix)+literal.consumed)
 				}
-				if p.nbuf.nstart != start || p.nbuf.nend != end || p.backup != nil || cap(p.nodes) != context.nodes {
+				if unsafe.SliceData(p.nodes) != startPtr || p.nbuf.ncap != endCap || p.backup != nil || cap(p.nodes) != context.nodes {
 					t.Fatal("literal error grew or replaced the full tape")
 				}
-				used := int((p.nbuf.ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
-				if used != context.nodes || p.nbuf.ncur != end {
+				used := p.nbuf.nlen
+				if used != context.nodes || p.nbuf.nlen != endCap {
 					t.Fatalf("used=%d, want exactly full tape of %d nodes", used, context.nodes)
 				}
 				want := node{typ: literal.kind | uint64(len(context.prefix))<<PosBits, val: sentinel}

@@ -871,11 +871,8 @@ func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
 			jsonCalls.Load(), textCalls.Load())
 	}
 
-	want, err := json.Marshal(c)
-	if err != nil {
-		t.Fatalf("json.Marshal(DispatchContainer) error: %v", err)
-	}
-	if !bytes.Equal(got, want) {
+	const want = `{"concrete":{"id":1,"mode":"clean_ascii"},"ptr":{"id":2,"mode":"clean_ascii"},"slice":[{"id":3,"mode":"clean_ascii"}],"any_val":{"id":4,"mode":"clean_ascii"},"appender_ifc":{"id":5,"mode":"clean_ascii"},"json_ifc":{"id":6,"mode":"clean_ascii"},"text_ifc":"text_fallback"}`
+	if string(got) != want {
 		t.Fatalf("DispatchContainer parity mismatch:\ngot:  %s\nwant: %s", got, want)
 	}
 
