@@ -339,9 +339,12 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 		opt(&cfg)
 	}
 
-	vtm := make(map[reflect.Type]uint8, len(vts))
+	vtm := make(map[vmPretouchKey]struct{}, len(vts))
 	for _, vt := range vts {
-		vtm[vt] = 0
+		if vt == nil {
+			continue
+		}
+		vtm[vmPretouchKey{vt: vt, pv: false}] = struct{}{}
 	}
 
 	if !vars.UseVM {

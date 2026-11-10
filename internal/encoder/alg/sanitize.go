@@ -352,21 +352,97 @@ func appendUTF8OrInvalidByte(bPtr unsafe.Pointer, bLen int, sp unsafe.Pointer, i
 	return bLen, i + 1
 }
 
-func DetachIfOverlappingSpare(dst []byte, src []byte) []byte {
+func overlapsSpare(dst []byte, src []byte) bool {
 	if cap(dst)-len(dst) == 0 || len(src) == 0 {
-		return src
+		return false
 	}
 	dPtr := uintptr(unsafe.Pointer(unsafe.SliceData(dst)))
 	dstStart := dPtr + uintptr(len(dst))
 	dstEnd := dPtr + uintptr(cap(dst))
 	srcStart := uintptr(unsafe.Pointer(unsafe.SliceData(src)))
 	srcEnd := srcStart + uintptr(len(src))
-	if srcStart < dstEnd && dstStart < srcEnd {
+	return srcStart < dstEnd && dstStart < srcEnd
+}
+
+func isExactSpareSuffix(dst []byte, src []byte) bool {
+	if len(src) == 0 {
+		return true
+	}
+	if cap(dst)-len(dst) < len(src) || cap(dst) == 0 {
+		return false
+	}
+	dstBase := unsafe.Pointer(unsafe.SliceData(dst))
+	return unsafe.Pointer(unsafe.SliceData(src)) == unsafe.Add(dstBase, len(dst))
+}
+
+func DetachIfOverlappingSpare(dst []byte, src []byte) []byte {
+	if overlapsSpare(dst, src) {
 		cp := make([]byte, len(src))
 		copy(cp, src)
 		return cp
 	}
 	return src
+}
+
+// NeedsSanitizeBytes reports whether src contains any byte that would be expanded
+// or replaced under sanitize (HTML characters <, >, &, U+2028, U+2029 when
+// BitEscapeHTML is set, or invalid UTF-8 when BitValidateString is set).
+func NeedsSanitizeBytes(src []byte, sanitize uint64) bool {
+	nb := len(src)
+	if nb == 0 || sanitize == 0 {
+		return false
+	}
+	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
+	validateUTF8 := sanitize&(1<<BitValidateString) != 0
+	sp := unsafe.Pointer(rt.SliceData(src))
+	i := 0
+	for i+8 <= nb {
+		w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
+		if (fragmentSafeHTMLASCIIBits64(w) & saniMSB64) == 0 {
+			i += 8
+			continue
+		}
+		break
+	}
+	for i < nb {
+		c := src[i]
+		if c < 0x80 {
+			if escapeHTML && (c == '<' || c == '>' || c == '&') {
+				return true
+			}
+			i++
+			continue
+		}
+		if c >= 0xe0 && c <= 0xef && i+2 < nb {
+			b1 := src[i+1]
+			b2 := src[i+2]
+			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (c != 0xe0 || b1 >= 0xa0) && (c != 0xed || b1 < 0xa0) {
+				if escapeHTML && c == 0xe2 && b1 == 0x80 && (b2&^1) == 0xa8 {
+					return true
+				}
+				i += 3
+				continue
+			}
+		} else if c >= 0xc2 && c <= 0xdf && i+1 < nb {
+			if (src[i+1] & 0xc0) == 0x80 {
+				i += 2
+				continue
+			}
+		} else if c >= 0xf0 && c <= 0xf4 && i+3 < nb {
+			b1 := src[i+1]
+			b2 := src[i+2]
+			b3 := src[i+3]
+			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (b3&0xc0) == 0x80 && (c != 0xf0 || b1 >= 0x90) && (c != 0xf4 || b1 < 0x90) {
+				i += 4
+				continue
+			}
+		}
+		if validateUTF8 {
+			return true
+		}
+		i++
+	}
+	return false
 }
 
 // AppendSanitizedBytes appends src to dst in a single streaming pass while applying
@@ -376,8 +452,13 @@ func AppendSanitizedBytes(dst []byte, src []byte, sanitize uint64) []byte {
 	if nb == 0 {
 		return dst
 	}
-	if sanitize == 0 {
-		return append(dst, src...)
+	if sanitize == 0 || !NeedsSanitizeBytes(src, sanitize) {
+		if isExactSpareSuffix(dst, src) {
+			return dst[:len(dst)+nb]
+		}
+		if !overlapsSpare(dst, src) {
+			return append(dst, src...)
+		}
 	}
 	src = DetachIfOverlappingSpare(dst, src)
 	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
@@ -604,11 +685,248 @@ func appendCompactedJSONStringContent(dst []byte, src []byte, i int, sanitize ui
 	return dst[:bLen], i, false
 }
 
+func scanCleanJSONStringContent(src []byte, i int, sanitize uint64) (int, bool) {
+	nb := len(src)
+	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
+	validateUTF8 := sanitize&(1<<BitValidateString) != 0
+	sp := unsafe.Pointer(rt.SliceData(src))
+
+	for i < nb {
+		if sanitize == 0 {
+			for i+8 <= nb {
+				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
+				mask := quoteEscapeBits64Strict(w) & saniMSB64
+				if mask != 0 {
+					i += bits.TrailingZeros64(mask) >> 3
+					break
+				}
+				i += 8
+			}
+		} else {
+			for i+8 <= nb {
+				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
+				mask := quoteSafeHTMLBits64(w) & saniMSB64
+				if mask != 0 {
+					i += bits.TrailingZeros64(mask) >> 3
+					break
+				}
+				i += 8
+			}
+		}
+		if i >= nb {
+			return i, false
+		}
+		c := src[i]
+		if c == '"' {
+			return i + 1, true
+		}
+		if c < 0x20 {
+			return i, false
+		}
+		if c == '\\' {
+			if i+1 >= nb {
+				return i, false
+			}
+			switch src[i+1] {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				i += 2
+			case 'u':
+				if i+6 > nb || !isHexByte(src[i+2]) || !isHexByte(src[i+3]) || !isHexByte(src[i+4]) || !isHexByte(src[i+5]) {
+					return i, false
+				}
+				i += 6
+			default:
+				return i, false
+			}
+			continue
+		}
+		if c < 0x80 {
+			if escapeHTML && (c == '<' || c == '>' || c == '&') {
+				return i, false
+			}
+			i++
+			continue
+		}
+		if c >= 0xe0 && c <= 0xef && i+2 < nb {
+			b1 := src[i+1]
+			b2 := src[i+2]
+			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (c != 0xe0 || b1 >= 0xa0) && (c != 0xed || b1 < 0xa0) {
+				if escapeHTML && c == 0xe2 && b1 == 0x80 && (b2&^1) == 0xa8 {
+					return i, false
+				}
+				i += 3
+				continue
+			}
+		} else if c >= 0xc2 && c <= 0xdf && i+1 < nb {
+			if (src[i+1] & 0xc0) == 0x80 {
+				i += 2
+				continue
+			}
+		} else if c >= 0xf0 && c <= 0xf4 && i+3 < nb {
+			b1 := src[i+1]
+			b2 := src[i+2]
+			b3 := src[i+3]
+			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (b3&0xc0) == 0x80 && (c != 0xf0 || b1 >= 0x90) && (c != 0xf4 || b1 < 0x90) {
+				i += 4
+				continue
+			}
+		}
+		if validateUTF8 {
+			return i, false
+		}
+		i++
+	}
+	return i, false
+}
+
+// validateCompactAndCleanJSON reports whether src is a single valid JSON value
+// that already has no outer/inter-token whitespace and requires no HTML or UTF-8
+// escaping expansion under sanitize.
+func validateCompactAndCleanJSON(src []byte, sanitize uint64) bool {
+	nb := len(src)
+	if nb == 0 {
+		return false
+	}
+	var stackBuf [64]byte
+	stack := stackBuf[:0]
+	phase := compactPhaseValue
+	i := 0
+
+	for i < nb {
+		c := src[i]
+		if c <= ' ' {
+			return false
+		}
+		switch phase {
+		case compactPhaseValue:
+			switch c {
+			case '{':
+				if len(stack) >= maxCompactNestingDepth {
+					return false
+				}
+				stack = append(stack, '{')
+				phase = compactPhaseObjKeyOrEnd
+				i++
+			case '[':
+				if len(stack) >= maxCompactNestingDepth {
+					return false
+				}
+				stack = append(stack, '[')
+				i++
+				if i < nb && src[i] == ']' {
+					stack = stack[:len(stack)-1]
+					phase = compactPhaseAfterValue
+					i++
+				}
+			case '"':
+				var ok bool
+				i, ok = scanCleanJSONStringContent(src, i+1, sanitize)
+				if !ok {
+					return false
+				}
+				phase = compactPhaseAfterValue
+			case 't':
+				if i+4 > nb || src[i+1] != 'r' || src[i+2] != 'u' || src[i+3] != 'e' {
+					return false
+				}
+				i += 4
+				phase = compactPhaseAfterValue
+			case 'f':
+				if i+5 > nb || src[i+1] != 'a' || src[i+2] != 'l' || src[i+3] != 's' || src[i+4] != 'e' {
+					return false
+				}
+				i += 5
+				phase = compactPhaseAfterValue
+			case 'n':
+				if i+4 > nb || src[i+1] != 'u' || src[i+2] != 'l' || src[i+3] != 'l' {
+					return false
+				}
+				i += 4
+				phase = compactPhaseAfterValue
+			default:
+				endNum, ok := scanStrictJSONNumber(src, i)
+				if !ok {
+					return false
+				}
+				i = endNum
+				phase = compactPhaseAfterValue
+			}
+		case compactPhaseObjKeyOrEnd:
+			if c == '}' {
+				stack = stack[:len(stack)-1]
+				phase = compactPhaseAfterValue
+				i++
+				continue
+			}
+			if c != '"' {
+				return false
+			}
+			var ok bool
+			i, ok = scanCleanJSONStringContent(src, i+1, sanitize)
+			if !ok {
+				return false
+			}
+			phase = compactPhaseObjColon
+		case compactPhaseObjKey:
+			if c != '"' {
+				return false
+			}
+			var ok bool
+			i, ok = scanCleanJSONStringContent(src, i+1, sanitize)
+			if !ok {
+				return false
+			}
+			phase = compactPhaseObjColon
+		case compactPhaseObjColon:
+			if c != ':' {
+				return false
+			}
+			phase = compactPhaseValue
+			i++
+		case compactPhaseAfterValue:
+			if len(stack) == 0 {
+				return false
+			}
+			top := stack[len(stack)-1]
+			if top == '{' {
+				if c == ',' {
+					phase = compactPhaseObjKey
+					i++
+				} else if c == '}' {
+					stack = stack[:len(stack)-1]
+					i++
+				} else {
+					return false
+				}
+			} else {
+				if c == ',' {
+					phase = compactPhaseValue
+					i++
+				} else if c == ']' {
+					stack = stack[:len(stack)-1]
+					i++
+				} else {
+					return false
+				}
+			}
+		}
+	}
+	return phase == compactPhaseAfterValue && len(stack) == 0
+}
+
 // AppendCompactedJSON validates src as a single JSON value and appends its compacted
 // (and optionally HTML-escaped / UTF-8-sanitized) representation directly to dst
 // in a single pass. On invalid JSON, dst is restored to its entry length and
 // encoding/json.Compact's exact error is returned.
 func AppendCompactedJSON(dst []byte, src []byte, sanitize uint64) ([]byte, error) {
+	if validateCompactAndCleanJSON(src, sanitize) {
+		if isExactSpareSuffix(dst, src) {
+			return dst[:len(dst)+len(src)], nil
+		}
+		if !overlapsSpare(dst, src) {
+			return append(dst, src...), nil
+		}
+	}
 	origLen := len(dst)
 	src = DetachIfOverlappingSpare(dst, src)
 	nb := len(src)

@@ -253,6 +253,9 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	if !rv.IsValid() {
 		return prim.EncodeNil(buf)
 	}
+	// Values unpacked from an interface{} are not addressable at top level;
+	// pointer types will re-enable pv=true inside compilePtrBody after OP_deref.
+	fv &^= (1 << alg.BitPointerValue)
 	vt := rv.Type()
 	switch rv.Kind() {
 	case reflect.Ptr, reflect.Map, reflect.UnsafePointer:

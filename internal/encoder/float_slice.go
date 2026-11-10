@@ -4,7 +4,6 @@ import (
 	"reflect"
 
 	"github.com/bytedance/sonic/internal/encoder/ir"
-	"github.com/bytedance/sonic/internal/encoder/vars"
 )
 
 func (self *Compiler) compileFloatSlice(p *ir.Program, sp int, vt reflect.Type) bool {
@@ -20,10 +19,8 @@ func (self *Compiler) compileFloatSlice(p *ir.Program, sp int, vt reflect.Type) 
 	default:
 		return false
 	}
-	// Slice elements may use pointer-receiver marshalers.
-	pt := reflect.PtrTo(vt)
-	if vt.Implements(vars.JsonMarshalerType) || pt.Implements(vars.JsonMarshalerType) ||
-		vt.Implements(vars.EncodingTextMarshalerType) || pt.Implements(vars.EncodingTextMarshalerType) {
+	// Slice elements are addressable (pv=true), so check both value and pointer-receiver custom marshalers (including JSONAppender).
+	if self.isCustomMarshaler(vt, true) {
 		return false
 	}
 	p.Tag(sp)

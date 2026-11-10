@@ -46,9 +46,9 @@ func makeEncoderVM(vt reflect.Type, ex ...interface{}) (interface{}, error) {
 	return &pp, nil
 }
 
-var pretouchType func(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error)
+var pretouchType func(_vt reflect.Type, opts option.CompileOptions, pv bool) (map[vmPretouchKey]struct{}, error)
 
-func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error) {
+func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, pv bool) (map[vmPretouchKey]struct{}, error) {
 	/* compile function */
 	compiler := NewCompiler().apply(opts)
 	encoder := func(vt reflect.Type, ex ...interface{}) (interface{}, error) {
@@ -60,7 +60,6 @@ func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, v uint8) (map[r
 	}
 
 	/* find or compile */
-	pv := v == 1
 	if val := vars.GetProgram(vt, pv); val != nil {
 		return nil, nil
 	} else if _, err := vars.ComputeProgram(vt, encoder, pv); err == nil {
@@ -75,39 +74,42 @@ type vmPretouchKey struct {
 	pv bool
 }
 
-func pretouchRecVMBatch(vtm map[reflect.Type]uint8, opts option.CompileOptions) error {
+func pretouchRecVMBatch(vtm map[vmPretouchKey]struct{}, opts option.CompileOptions) error {
 	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
 		return nil
 	}
-	seen := make(map[vmPretouchKey]struct{}, len(vtm))
+	seen := make(map[vmPretouchKey]struct{}, len(vtm)*2)
 	var batchVal []caching.ProgramBatchItem
 	var batchPV []caching.ProgramBatchItem
 
 	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
-		next := make(map[reflect.Type]uint8)
-		for vt, v := range vtm {
-			pv := v == 1
-			key := vmPretouchKey{vt: vt, pv: pv}
+		next := make(map[vmPretouchKey]struct{})
+		for key := range vtm {
+			if key.vt == nil {
+				continue
+			}
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			if vars.GetProgram(vt, pv) != nil {
+			if vars.GetProgram(key.vt, key.pv) != nil {
 				continue
 			}
 			compiler := NewCompiler().apply(opts)
-			pp, err := compiler.Compile(vt, pv)
+			pp, err := compiler.Compile(key.vt, key.pv)
 			if err != nil {
 				return err
 			}
 			prog := &pp
-			if pv {
-				batchPV = append(batchPV, caching.ProgramBatchItem{Vt: vt, Fn: prog})
+			if key.pv {
+				batchPV = append(batchPV, caching.ProgramBatchItem{Vt: key.vt, Fn: prog})
 			} else {
-				batchVal = append(batchVal, caching.ProgramBatchItem{Vt: vt, Fn: prog})
+				batchVal = append(batchVal, caching.ProgramBatchItem{Vt: key.vt, Fn: prog})
 			}
-			for svt, sv := range compiler.rec {
-				next[svt] = sv
+			for subKey := range compiler.rec {
+				if _, ok := seen[subKey]; !ok {
+					next[subKey] = struct{}{}
+				}
 			}
 		}
 		opts.RecursiveDepth--
@@ -122,21 +124,21 @@ func pretouchRecVMBatch(vtm map[reflect.Type]uint8, opts option.CompileOptions) 
 	return nil
 }
 
-func pretouchRec(vtm map[reflect.Type]uint8, opts option.CompileOptions) error {
+func pretouchRec(vtm map[vmPretouchKey]struct{}, opts option.CompileOptions) error {
 	if vars.UseVM {
 		return pretouchRecVMBatch(vtm, opts)
 	}
 	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
 		return nil
 	}
-	next := make(map[reflect.Type]uint8)
-	for vt, v := range vtm {
-		sub, err := pretouchType(vt, opts, v)
+	next := make(map[vmPretouchKey]struct{})
+	for key := range vtm {
+		sub, err := pretouchType(key.vt, opts, key.pv)
 		if err != nil {
 			return err
 		}
-		for svt, v := range sub {
-			next[svt] = v
+		for subKey := range sub {
+			next[subKey] = struct{}{}
 		}
 	}
 	opts.RecursiveDepth -= 1
@@ -148,7 +150,7 @@ type Compiler struct {
 	pv    bool
 	useVM bool
 	tab   map[reflect.Type]bool
-	rec   map[reflect.Type]uint8
+	rec   map[vmPretouchKey]struct{}
 }
 
 func NewCompiler() *Compiler {
@@ -156,7 +158,7 @@ func NewCompiler() *Compiler {
 		opts:  option.DefaultCompileOptions(),
 		useVM: vars.UseVM,
 		tab:   map[reflect.Type]bool{},
-		rec:   map[reflect.Type]uint8{},
+		rec:   map[vmPretouchKey]struct{}{},
 	}
 }
 
@@ -168,7 +170,7 @@ func (self *Compiler) WithVM(useVM bool) *Compiler {
 func (self *Compiler) apply(opts option.CompileOptions) *Compiler {
 	self.opts = opts
 	if self.opts.RecursiveDepth > 0 {
-		self.rec = map[reflect.Type]uint8{}
+		self.rec = map[vmPretouchKey]struct{}{}
 	}
 	return self
 }
@@ -192,6 +194,9 @@ func (self *Compiler) Compile(vt reflect.Type, pv bool) (ret ir.Program, err err
 func (self *Compiler) compileOne(p *ir.Program, sp int, vt reflect.Type, pv bool) {
 	if self.tab[vt] {
 		p.Vp(ir.OP_recurse, vt, pv)
+		if self.opts.RecursiveDepth > 0 {
+			self.rec[vmPretouchKey{vt: vt, pv: pv}] = struct{}{}
+		}
 	} else {
 		self.compileRec(p, sp, vt, pv)
 	}
@@ -524,11 +529,7 @@ func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
 	if sp >= maxDepth || p.PC() >= vars.MAX_ILBUF || (!self.useVM && sp > 0 && vt.NumField() >= vars.MAX_FIELDS) {
 		p.Vp(ir.OP_recurse, vt, self.pv)
 		if self.opts.RecursiveDepth > 0 {
-			if self.pv {
-				self.rec[vt] = 1
-			} else {
-				self.rec[vt] = 0
-			}
+			self.rec[vmPretouchKey{vt: vt, pv: self.pv}] = struct{}{}
 		}
 	} else {
 		self.compileStructBody(p, sp, vt)

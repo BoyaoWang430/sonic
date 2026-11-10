@@ -45,14 +45,24 @@ func EncodeNil(rb *[]byte) error {
 // JSONAppender is an opt-in interface for custom types that can append their
 // JSON representation directly into the destination buffer's spare capacity.
 //
-// Contract (built on B02's non-aliasing scratch buffer):
+// Dispatch & allocation contract:
+//   - Priority: JSONAppender (AppendJSON) > json.Marshaler (MarshalJSON) >
+//     encoding.TextMarshaler (MarshalText) across concrete fields, pointer fields,
+//     slice elements, any / non-marshaler interfaces, and static json.Marshaler
+//     interface fields (while static encoding.TextMarshaler interface fields still
+//     call MarshalText to match encoding/json).
+//     Types implementing both AppendJSON and MarshalJSON should produce semantically
+//     equivalent JSON so callers and fallback paths observe identical payloads.
 //   - AppendJSON is called with a zero-length slice `dst[origLen:origLen:cap(dst)]`
-//     sharing the parent encoding session's spare capacity.
-//   - It must return the appended JSON value slice (`ret`) or a non-nil error.
-//   - Under CompactMarshaler / EscapeHTML / ValidateString or JSON validation,
-//     if post-processing can overwrite in place without growth, no extra buffer
-//     is allocated; if expansion is needed, B02 overlap safety ensures the
-//     raw fragment is never corrupted before reading.
+//     sharing the parent encoding session's spare capacity, and must return the
+//     appended JSON value slice (`ret`) or a non-nil error.
+//   - If `ret` stays within `dst`'s spare suffix and requires neither whitespace
+//     compaction nor HTML/UTF-8 character expansion (<, >, &, U+2028, U+2029, or
+//     invalid UTF-8), validation and post-processing complete in place with zero
+//     extra allocations (including under ConfigStd).
+//   - If whitespace compaction or character escaping/replacement must rewrite an
+//     overlapping slice, DetachIfOverlappingSpare allocates a detached copy so
+//     source bytes are never overwritten before reading.
 //   - If AppendJSON returns an error or invalid JSON, the parent buffer is
 //     restored to `buf[:origLen]`.
 type JSONAppender interface {
@@ -90,15 +100,14 @@ func EncodeJSONAppender(buf *[]byte, val JSONAppender, opt uint64) error {
 			return vars.Error_marshaler(ret, s)
 		}
 	}
-	if sanitize == 0 && cap(b) >= origLen+len(ret) && cap(b) > 0 && unsafe.Pointer(unsafe.SliceData(ret)) == unsafe.Add(unsafe.Pointer(unsafe.SliceData(b)), origLen) {
-		*buf = b[:origLen+len(ret)]
-		return nil
-	}
 	*buf = alg.AppendSanitizedBytes(b[:origLen], ret, sanitize)
 	return nil
 }
 
 func EncodeJsonMarshaler(buf *[]byte, val json.Marshaler, opt uint64) error {
+	if app, ok := val.(JSONAppender); ok {
+		return EncodeJSONAppender(buf, app, opt)
+	}
 	ret, err := val.MarshalJSON()
 	if err != nil {
 		return err

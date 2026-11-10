@@ -64,6 +64,25 @@ type failingFloat float64
 
 func (failingFloat) MarshalJSON() ([]byte, error) { return nil, errors.New("custom-float-error") }
 
+// Types implementing ONLY AppendJSON (without MarshalJSON or MarshalText).
+type appenderOnlyFloat64 float64
+
+func (f appenderOnlyFloat64) AppendJSON(dst []byte) ([]byte, error) {
+	if f < 0 {
+		return dst, errors.New("negative-appender-float")
+	}
+	return append(dst, `"custom-f64"`...), nil
+}
+
+type appenderOnlyPtrFloat32 float32
+
+func (f *appenderOnlyPtrFloat32) AppendJSON(dst []byte) ([]byte, error) {
+	if *f < 0 {
+		return dst, errors.New("negative-appender-ptr-float32")
+	}
+	return append(dst, `"custom-ptr-f32"`...), nil
+}
+
 func TestFloatSliceMethodsAndContainers(t *testing.T) {
 	v := 1.25
 	pointerSlice := customPointerFloatSlice{1, 2}
@@ -106,6 +125,26 @@ func TestFloatSliceMethodsAndContainers(t *testing.T) {
 	got, err := encoder.Encode([]float64{1, 2}, 0)
 	if err != nil || string(got) != "[1,2]" {
 		t.Fatalf("encode after error: %s, %v", got, err)
+	}
+
+	// Verify named float types implementing ONLY AppendJSON are not bypassed by float slice fast-path.
+	scalarF64, err := encoder.Encode(appenderOnlyFloat64(1), 0)
+	if err != nil || string(scalarF64) != `"custom-f64"` {
+		t.Fatalf("scalar appenderOnlyFloat64: got %s, err %v", scalarF64, err)
+	}
+	sliceF64, err := encoder.Encode([]appenderOnlyFloat64{1, 2}, 0)
+	if err != nil || string(sliceF64) != `["custom-f64","custom-f64"]` {
+		t.Fatalf("slice appenderOnlyFloat64 bypassed AppendJSON: got %s, err %v", sliceF64, err)
+	}
+	slicePtrF32, err := encoder.Encode([]appenderOnlyPtrFloat32{1, 2}, 0)
+	if err != nil || string(slicePtrF32) != `["custom-ptr-f32","custom-ptr-f32"]` {
+		t.Fatalf("slice appenderOnlyPtrFloat32 bypassed AppendJSON: got %s, err %v", slicePtrF32, err)
+	}
+	if _, err := encoder.Encode([]appenderOnlyFloat64{1, -1}, 0); err == nil {
+		t.Fatal("expected error from failing appenderOnlyFloat64 element in slice")
+	}
+	if _, err := encoder.Encode([]appenderOnlyPtrFloat32{1, -1}, 0); err == nil {
+		t.Fatal("expected error from failing appenderOnlyPtrFloat32 element in slice")
 	}
 }
 

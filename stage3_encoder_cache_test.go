@@ -4,6 +4,7 @@ package sonic
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/internal/decoder/optdec"
 	"github.com/bytedance/sonic/internal/encoder/alg"
+	"github.com/bytedance/sonic/internal/encoder/prim"
 	encvars "github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/internal/resolver"
 	"github.com/bytedance/sonic/option"
@@ -724,6 +726,245 @@ func BenchmarkStage3MarshalJSONAppender_E04a(b *testing.B) {
 		out, err := ConfigDefault.Marshal(&batch)
 		if err != nil || len(out) == 0 {
 			b.Fatal(err)
+		}
+	}
+}
+
+func TestReview_PretouchMergedAddressabilityPlans(t *testing.T) {
+	type Child struct {
+		X int `json:"x,omitempty"`
+	}
+	type Root struct {
+		Items [1]Child
+	}
+
+	const want = `{"Items":[{"x":0}]}`
+	for iter := 0; iter < 20; iter++ {
+		encvars.ResetProgramCache()
+		optdec.ResetProgramCache()
+		if err := Pretouch(
+			reflect.TypeOf(Root{}),
+			option.WithCompileMaxInlineDepth(2),
+			option.WithCompileRecursiveDepth(1),
+			option.WithCompileEncOnlyOmitNull(true),
+		); err != nil {
+			t.Fatalf("iter %d Pretouch error: %v", iter, err)
+		}
+		if encvars.GetProgram(reflect.TypeOf(Child{}), false) == nil {
+			t.Fatalf("iter %d missing (Child, pv=false) program after Pretouch", iter)
+		}
+		if encvars.GetProgram(reflect.TypeOf(Child{}), true) == nil {
+			t.Fatalf("iter %d missing (Child, pv=true) program after Pretouch", iter)
+		}
+
+		gotVal, err := Marshal(Root{})
+		if err != nil {
+			t.Fatalf("iter %d Marshal(Root{}) error: %v", iter, err)
+		}
+		if string(gotVal) != want {
+			t.Fatalf("iter %d Marshal(Root{}) = %s, want %s", iter, gotVal, want)
+		}
+
+		gotPtr, err := Marshal(&Root{})
+		if err != nil {
+			t.Fatalf("iter %d Marshal(&Root{}) error: %v", iter, err)
+		}
+		if string(gotPtr) != want {
+			t.Fatalf("iter %d Marshal(&Root{}) = %s, want %s", iter, gotPtr, want)
+		}
+	}
+
+	// Single Root containing both non-addressable [1]Child and addressable *Child at max depth.
+	type MixedRoot struct {
+		Arr [1]Child
+		Ptr *Child
+	}
+	for iter := 0; iter < 10; iter++ {
+		encvars.ResetProgramCache()
+		if err := encoder.Pretouch(
+			reflect.TypeOf(MixedRoot{}),
+			option.WithCompileMaxInlineDepth(2),
+			option.WithCompileRecursiveDepth(1),
+			option.WithCompileEncOnlyOmitNull(true),
+		); err != nil {
+			t.Fatalf("iter %d MixedRoot Pretouch error: %v", iter, err)
+		}
+		if encvars.GetProgram(reflect.TypeOf(Child{}), false) == nil || encvars.GetProgram(reflect.TypeOf(Child{}), true) == nil {
+			t.Fatalf("iter %d MixedRoot missing one of (Child, pv=false/true) plans", iter)
+		}
+	}
+}
+
+type reviewCountingAppender struct {
+	ID          int
+	appendCalls *atomic.Int64
+	jsonCalls   *atomic.Int64
+	textCalls   *atomic.Int64
+}
+
+func (c reviewCountingAppender) AppendJSON(dst []byte) ([]byte, error) {
+	if c.appendCalls != nil {
+		c.appendCalls.Add(1)
+	}
+	dst = append(dst, `{"id":`...)
+	dst = strconv.AppendInt(dst, int64(c.ID), 10)
+	dst = append(dst, `,"mode":"clean_ascii"}`...)
+	return dst, nil
+}
+
+func (c reviewCountingAppender) MarshalJSON() ([]byte, error) {
+	if c.jsonCalls != nil {
+		c.jsonCalls.Add(1)
+	}
+	return c.AppendJSON(nil)
+}
+
+func (c reviewCountingAppender) MarshalText() ([]byte, error) {
+	if c.textCalls != nil {
+		c.textCalls.Add(1)
+	}
+	return []byte("text_fallback"), nil
+}
+
+func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
+	var appendCalls, jsonCalls, textCalls atomic.Int64
+	makeItem := func(id int) reviewCountingAppender {
+		return reviewCountingAppender{
+			ID:          id,
+			appendCalls: &appendCalls,
+			jsonCalls:   &jsonCalls,
+			textCalls:   &textCalls,
+		}
+	}
+
+	type DispatchContainer struct {
+		Concrete    reviewCountingAppender   `json:"concrete"`
+		Ptr         *reviewCountingAppender  `json:"ptr"`
+		Slice       []reviewCountingAppender `json:"slice"`
+		AnyVal      any                      `json:"any_val"`
+		AppenderIfc prim.JSONAppender        `json:"appender_ifc"`
+		JSONIfc     json.Marshaler           `json:"json_ifc"`
+		TextIfc     encoding.TextMarshaler   `json:"text_ifc"`
+	}
+
+	ptrItem := makeItem(2)
+	c := DispatchContainer{
+		Concrete:    makeItem(1),
+		Ptr:         &ptrItem,
+		Slice:       []reviewCountingAppender{makeItem(3)},
+		AnyVal:      makeItem(4),
+		AppenderIfc: makeItem(5),
+		JSONIfc:     makeItem(6),
+		TextIfc:     makeItem(7),
+	}
+
+	got, err := ConfigStd.Marshal(c)
+	if err != nil {
+		t.Fatalf("ConfigStd.Marshal(DispatchContainer) error: %v", err)
+	}
+	if appendCalls.Load() != 6 {
+		t.Fatalf("expected 6 AppendJSON calls across concrete/ptr/slice/any/JSONAppender/json.Marshaler fields, got %d (MarshalJSON=%d, MarshalText=%d)",
+			appendCalls.Load(), jsonCalls.Load(), textCalls.Load())
+	}
+	if jsonCalls.Load() != 0 || textCalls.Load() != 1 {
+		t.Fatalf("expected MarshalJSON=0 and MarshalText=1 (for static encoding.TextMarshaler field), got MarshalJSON=%d, MarshalText=%d",
+			jsonCalls.Load(), textCalls.Load())
+	}
+
+	want, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("json.Marshal(DispatchContainer) error: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("DispatchContainer parity mismatch:\ngot:  %s\nwant: %s", got, want)
+	}
+
+	// Verify 0 allocations when encoding into preallocated buffer under both default and ConfigStd options.
+	type SingleHolder struct {
+		Item reviewCountingAppender `json:"item"`
+	}
+	holder := SingleHolder{Item: reviewCountingAppender{ID: 77}}
+	buf := make([]byte, 0, 256)
+	stdOpts := encoder.EscapeHTML | encoder.CompactMarshaler | encoder.ValidateString
+	for _, opts := range []encoder.Options{0, stdOpts} {
+		if err := encoder.EncodeInto(&buf, &holder, opts); err != nil {
+			t.Fatalf("warmup EncodeInto(opts=%v) error: %v", opts, err)
+		}
+		allocs := testing.AllocsPerRun(100, func() {
+			buf = buf[:0]
+			if err := encoder.EncodeInto(&buf, &holder, opts); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if allocs != 0 {
+			t.Fatalf("expected 0 allocs for clean compact JSONAppender with opts=%v, got %v", opts, allocs)
+		}
+	}
+}
+
+func TestReview_ConcurrentPretouchAndFirstRequestInterleaving(t *testing.T) {
+	initStage3DynamicVals()
+	types := make([]reflect.Type, 32)
+	for i := 0; i < 32; i++ {
+		types[i] = reflect.TypeOf(stage3DynamicVals[i]).Elem()
+	}
+
+	for round := 0; round < 5; round++ {
+		encvars.ResetProgramCache()
+		optdec.ResetProgramCache()
+
+		var wg sync.WaitGroup
+		errCh := make(chan error, 32)
+
+		// Goroutines running PretouchMany on overlapping slices.
+		for g := 0; g < 4; g++ {
+			wg.Add(1)
+			go func(offset int) {
+				defer wg.Done()
+				sub := types[offset : offset+16]
+				if err := PretouchMany(sub, option.WithCompileRecursiveDepth(2)); err != nil {
+					errCh <- err
+				}
+			}(g * 4)
+		}
+
+		// Goroutines simultaneously executing first-request Marshal and Unmarshal on both V and *V.
+		for w := 0; w < 8; w++ {
+			wg.Add(1)
+			go func(worker int) {
+				defer wg.Done()
+				for i := 0; i < 32; i++ {
+					idx := (i + worker*5) & 31
+					ptrVal := stage3DynamicVals[idx]
+					elemVal := reflect.ValueOf(ptrVal).Elem().Interface()
+
+					b1, err := Marshal(elemVal)
+					if err != nil {
+						errCh <- err
+						return
+					}
+					b2, err := Marshal(ptrVal)
+					if err != nil {
+						errCh <- err
+						return
+					}
+					if !bytes.Equal(b1, b2) {
+						errCh <- fmt.Errorf("Marshal(V) != Marshal(*V) for type %d: %s vs %s", idx, b1, b2)
+						return
+					}
+					dst := reflect.New(types[idx]).Interface()
+					if err := Unmarshal(b1, dst); err != nil {
+						errCh <- err
+						return
+					}
+				}
+			}(w)
+		}
+
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			t.Fatalf("round %d concurrent Pretouch + Marshal/Unmarshal error: %v", round, err)
 		}
 	}
 }

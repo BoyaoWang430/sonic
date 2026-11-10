@@ -64,12 +64,12 @@ func TestPretouchTypeVM(t *testing.T) {
 			MaxInlineDepth: 1,
 			RecursiveDepth: 1000,
 		},
-		0,
+		false,
 	)
 	assert.NoError(t, err)
-	assert.Contains(t, sub, reflect.TypeOf(subA{}))
-	assert.Contains(t, sub, reflect.TypeOf(subB{}))
-	assert.Contains(t, sub, reflect.TypeOf(subC{}))
+	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subA{}), pv: false})
+	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subB{}), pv: false})
+	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subC{}), pv: false})
 }
 
 func TestStructFieldsCompilation(t *testing.T) {
