@@ -2,7 +2,7 @@
 
 English | [中文](README_ZH_CN.md)
 
-A blazingly fast JSON serializing &amp; deserializing library, accelerated by JIT (just-in-time compiling) and SIMD (single-instruction-multiple-data).
+A blazingly fast JSON serializing &amp; deserializing library, accelerated by SIMD (single-instruction-multiple-data) and architecture-specialized native kernels.
 
 ## Requirement
 

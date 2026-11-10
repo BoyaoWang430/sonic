@@ -78,13 +78,13 @@ type node struct {
 	val uint64
 }
 
-// should consistent with native/parser.c
+// Layout must match the assembly offsets in parse_cparity_runs_*.s.
 type _nospaceBlock struct {
 	_ [8]byte
 	_ [8]byte
 }
 
-// should consistent with native/parser.c
+// Layout must match the assembly offsets in parse_cparity_runs_*.s.
 type nodeBuf struct {
 	nlen   int
 	parent int64
@@ -100,7 +100,7 @@ func (self *nodeBuf) init(nodes []node) {
 	self.parent = -1
 }
 
-// should consistent with native/parser.c
+// Layout must match the assembly offsets in parse_cparity_runs_*.s.
 type Parser struct {
 	Json   string
 	padded []byte

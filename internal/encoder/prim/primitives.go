@@ -56,10 +56,10 @@ func EncodeNil(rb *[]byte) error {
 //   - AppendJSON is called with a zero-length slice `dst[origLen:origLen:cap(dst)]`
 //     sharing the parent encoding session's spare capacity, and must return the
 //     appended JSON value slice (`ret`) or a non-nil error.
-//   - If `ret` stays within `dst`'s spare suffix and requires neither whitespace
-//     compaction nor HTML/UTF-8 character expansion (<, >, &, U+2028, U+2029, or
-//     invalid UTF-8), validation and post-processing complete in place with zero
-//     extra allocations (including under ConfigStd).
+//   - If `ret` stays within `dst`'s spare suffix, has container nesting depth <= 64,
+//     and requires neither whitespace compaction nor HTML/UTF-8 character expansion
+//     (<, >, &, U+2028, U+2029, or invalid UTF-8), validation and post-processing
+//     complete in place with zero extra allocations (including under ConfigStd).
 //   - If whitespace compaction or character escaping/replacement must rewrite an
 //     overlapping slice, DetachIfOverlappingSpare allocates a detached copy so
 //     source bytes are never overwritten before reading.

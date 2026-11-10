@@ -915,9 +915,12 @@ func validateCompactAndCleanJSON(src []byte, sanitize uint64) bool {
 }
 
 // AppendCompactedJSON validates src as a single JSON value and appends its compacted
-// (and optionally HTML-escaped / UTF-8-sanitized) representation directly to dst
-// in a single pass. On invalid JSON, dst is restored to its entry length and
-// encoding/json.Compact's exact error is returned.
+// (and optionally HTML-escaped / UTF-8-sanitized) representation to dst.
+// It first pre-scans src for already-compact, escape-free JSON (using a 64-level
+// local container stack before heap growth) so clean inputs can be finalized in
+// place; if whitespace compaction or character escaping is required, it falls back
+// to a second pass that rewrites into dst. On invalid JSON, dst is restored to its
+// entry length and encoding/json.Compact's exact error is returned.
 func AppendCompactedJSON(dst []byte, src []byte, sanitize uint64) ([]byte, error) {
 	if validateCompactAndCleanJSON(src, sanitize) {
 		if isExactSpareSuffix(dst, src) {

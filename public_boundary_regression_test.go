@@ -45,9 +45,11 @@ func TestGenericMapAndNilChecks(t *testing.T) {
 	if err != nil || string(got) != "null" {
 		t.Fatalf("Marshal(nilMap) = %s, %v; want null", got, err)
 	}
-	got, err = Config{NoNullSliceOrMap: true}.Froze().Marshal(nilMap)
-	if err != nil || string(got) != "{}" {
-		t.Fatalf("Marshal(nilMap) with NoNullSliceOrMap = %s, %v; want {}", got, err)
+	if APIKind == UseSonicJSON {
+		got, err = Config{NoNullSliceOrMap: true}.Froze().Marshal(nilMap)
+		if err != nil || string(got) != "{}" {
+			t.Fatalf("Marshal(nilMap) with NoNullSliceOrMap = %s, %v; want {}", got, err)
+		}
 	}
 
 	h := nilCheckHolder{UNon: 42}
@@ -80,6 +82,9 @@ type boxEscapeOuter struct {
 }
 
 func TestEncoderTempBoxEscapeIsZero(t *testing.T) {
+	if APIKind != UseSonicJSON {
+		t.Skip("omitzero and native encoder temporary box test only applies to UseSonicJSON")
+	}
 	retainedBoxPtrs = nil
 
 	out1, err := Marshal(boxEscapeOuter{F: boxEscapeField{V: 7}})
@@ -167,6 +172,9 @@ type nestedSelfPtrMapVal struct {
 }
 
 func TestDecoderMapSlotReuseCallbacks(t *testing.T) {
+	if APIKind != UseSonicJSON {
+		t.Skip("map callback temporary slot isolation applies to native UseSonicJSON backend")
+	}
 	// 1. Key whose UnmarshalText embeds receiver pointer into key struct itself.
 	var stdKeyMap map[selfPtrMapKey]int
 	var sonicKeyMap map[selfPtrMapKey]int
@@ -324,5 +332,236 @@ func TestASTNodeUnmarshalJSONCopiesInput(t *testing.T) {
 	got, err := n.Get("greeting").String()
 	if err != nil || got != "hello" {
 		t.Fatalf("n.Get(\"greeting\").String() = %q, %v; want \"hello\"", got, err)
+	}
+}
+
+type ptrMarshalerInt int
+
+func (n *ptrMarshalerInt) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"custom:%d"`, *n)), nil
+}
+
+type valMarshalerInt int
+
+func (n valMarshalerInt) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"val:%d"`, int(n))), nil
+}
+
+type ptrTextMarshalerInt int
+
+func (n *ptrTextMarshalerInt) MarshalText() ([]byte, error) {
+	return []byte(fmt.Sprintf("txt:%d", *n)), nil
+}
+
+type ptrAppenderInt int
+
+func (n *ptrAppenderInt) AppendJSON(dst []byte) ([]byte, error) {
+	return append(dst, fmt.Sprintf(`"app:%d"`, *n)...), nil
+}
+
+type embeddedStringTagInner struct {
+	PtrJSON ptrMarshalerInt     `json:"ptr_json,string"`
+	ValJSON valMarshalerInt     `json:"val_json,string"`
+	PtrText ptrTextMarshalerInt `json:"ptr_text,string"`
+	Plain   int                 `json:"plain,string"`
+}
+
+type embeddedStringTagOuter struct {
+	*embeddedStringTagInner
+	DirectVal ptrMarshalerInt  `json:"direct_val,string"`
+	DirectPtr *ptrMarshalerInt `json:"direct_ptr,string"`
+}
+
+type embeddedAppenderInner struct {
+	App ptrAppenderInt `json:"app,string"`
+}
+
+type embeddedAppenderOuter struct {
+	*embeddedAppenderInner
+}
+
+func TestEmbeddedPointerStringTagMarshaler(t *testing.T) {
+	dp := ptrMarshalerInt(9)
+	cases := []struct {
+		name string
+		val  any
+	}{
+		{
+			name: "OuterValue_WithNonNilEmbeddedPtr",
+			val: embeddedStringTagOuter{
+				embeddedStringTagInner: &embeddedStringTagInner{
+					PtrJSON: 7,
+					ValJSON: 8,
+					PtrText: 6,
+					Plain:   5,
+				},
+				DirectVal: 4,
+				DirectPtr: &dp,
+			},
+		},
+		{
+			name: "OuterPointer_WithNonNilEmbeddedPtr",
+			val: &embeddedStringTagOuter{
+				embeddedStringTagInner: &embeddedStringTagInner{
+					PtrJSON: 7,
+					ValJSON: 8,
+					PtrText: 6,
+					Plain:   5,
+				},
+				DirectVal: 4,
+				DirectPtr: &dp,
+			},
+		},
+		{
+			name: "OuterValue_WithNilEmbeddedPtr",
+			val: embeddedStringTagOuter{
+				embeddedStringTagInner: nil,
+				DirectVal:              4,
+				DirectPtr:              nil,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, err := json.Marshal(tc.val)
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			for _, cfg := range []API{ConfigDefault, ConfigStd} {
+				got, err := cfg.Marshal(tc.val)
+				if err != nil {
+					t.Fatalf("sonic Marshal failed: %v", err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("sonic Marshal = %s, want %s", got, want)
+				}
+			}
+		})
+	}
+
+	if APIKind == UseSonicJSON {
+		v := embeddedAppenderOuter{
+			embeddedAppenderInner: &embeddedAppenderInner{App: 13},
+		}
+		got, err := Marshal(v)
+		if err != nil {
+			t.Fatalf("Marshal(embeddedAppenderOuter) failed: %v", err)
+		}
+		if string(got) != `{"app":"app:13"}` {
+			t.Fatalf("Marshal(embeddedAppenderOuter) = %s, want {\"app\":\"app:13\"}", got)
+		}
+	}
+}
+
+type arrayBoxEscapeHolder struct {
+	Arr [2]boxEscapeOuter `json:"arr"`
+}
+
+type failingMapVal struct {
+	V string
+}
+
+func (v *failingMapVal) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	if s == "boom" {
+		return fmt.Errorf("callback boom")
+	}
+	v.V = s
+	return nil
+}
+
+func TestBoundaryCombinationScenarios(t *testing.T) {
+	// 1. Stream Tape capacity boundary around 511 / 512 / 513 scalar elements in root array.
+	for _, n := range []int{510, 511, 512, 513, 514} {
+		var sb strings.Builder
+		sb.WriteByte('[')
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, "%d", i)
+		}
+		sb.WriteString("] {\"tail\":true}")
+		dec := ConfigDefault.NewDecoder(strings.NewReader(sb.String()))
+		var arr []int
+		if err := dec.Decode(&arr); err != nil {
+			t.Fatalf("stream Decode(%d ints) failed: %v", n, err)
+		}
+		if len(arr) != n || arr[0] != 0 || arr[n-1] != n-1 {
+			t.Fatalf("stream Decode(%d ints) len=%d, last=%d", n, len(arr), arr[len(arr)-1])
+		}
+		var tail map[string]bool
+		if err := dec.Decode(&tail); err != nil || !tail["tail"] {
+			t.Fatalf("stream Decode tail after %d ints failed: %v, %v", n, tail, err)
+		}
+	}
+
+	// 2. Parser growth (>16 nodes) combined with >64-byte whitespace runs and Unicode unescaping.
+	ws := strings.Repeat(" ", 96)
+	var uBuilder strings.Builder
+	uBuilder.WriteByte('[')
+	for i := 0; i < 40; i++ {
+		if i > 0 {
+			uBuilder.WriteByte(',')
+		}
+		uBuilder.WriteString(ws)
+		fmt.Fprintf(&uBuilder, `"item-\u0041-%d"`, i)
+	}
+	uBuilder.WriteByte(']')
+	var uOut []string
+	if err := UnmarshalString(uBuilder.String(), &uOut); err != nil {
+		t.Fatalf("UnmarshalString with parser growth + whitespace + unicode failed: %v", err)
+	}
+	if len(uOut) != 40 || uOut[0] != "item-A-0" || uOut[39] != "item-A-39" {
+		t.Fatalf("unexpected uOut: len=%d, first=%q, last=%q", len(uOut), uOut[0], uOut[len(uOut)-1])
+	}
+
+	// 3. Pre-populated map + duplicate keys + callback error preserves prior valid entries.
+	preMap := map[string]failingMapVal{
+		"keep": {V: "initial"},
+	}
+	err := Unmarshal([]byte(`{"dup":"first","dup":"second","bad":"boom"}`), &preMap)
+	if err == nil {
+		t.Fatalf("expected callback error on boom")
+	}
+	if preMap["keep"].V != "initial" || preMap["dup"].V != "second" {
+		t.Fatalf("unexpected preMap state after callback error: %+v", preMap)
+	}
+
+	if APIKind != UseSonicJSON {
+		return
+	}
+
+	// 4. Native-only: inline array elements with pointer-receiver IsZero and map value inline array callbacks.
+	retainedBoxPtrs = nil
+	arrHolder := arrayBoxEscapeHolder{
+		Arr: [2]boxEscapeOuter{
+			{F: boxEscapeField{V: 101}},
+			{F: boxEscapeField{V: 202}},
+		},
+	}
+	if _, err := Marshal(arrHolder); err != nil {
+		t.Fatalf("Marshal(arrHolder) failed: %v", err)
+	}
+	if len(retainedBoxPtrs) != 2 || retainedBoxPtrs[0].V != 101 || retainedBoxPtrs[1].V != 202 {
+		t.Fatalf("inline array temporary box overwrote retained pointers: %+v", retainedBoxPtrs)
+	}
+
+	retainedDecodeVals = nil
+	var arrValMap map[string][2]selfPtrMapVal
+	if err := Unmarshal([]byte(`{"a":["v1","v2"],"b":["v3","v4"]}`), &arrValMap); err != nil {
+		t.Fatalf("Unmarshal(arrValMap) failed: %v", err)
+	}
+	if len(retainedDecodeVals) != 4 {
+		t.Fatalf("retainedDecodeVals len = %d, want 4", len(retainedDecodeVals))
+	}
+	gotArrVals := []string{retainedDecodeVals[0].V, retainedDecodeVals[1].V, retainedDecodeVals[2].V, retainedDecodeVals[3].V}
+	sort.Strings(gotArrVals)
+	if !reflect.DeepEqual(gotArrVals, []string{"v1", "v2", "v3", "v4"}) {
+		t.Fatalf("inline array map value callbacks overwrote receivers: %v", gotArrVals)
 	}
 }

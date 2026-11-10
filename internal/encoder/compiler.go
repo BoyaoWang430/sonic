@@ -849,7 +849,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 			if (fv.Opts & resolver.F_stringize) == 0 {
 				self.compileOne(p, sp+1, ft, fieldCanAddr)
 			} else {
-				self.compileStructFieldStr(p, sp+1, ft)
+				self.compileStructFieldStr(p, sp+1, ft, fieldCanAddr)
 			}
 
 			/* patch the skipping jumps and reload the struct pointer */
@@ -866,9 +866,9 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 	p.Int(ir.OP_byte, '}')
 }
 
-func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Type, fieldCanAddr bool) {
 	// NOTICE: according to encoding/json, Marshaler type has higher priority than string option
-	if self.tryCompileMarshaler(p, vt, self.pv) {
+	if self.tryCompileMarshaler(p, vt, fieldCanAddr) {
 		return
 	}
 
@@ -893,7 +893,7 @@ func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Ty
 
 	/* if it's not, ignore the "string" and follow the regular path */
 	if !sv {
-		self.compileOne(p, sp, vt, self.pv)
+		self.compileOne(p, sp, vt, fieldCanAddr)
 		return
 	}
 
@@ -903,13 +903,14 @@ func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Ty
 		vt = vt.Elem()
 		p.Add(ir.OP_is_nil)
 		p.Add(ir.OP_deref)
+		fieldCanAddr = true
 	}
 
 	/* special case of a double-quoted string */
 	if ft != vars.JsonNumberType && ft.Kind() == reflect.String {
 		p.Add(ir.OP_quote)
 	} else {
-		self.compileStructFieldQuoted(p, sp, vt)
+		self.compileStructFieldQuoted(p, sp, vt, fieldCanAddr)
 	}
 
 	/* the "null" case of the pointer */
@@ -986,9 +987,9 @@ func (self *Compiler) compileStructFieldOmitNilPtr(p *ir.Program, vt reflect.Typ
 	}
 }
 
-func (self *Compiler) compileStructFieldQuoted(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) compileStructFieldQuoted(p *ir.Program, sp int, vt reflect.Type, fieldCanAddr bool) {
 	p.Int(ir.OP_byte, '"')
-	self.compileOne(p, sp, vt, self.pv)
+	self.compileOne(p, sp, vt, fieldCanAddr)
 	p.Int(ir.OP_byte, '"')
 }
 
