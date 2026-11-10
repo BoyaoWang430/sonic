@@ -111,35 +111,39 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 	if cap(buf)-len(buf) < nb+nb>>2+32 {
 		buf = rt.GuardSlice2(buf, nb+nb>>2+32)
 	}
-	b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-	sp := rt.IndexChar(val, 0)
+	bPtr := unsafe.Pointer(unsafe.SliceData(buf))
+	bLen := len(buf)
+	bCap := cap(buf)
+	sp := unsafe.Pointer(unsafe.StringData(val))
 	i := 0
 	for i < nb {
-		if b.Cap-b.Len < 24 {
+		if bCap-bLen < 24 {
+			buf = buf[:bLen]
 			buf = rt.GuardSlice2(buf, (nb-i)*2+32)
-			b = (*rt.GoSlice)(unsafe.Pointer(&buf))
+			bPtr = unsafe.Pointer(unsafe.SliceData(buf))
+			bCap = cap(buf)
 		}
-		for i+8 <= nb && b.Cap-b.Len >= 16 {
+		for i+8 <= nb && bCap-bLen >= 16 {
 			w := *(*uint64)(unsafe.Add(sp, i))
 			if (quoteSafeHTMLBits64(w) & saniMSB64) != 0 {
 				break
 			}
-			*(*uint64)(unsafe.Add(b.Ptr, b.Len)) = w
-			b.Len += 8
+			*(*uint64)(unsafe.Add(bPtr, bLen)) = w
+			bLen += 8
 			i += 8
 		}
 		if i >= nb {
 			break
 		}
-		if b.Cap-b.Len < 16 {
+		if bCap-bLen < 16 {
 			continue
 		}
-		dp := unsafe.Add(b.Ptr, b.Len)
+		dp := unsafe.Add(bPtr, bLen)
 		c := *(*byte)(unsafe.Add(sp, i))
 		if c < 0x80 {
 			if c >= 0x20 && c != '"' && c != '\\' && (!escapeHTML || (c != '<' && c != '>' && c != '&')) {
 				*(*byte)(dp) = c
-				b.Len++
+				bLen++
 				i++
 				continue
 			}
@@ -147,21 +151,21 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 			case '"', '\\':
 				*(*byte)(dp) = '\\'
 				*(*byte)(unsafe.Add(dp, 1)) = c
-				b.Len += 2
+				bLen += 2
 			case '\t':
 				*(*[2]byte)(dp) = [2]byte{'\\', 't'}
-				b.Len += 2
+				bLen += 2
 			case '\n':
 				*(*[2]byte)(dp) = [2]byte{'\\', 'n'}
-				b.Len += 2
+				bLen += 2
 			case '\r':
 				*(*[2]byte)(dp) = [2]byte{'\\', 'r'}
-				b.Len += 2
+				bLen += 2
 			default:
 				*(*[4]byte)(dp) = [4]byte{'\\', 'u', '0', '0'}
 				*(*byte)(unsafe.Add(dp, 4)) = hexDigits[c>>4]
 				*(*byte)(unsafe.Add(dp, 5)) = hexDigits[c&0x0f]
-				b.Len += 6
+				bLen += 6
 			}
 			i++
 			continue
@@ -173,12 +177,12 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 				if escapeHTML && c == 0xe2 && b1 == 0x80 && (b2&^1) == 0xa8 {
 					*(*[5]byte)(dp) = [5]byte{'\\', 'u', '2', '0', '2'}
 					*(*byte)(unsafe.Add(dp, 5)) = hexDigits[b2&0x0f]
-					b.Len += 6
+					bLen += 6
 				} else {
 					*(*byte)(dp) = c
 					*(*byte)(unsafe.Add(dp, 1)) = b1
 					*(*byte)(unsafe.Add(dp, 2)) = b2
-					b.Len += 3
+					bLen += 3
 				}
 				i += 3
 				continue
@@ -188,7 +192,7 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 			if (b1 & 0xc0) == 0x80 {
 				*(*byte)(dp) = c
 				*(*byte)(unsafe.Add(dp, 1)) = b1
-				b.Len += 2
+				bLen += 2
 				i += 2
 				continue
 			}
@@ -201,36 +205,34 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 				*(*byte)(unsafe.Add(dp, 1)) = b1
 				*(*byte)(unsafe.Add(dp, 2)) = b2
 				*(*byte)(unsafe.Add(dp, 3)) = b3
-				b.Len += 4
+				bLen += 4
 				i += 4
 				continue
 			}
 		}
 		if validateUTF8 {
 			*(*[6]byte)(dp) = [6]byte{'\\', 'u', 'f', 'f', 'f', 'd'}
-			b.Len += 6
+			bLen += 6
 		} else {
 			*(*byte)(dp) = c
-			b.Len++
+			bLen++
 		}
 		i++
 	}
 	if suffix != 0 {
-		if b.Cap-b.Len >= 2 {
-			dp := unsafe.Add(b.Ptr, b.Len)
+		if bCap-bLen >= 2 {
+			dp := unsafe.Add(bPtr, bLen)
 			*(*byte)(dp) = '"'
 			*(*byte)(unsafe.Add(dp, 1)) = suffix
-			b.Len += 2
-			return buf
+			return buf[:bLen+2]
 		}
-		return append(buf, '"', suffix)
+		return append(buf[:bLen], '"', suffix)
 	}
-	if b.Cap-b.Len >= 1 {
-		*(*byte)(unsafe.Add(b.Ptr, b.Len)) = '"'
-		b.Len++
-		return buf
+	if bCap-bLen >= 1 {
+		*(*byte)(unsafe.Add(bPtr, bLen)) = '"'
+		return buf[:bLen+1]
 	}
-	return append(buf, '"')
+	return append(buf[:bLen], '"')
 }
 
 func hasHTMLChars(b []byte) bool {
@@ -300,8 +302,8 @@ func fragmentSafeHTMLASCIIBits64(w uint64) uint64 {
 	return w | ((lg - saniLSB64) & ^lg) | ((amp - saniLSB64) & ^amp)
 }
 
-func appendUTF8OrInvalidByte(b *rt.GoSlice, sp unsafe.Pointer, i int, nb int, escapeHTML bool, validateUTF8 bool) int {
-	dp := unsafe.Add(b.Ptr, b.Len)
+func appendUTF8OrInvalidByte(bPtr unsafe.Pointer, bLen int, sp unsafe.Pointer, i int, nb int, escapeHTML bool, validateUTF8 bool) (int, int) {
+	dp := unsafe.Add(bPtr, bLen)
 	c := *(*byte)(unsafe.Add(sp, i))
 	if c >= 0xe0 && c <= 0xef && i+2 < nb {
 		b1 := *(*byte)(unsafe.Add(sp, i+1))
@@ -310,22 +312,22 @@ func appendUTF8OrInvalidByte(b *rt.GoSlice, sp unsafe.Pointer, i int, nb int, es
 			if escapeHTML && c == 0xe2 && b1 == 0x80 && (b2&^1) == 0xa8 {
 				*(*[5]byte)(dp) = [5]byte{'\\', 'u', '2', '0', '2'}
 				*(*byte)(unsafe.Add(dp, 5)) = hexDigits[b2&0x0f]
-				b.Len += 6
+				bLen += 6
 			} else {
 				*(*byte)(dp) = c
 				*(*byte)(unsafe.Add(dp, 1)) = b1
 				*(*byte)(unsafe.Add(dp, 2)) = b2
-				b.Len += 3
+				bLen += 3
 			}
-			return i + 3
+			return bLen, i + 3
 		}
 	} else if c >= 0xc2 && c <= 0xdf && i+1 < nb {
 		b1 := *(*byte)(unsafe.Add(sp, i+1))
 		if (b1 & 0xc0) == 0x80 {
 			*(*byte)(dp) = c
 			*(*byte)(unsafe.Add(dp, 1)) = b1
-			b.Len += 2
-			return i + 2
+			bLen += 2
+			return bLen, i + 2
 		}
 	} else if c >= 0xf0 && c <= 0xf4 && i+3 < nb {
 		b1 := *(*byte)(unsafe.Add(sp, i+1))
@@ -336,28 +338,28 @@ func appendUTF8OrInvalidByte(b *rt.GoSlice, sp unsafe.Pointer, i int, nb int, es
 			*(*byte)(unsafe.Add(dp, 1)) = b1
 			*(*byte)(unsafe.Add(dp, 2)) = b2
 			*(*byte)(unsafe.Add(dp, 3)) = b3
-			b.Len += 4
-			return i + 4
+			bLen += 4
+			return bLen, i + 4
 		}
 	}
 	if validateUTF8 {
 		*(*[6]byte)(dp) = [6]byte{'\\', 'u', 'f', 'f', 'f', 'd'}
-		b.Len += 6
+		bLen += 6
 	} else {
 		*(*byte)(dp) = c
-		b.Len++
+		bLen++
 	}
-	return i + 1
+	return bLen, i + 1
 }
 
 func DetachIfOverlappingSpare(dst []byte, src []byte) []byte {
 	if cap(dst)-len(dst) == 0 || len(src) == 0 {
 		return src
 	}
-	d := (*rt.GoSlice)(unsafe.Pointer(&dst))
-	dstStart := uintptr(d.Ptr) + uintptr(d.Len)
-	dstEnd := uintptr(d.Ptr) + uintptr(d.Cap)
-	srcStart := uintptr(unsafe.Pointer(rt.SliceData(src)))
+	dPtr := uintptr(unsafe.Pointer(unsafe.SliceData(dst)))
+	dstStart := dPtr + uintptr(len(dst))
+	dstEnd := dPtr + uintptr(cap(dst))
+	srcStart := uintptr(unsafe.Pointer(unsafe.SliceData(src)))
 	srcEnd := srcStart + uintptr(len(src))
 	if srcStart < dstEnd && dstStart < srcEnd {
 		cp := make([]byte, len(src))
@@ -383,51 +385,55 @@ func AppendSanitizedBytes(dst []byte, src []byte, sanitize uint64) []byte {
 	if cap(dst)-len(dst) < nb+24 {
 		dst = rt.GuardSlice2(dst, nb+nb>>3+32)
 	}
-	b := (*rt.GoSlice)(unsafe.Pointer(&dst))
+	bPtr := unsafe.Pointer(unsafe.SliceData(dst))
+	bLen := len(dst)
+	bCap := cap(dst)
 	sp := unsafe.Pointer(rt.SliceData(src))
 	i := 0
 	for i < nb {
-		if b.Cap-b.Len < 24 {
+		if bCap-bLen < 24 {
+			dst = dst[:bLen]
 			dst = rt.GuardSlice2(dst, (nb-i)*2+32)
-			b = (*rt.GoSlice)(unsafe.Pointer(&dst))
+			bPtr = unsafe.Pointer(unsafe.SliceData(dst))
+			bCap = cap(dst)
 		}
-		for i+8 <= nb && b.Cap-b.Len >= 16 {
+		for i+8 <= nb && bCap-bLen >= 16 {
 			w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
 			mask := fragmentSafeHTMLASCIIBits64(w) & saniMSB64
-			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(b.Ptr, b.Len))[:], w)
+			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(bPtr, bLen))[:], w)
 			if mask != 0 {
 				k := bits.TrailingZeros64(mask) >> 3
-				b.Len += k
+				bLen += k
 				i += k
 				break
 			}
-			b.Len += 8
+			bLen += 8
 			i += 8
 		}
 		if i >= nb {
 			break
 		}
-		if b.Cap-b.Len < 16 {
+		if bCap-bLen < 16 {
 			continue
 		}
 		c := *(*byte)(unsafe.Add(sp, i))
 		if c < 0x80 {
-			dp := unsafe.Add(b.Ptr, b.Len)
+			dp := unsafe.Add(bPtr, bLen)
 			if escapeHTML && (c == '<' || c == '>' || c == '&') {
 				*(*[4]byte)(dp) = [4]byte{'\\', 'u', '0', '0'}
 				*(*byte)(unsafe.Add(dp, 4)) = hexDigits[c>>4]
 				*(*byte)(unsafe.Add(dp, 5)) = hexDigits[c&0x0f]
-				b.Len += 6
+				bLen += 6
 			} else {
 				*(*byte)(dp) = c
-				b.Len++
+				bLen++
 			}
 			i++
 			continue
 		}
-		i = appendUTF8OrInvalidByte(b, sp, i, nb, escapeHTML, validateUTF8)
+		bLen, i = appendUTF8OrInvalidByte(bPtr, bLen, sp, i, nb, escapeHTML, validateUTF8)
 	}
-	return dst
+	return dst[:bLen]
 }
 
 const (
@@ -503,77 +509,80 @@ func appendCompactedJSONStringContent(dst []byte, src []byte, i int, sanitize ui
 	nb := len(src)
 	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
 	validateUTF8 := sanitize&(1<<BitValidateString) != 0
-	b := (*rt.GoSlice)(unsafe.Pointer(&dst))
+	bPtr := unsafe.Pointer(unsafe.SliceData(dst))
+	bLen := len(dst)
+	bCap := cap(dst)
 	sp := unsafe.Pointer(rt.SliceData(src))
 
 	for i < nb {
-		if b.Cap-b.Len < 24 {
+		if bCap-bLen < 24 {
+			dst = dst[:bLen]
 			dst = rt.GuardSlice2(dst, (nb-i)*2+32)
-			b = (*rt.GoSlice)(unsafe.Pointer(&dst))
+			bPtr = unsafe.Pointer(unsafe.SliceData(dst))
+			bCap = cap(dst)
 		}
 		if sanitize == 0 {
-			for i+8 <= nb && b.Cap-b.Len >= 16 {
+			for i+8 <= nb && bCap-bLen >= 16 {
 				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
 				mask := quoteEscapeBits64Strict(w) & saniMSB64
-				binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(b.Ptr, b.Len))[:], w)
+				binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(bPtr, bLen))[:], w)
 				if mask != 0 {
 					k := bits.TrailingZeros64(mask) >> 3
-					b.Len += k
+					bLen += k
 					i += k
 					break
 				}
-				b.Len += 8
+				bLen += 8
 				i += 8
 			}
 		} else {
-			for i+8 <= nb && b.Cap-b.Len >= 16 {
+			for i+8 <= nb && bCap-bLen >= 16 {
 				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
 				mask := quoteSafeHTMLBits64(w) & saniMSB64
-				binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(b.Ptr, b.Len))[:], w)
+				binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(bPtr, bLen))[:], w)
 				if mask != 0 {
 					k := bits.TrailingZeros64(mask) >> 3
-					b.Len += k
+					bLen += k
 					i += k
 					break
 				}
-				b.Len += 8
+				bLen += 8
 				i += 8
 			}
 		}
 		if i >= nb {
-			return dst, i, false
+			return dst[:bLen], i, false
 		}
 		c := *(*byte)(unsafe.Add(sp, i))
-		dp := unsafe.Add(b.Ptr, b.Len)
+		dp := unsafe.Add(bPtr, bLen)
 		if c == '"' {
 			*(*byte)(dp) = '"'
-			b.Len++
-			return dst, i + 1, true
+			return dst[:bLen+1], i + 1, true
 		}
 		if c < 0x20 {
-			return dst, i, false
+			return dst[:bLen], i, false
 		}
 		if c == '\\' {
 			if i+1 >= nb {
-				return dst, i, false
+				return dst[:bLen], i, false
 			}
 			esc := *(*byte)(unsafe.Add(sp, i+1))
 			switch esc {
 			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
 				*(*byte)(dp) = '\\'
 				*(*byte)(unsafe.Add(dp, 1)) = esc
-				b.Len += 2
+				bLen += 2
 				i += 2
 			case 'u':
 				if i+6 > nb || !isHexByte(src[i+2]) || !isHexByte(src[i+3]) || !isHexByte(src[i+4]) || !isHexByte(src[i+5]) {
-					return dst, i, false
+					return dst[:bLen], i, false
 				}
 				*(*[4]byte)(dp) = *(*[4]byte)(unsafe.Add(sp, i))
 				*(*[2]byte)(unsafe.Add(dp, 4)) = *(*[2]byte)(unsafe.Add(sp, i+4))
-				b.Len += 6
+				bLen += 6
 				i += 6
 			default:
-				return dst, i, false
+				return dst[:bLen], i, false
 			}
 			continue
 		}
@@ -582,17 +591,17 @@ func appendCompactedJSONStringContent(dst []byte, src []byte, i int, sanitize ui
 				*(*[4]byte)(dp) = [4]byte{'\\', 'u', '0', '0'}
 				*(*byte)(unsafe.Add(dp, 4)) = hexDigits[c>>4]
 				*(*byte)(unsafe.Add(dp, 5)) = hexDigits[c&0x0f]
-				b.Len += 6
+				bLen += 6
 			} else {
 				*(*byte)(dp) = c
-				b.Len++
+				bLen++
 			}
 			i++
 			continue
 		}
-		i = appendUTF8OrInvalidByte(b, sp, i, nb, escapeHTML, validateUTF8)
+		bLen, i = appendUTF8OrInvalidByte(bPtr, bLen, sp, i, nb, escapeHTML, validateUTF8)
 	}
-	return dst, i, false
+	return dst[:bLen], i, false
 }
 
 // AppendCompactedJSON validates src as a single JSON value and appends its compacted
@@ -782,39 +791,35 @@ func AppendSanitizedLiteral(buf []byte, s string, sanitize uint64) []byte {
 	return AppendSanitizedBytes(buf, rt.Str2Mem(s), sanitize)
 }
 
-func QuoteWithPaddedKeyFlags(buf []byte, key string, val string, sanitize uint64) []byte {
+func QuoteWithPaddedKeyFlags(buf []byte, keyPtr *byte, keyLen int, val string, sanitize uint64) []byte {
 	if sanitize == 0 {
-		return QuoteWithPaddedKey(buf, key, val)
+		return QuoteWithPaddedKey(buf, keyPtr, keyLen, val)
 	}
-	nk := len(key)
 	nb := len(val)
-	if cap(buf)-len(buf) >= 34+nb && nk <= 32 {
-		b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-		dp := unsafe.Add(b.Ptr, b.Len)
-		sk := (*[4]uint64)((*rt.GoString)(unsafe.Pointer(&key)).Ptr)
+	if cap(buf)-len(buf) >= 34+nb && keyLen <= 32 {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
 		dk := (*[4]uint64)(dp)
 		dk[0], dk[1] = sk[0], sk[1]
-		if nk > 16 {
+		if keyLen > 16 {
 			dk[2], dk[3] = sk[2], sk[3]
 		}
-		dp = unsafe.Add(dp, nk)
+		dp = unsafe.Add(dp, keyLen)
 		*(*byte)(dp) = '"'
 		if nb == 0 {
 			*(*byte)(unsafe.Add(dp, 1)) = '"'
-			b.Len += nk + 2
-			return buf
+			return buf[:len(buf)+keyLen+2]
 		}
-		sp := rt.IndexChar(val, 0)
+		sp := unsafe.Pointer(unsafe.StringData(val))
 		copied := copySafeHTMLASCIIPrefix(sp, nb, unsafe.Add(dp, 1))
 		if copied == nb {
 			*(*byte)(unsafe.Add(dp, nb+1)) = '"'
-			b.Len += nk + nb + 2
-			return buf
+			return buf[:len(buf)+keyLen+nb+2]
 		}
-		b.Len += nk + 1 + copied
+		buf = buf[:len(buf)+keyLen+1+copied]
 		return appendQuoteSanitizedTail(buf, val[copied:], sanitize, 0)
 	}
-	buf = append(buf, key...)
+	buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
 	buf = append(buf, '"')
 	if nb == 0 {
 		return append(buf, '"')
@@ -831,22 +836,19 @@ func QuoteFlags(buf []byte, val string, double bool, sanitize uint64) []byte {
 		if cap(buf)-len(buf) < nb+2 {
 			buf = rt.GuardSlice2(buf, nb+2)
 		}
-		b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-		dp := unsafe.Add(b.Ptr, b.Len)
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 		*(*byte)(dp) = '"'
 		if nb == 0 {
 			*(*byte)(unsafe.Add(dp, 1)) = '"'
-			b.Len += 2
-			return buf
+			return buf[:len(buf)+2]
 		}
-		sp := rt.IndexChar(val, 0)
+		sp := unsafe.Pointer(unsafe.StringData(val))
 		copied := copySafeHTMLASCIIPrefix(sp, nb, unsafe.Add(dp, 1))
 		if copied == nb {
 			*(*byte)(unsafe.Add(dp, nb+1)) = '"'
-			b.Len += nb + 2
-			return buf
+			return buf[:len(buf)+nb+2]
 		}
-		b.Len += 1 + copied
+		buf = buf[:len(buf)+1+copied]
 		return appendQuoteSanitizedTail(buf, val[copied:], sanitize, 0)
 	}
 	mark := len(buf)
@@ -862,23 +864,20 @@ func QuoteKeyFlags(buf []byte, val string, sanitize uint64) []byte {
 	if cap(buf)-len(buf) < nb+3 {
 		buf = rt.GuardSlice2(buf, nb+3)
 	}
-	b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-	dp := unsafe.Add(b.Ptr, b.Len)
+	dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 	*(*byte)(dp) = '"'
 	if nb == 0 {
 		*(*byte)(unsafe.Add(dp, 1)) = '"'
 		*(*byte)(unsafe.Add(dp, 2)) = ':'
-		b.Len += 3
-		return buf
+		return buf[:len(buf)+3]
 	}
-	sp := rt.IndexChar(val, 0)
+	sp := unsafe.Pointer(unsafe.StringData(val))
 	copied := copySafeHTMLASCIIPrefix(sp, nb, unsafe.Add(dp, 1))
 	if copied == nb {
 		*(*byte)(unsafe.Add(dp, nb+1)) = '"'
 		*(*byte)(unsafe.Add(dp, nb+2)) = ':'
-		b.Len += nb + 3
-		return buf
+		return buf[:len(buf)+nb+3]
 	}
-	b.Len += 1 + copied
+	buf = buf[:len(buf)+1+copied]
 	return appendQuoteSanitizedTail(buf, val[copied:], sanitize, ':')
 }

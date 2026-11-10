@@ -20,12 +20,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"math/bits"
-	"runtime"
 	"strconv"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/internal/utils"
 	"github.com/bytedance/sonic/unquote"
 )
@@ -40,48 +38,38 @@ const (
 	bytesArray  = "[]"
 )
 
-//go:nocheckptr
 func skipBlank(src string, pos int) int {
-	// Keep scan addresses as integers. A pointer at or past the end of the
-	// allocation may be shared across calls after inlining and scanned by GC.
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	se := base + uintptr(len(src))
-	if sp >= se {
+	se := len(src)
+	if pos >= se {
 		return -int(types.ERR_EOF)
 	}
-	if !utils.IsSpace(*(*byte)(unsafe.Pointer(sp))) {
-		runtime.KeepAlive(src)
+	if !utils.IsSpace(src[pos]) {
 		return pos
 	}
-	sp++
+	base := unsafe.Pointer(unsafe.StringData(src))
+	sp := pos + 1
 	for se-sp >= 8 {
-		d := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:]) ^ 0x2020202020202020
+		d := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:]) ^ 0x2020202020202020
 		if d == 0 {
 			sp += 8
 			continue
 		}
-		sp += uintptr(bits.TrailingZeros64(d) >> 3)
-		if *(*byte)(unsafe.Pointer(sp)) > ' ' {
-			ret := int(sp - base)
-			runtime.KeepAlive(src)
-			return ret
+		sp += bits.TrailingZeros64(d) >> 3
+		if src[sp] > ' ' {
+			return sp
 		}
 		break
 	}
 	for sp < se {
-		if !utils.IsSpace(*(*byte)(unsafe.Pointer(sp))) {
+		if !utils.IsSpace(src[sp]) {
 			break
 		}
-		sp += 1
+		sp++
 	}
 	if sp >= se {
-		runtime.KeepAlive(src)
 		return -int(types.ERR_EOF)
 	}
-	ret := int(sp - base)
-	runtime.KeepAlive(src)
-	return ret
+	return sp
 }
 
 func decodeNull(src string, pos int) (ret int) {
@@ -120,13 +108,13 @@ func decodeFalse(src string, pos int) (ret int) {
 	return -int(types.ERR_INVALID_CHAR)
 }
 
-//go:nocheckptr
 func decodeString(src string, pos int) (ret int, v string) {
 	ret, ep := skipString(src, pos)
 	if ep == -1 {
-		(*rt.GoString)(unsafe.Pointer(&v)).Ptr = rt.IndexChar(src, pos+1)
-		(*rt.GoString)(unsafe.Pointer(&v)).Len = ret - pos - 2
-		return ret, v
+		if ret < 0 {
+			return ret, ""
+		}
+		return ret, src[pos+1 : ret-1]
 	}
 
 	result, err := unquote.String(src[pos:ret])
@@ -134,7 +122,6 @@ func decodeString(src string, pos int) (ret int, v string) {
 		return -int(types.ERR_INVALID_CHAR), ""
 	}
 
-	runtime.KeepAlive(src)
 	return ret, result
 }
 
@@ -156,39 +143,33 @@ func isDigit(c byte) bool {
 	return c >= '0' && c <= '9'
 }
 
-//go:nocheckptr
 func decodeInt64(src string, pos int) (ret int, v int64, err error) {
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	ss := sp
-	se := base + uintptr(len(src))
-	if sp >= se {
+	se := len(src)
+	if pos >= se {
 		return -int(types.ERR_EOF), 0, nil
 	}
-
-	if c := *(*byte)(unsafe.Pointer(sp)); c == '-' {
-		sp += 1
+	sp := pos
+	if src[sp] == '-' {
+		sp++
 	}
 	if sp == se {
 		return -int(types.ERR_EOF), 0, nil
 	}
 
-	for ; sp < se; sp += uintptr(1) {
-		if !isDigit(*(*byte)(unsafe.Pointer(sp))) {
+	for ; sp < se; sp++ {
+		if !isDigit(src[sp]) {
 			break
 		}
 	}
 
 	if sp < se {
-		if c := *(*byte)(unsafe.Pointer(sp)); c == '.' || c == 'e' || c == 'E' {
+		if c := src[sp]; c == '.' || c == 'e' || c == 'E' {
 			return -int(types.ERR_INVALID_NUMBER_FMT), 0, nil
 		}
 	}
 
-	var vv string
-	ret = int(uintptr(sp) - uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr))
-	(*rt.GoString)(unsafe.Pointer(&vv)).Ptr = unsafe.Pointer(ss)
-	(*rt.GoString)(unsafe.Pointer(&vv)).Len = ret - pos
+	ret = sp
+	vv := src[pos:ret]
 
 	v, err = strconv.ParseInt(vv, 10, 64)
 	if err != nil {
@@ -199,7 +180,6 @@ func decodeInt64(src string, pos int) (ret int, v int64, err error) {
 		return -int(types.ERR_INVALID_CHAR), 0, err
 	}
 
-	runtime.KeepAlive(src)
 	return ret, v, nil
 }
 
@@ -207,33 +187,27 @@ func isNumberChars(c byte) bool {
 	return (c >= '0' && c <= '9') || c == '+' || c == '-' || c == 'e' || c == 'E' || c == '.'
 }
 
-//go:nocheckptr
 func decodeFloat64(src string, pos int) (ret int, v float64, err error) {
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	ss := sp
-	se := base + uintptr(len(src))
-	if sp >= se {
+	se := len(src)
+	if pos >= se {
 		return -int(types.ERR_EOF), 0, nil
 	}
-
-	if c := *(*byte)(unsafe.Pointer(sp)); c == '-' {
-		sp += 1
+	sp := pos
+	if src[sp] == '-' {
+		sp++
 	}
 	if sp == se {
 		return -int(types.ERR_EOF), 0, nil
 	}
 
-	for ; sp < se; sp += uintptr(1) {
-		if !isNumberChars(*(*byte)(unsafe.Pointer(sp))) {
+	for ; sp < se; sp++ {
+		if !isNumberChars(src[sp]) {
 			break
 		}
 	}
 
-	var vv string
-	ret = int(uintptr(sp) - uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr))
-	(*rt.GoString)(unsafe.Pointer(&vv)).Ptr = unsafe.Pointer(ss)
-	(*rt.GoString)(unsafe.Pointer(&vv)).Len = ret - pos
+	ret = sp
+	vv := src[pos:ret]
 
 	v, err = strconv.ParseFloat(vv, 64)
 	if err != nil {
@@ -244,7 +218,6 @@ func decodeFloat64(src string, pos int) (ret int, v float64, err error) {
 		return -int(types.ERR_INVALID_CHAR), 0, err
 	}
 
-	runtime.KeepAlive(src)
 	return ret, v, nil
 }
 
@@ -313,7 +286,6 @@ func decodeValue(src string, pos int, skipnum bool) (ret int, v types.JsonState)
 	}
 }
 
-//go:nocheckptr
 func skipNumber(src string, pos int) (ret int) {
 	return utils.SkipNumber(src, pos)
 }
@@ -323,39 +295,30 @@ const (
 	scanByteHighBits uint64 = 0x8080808080808080
 )
 
-//go:nocheckptr
 func skipString(src string, pos int) (ret int, ep int) {
-	if pos+1 >= len(src) {
+	se := len(src)
+	if pos+1 >= se {
 		return -int(types.ERR_EOF), -1
 	}
-
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	se := base + uintptr(len(src))
-
-	// not start with quote
-	if *(*byte)(unsafe.Pointer(sp)) != '"' {
-		runtime.KeepAlive(src)
+	if src[pos] != '"' {
 		return -int(types.ERR_INVALID_CHAR), -1
 	}
-	sp += 1
-
+	base := unsafe.Pointer(unsafe.StringData(src))
+	sp := pos + 1
 	ep = -1
 
 	// Scan bounded words; dense escapes back off between word probes.
 stringWords:
 	for sp < se && se-sp >= 8 {
 		// Little-endian loads put the earliest byte in the lowest bits.
-		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 		b := x ^ ('\\' * scanByteOnes)
 		if (b-scanByteOnes)&^b&scanByteHighBits == 0 {
 			q := x ^ ('"' * scanByteOnes)
 			mask := (q - scanByteOnes) &^ q & scanByteHighBits
 			// Borrowing may mark later bytes too, but the first match is exact.
 			if mask != 0 {
-				ret = int(sp + uintptr(bits.TrailingZeros64(mask)>>3) + 1 - base)
-				runtime.KeepAlive(src)
-				return ret, ep
+				return sp + (bits.TrailingZeros64(mask) >> 3) + 1, ep
 			}
 			sp += 8
 			continue
@@ -363,19 +326,17 @@ stringWords:
 		goto stringEscaped
 	}
 	for sp < se {
-		c := *(*byte)(unsafe.Pointer(sp))
+		c := src[sp]
 		if c == '\\' {
 			if ep == -1 {
-				ep = int(sp - base)
+				ep = sp
 			}
 			sp += 2
 			continue
 		}
-		sp += 1
+		sp++
 		if c == '"' {
-			ret = int(sp - base)
-			runtime.KeepAlive(src)
-			return ret, ep
+			return sp, ep
 		}
 	}
 
@@ -383,30 +344,28 @@ stringWords:
 stringEscaped:
 	{
 		// Retry after 8 bytes, then 16, 32, 64 and at most 128 on dense escapes.
-		step := uintptr(8)
+		step := 8
 		for sp < se {
 			stop := se
 			if se-sp > step {
 				stop = sp + step
 			}
 			for sp < stop {
-				c := *(*byte)(unsafe.Pointer(sp))
+				c := src[sp]
 				if c == '\\' {
 					if ep == -1 {
-						ep = int(sp - base)
+						ep = sp
 					}
 					sp += 2
 					continue
 				}
 				sp++
 				if c == '"' {
-					ret = int(sp - base)
-					runtime.KeepAlive(src)
-					return ret, ep
+					return sp, ep
 				}
 			}
 			if sp < se && se-sp >= 8 {
-				x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+				x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 				b := x ^ ('\\' * scanByteOnes)
 				if (b-scanByteOnes)&^b&scanByteHighBits == 0 {
 					goto stringWords
@@ -418,40 +377,32 @@ stringEscaped:
 		}
 	}
 stringEOF:
-
-	runtime.KeepAlive(src)
 	// not found the closed quote until EOF
 	return -int(types.ERR_EOF), -1
 }
 
-//go:nocheckptr
 func skipPair(src string, pos int, lchar byte, rchar byte) (ret int) {
-	if pos+1 >= len(src) {
+	se := len(src)
+	if pos+1 >= se {
 		return -int(types.ERR_EOF)
 	}
-
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	se := base + uintptr(len(src))
-
-	if *(*byte)(unsafe.Pointer(sp)) != lchar {
-		runtime.KeepAlive(src)
+	if src[pos] != lchar {
 		return -int(types.ERR_INVALID_CHAR)
 	}
-
-	sp += 1
+	base := unsafe.Pointer(unsafe.StringData(src))
+	sp := pos + 1
 	nbrace := 1
 	// Machine-word state avoids byte-width normalization in hot loops.
 	inquote := uint(0)
 	// Consume firstSlash before retrying word scanning.
-	var firstSlash uintptr
+	var firstSlash int
 
 	lword, rword := uint64(lchar)*scanByteOnes, uint64(rchar)*scanByteOnes
 	// Backslashes enter scalar recovery, which periodically retries word scanning.
 scanWords:
 	for sp < se && se-sp >= 8 {
 		// Little-endian loads put the earliest byte in the lowest bits.
-		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 		b := x ^ ('\\' * scanByteOnes)
 		if (b-scanByteOnes)&^b&scanByteHighBits == 0 {
 			q := x ^ ('"' * scanByteOnes)
@@ -501,8 +452,7 @@ scanWords:
 				} else if c == rchar {
 					nbrace--
 					if nbrace == 0 {
-						ret = int(sp + uintptr(shift>>3) + 1 - base)
-						goto done
+						return sp + int(shift>>3) + 1
 					}
 				}
 			}
@@ -513,14 +463,14 @@ scanWords:
 		// an exact mask here so the escape-free test stays an existence test.
 		const lo uint64 = 0x7f7f7f7f7f7f7f7f
 		slashes := ^(((b & lo) + lo) | b | lo)
-		firstSlash = sp + uintptr(bits.TrailingZeros64(slashes)>>3)
+		firstSlash = sp + (bits.TrailingZeros64(slashes) >> 3)
 		goto scanEscaped
 	}
 	// A partial word or a final recovery window uses the terminal scalar
 	// loop, which does not carry the escape-recovery state.
 pairTail:
 	for sp < se {
-		c := *(*byte)(unsafe.Pointer(sp))
+		c := src[sp]
 		if c == '\\' {
 			sp += 2
 			continue
@@ -532,16 +482,14 @@ pairTail:
 			} else if c == rchar {
 				nbrace--
 				if nbrace == 0 {
-					ret = int(sp + 1 - base)
-					goto done
+					return sp + 1
 				}
 			}
 		}
-		sp += 1
+		sp++
 	}
 
-	ret = -int(types.ERR_INVALID_CHAR)
-	goto done
+	return -int(types.ERR_INVALID_CHAR)
 
 scanEscaped:
 	{
@@ -550,7 +498,7 @@ scanEscaped:
 		}
 	escapedOutside:
 		for sp < se {
-			c := *(*byte)(unsafe.Pointer(sp))
+			c := src[sp]
 			sp++
 			if c == '\\' {
 				sp++
@@ -565,8 +513,7 @@ scanEscaped:
 			} else if c == rchar {
 				nbrace--
 				if nbrace == 0 {
-					ret = int(sp - base)
-					goto done
+					return sp
 				}
 			}
 		}
@@ -576,12 +523,12 @@ scanEscaped:
 		{
 			// Scan one word before retrying so a slash in its last lane is
 			// consumed. Back off when escapes remain dense.
-			step := uintptr(8)
+			step := 8
 			// Keep eight probe bytes even if an escape crosses stop.
 			for sp < se && se-sp > step+8 {
 				stop := sp + step
 				for sp < stop {
-					c := *(*byte)(unsafe.Pointer(sp))
+					c := src[sp]
 					sp++
 					if c == '\\' {
 						sp++
@@ -591,7 +538,7 @@ scanEscaped:
 						goto escapedStringClose
 					}
 				}
-				x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+				x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 				b := x ^ ('\\' * scanByteOnes)
 				if (b-scanByteOnes)&^b&scanByteHighBits == 0 {
 					// Consume the already-loaded probe word before resuming.
@@ -600,7 +547,7 @@ scanEscaped:
 						// Form the position mask only after finding a quote.
 						const lo uint64 = 0x7f7f7f7f7f7f7f7f
 						mask := ^(((q & lo) + lo) | q | lo)
-						sp += uintptr(bits.TrailingZeros64(mask)>>3) + 1
+						sp += (bits.TrailingZeros64(mask) >> 3) + 1
 						goto escapedStringClose
 					}
 					sp += 8
@@ -614,7 +561,7 @@ scanEscaped:
 		}
 	escapedStringWords:
 		for sp < se && se-sp >= 8 {
-			x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+			x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 			b := x ^ ('\\' * scanByteOnes)
 			if (b-scanByteOnes)&^b&scanByteHighBits != 0 {
 				goto escapedString
@@ -624,7 +571,7 @@ scanEscaped:
 				// Form the position mask only after finding a quote.
 				const lo uint64 = 0x7f7f7f7f7f7f7f7f
 				mask := ^(((q & lo) + lo) | q | lo)
-				sp += uintptr(bits.TrailingZeros64(mask)>>3) + 1
+				sp += (bits.TrailingZeros64(mask) >> 3) + 1
 				goto escapedStringClose
 			}
 			sp += 8
@@ -634,7 +581,7 @@ scanEscaped:
 		inquote = 0
 		// Only retry after consuming the backslash that triggered recovery.
 		if sp > firstSlash && sp < se && se-sp >= 8 {
-			x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+			x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 			b := x ^ ('\\' * scanByteOnes)
 			if (b-scanByteOnes)&^b&scanByteHighBits == 0 {
 				// A transition may reread this word; structural parsing stays
@@ -646,10 +593,7 @@ scanEscaped:
 	escapedEOF:
 	}
 
-	ret = -int(types.ERR_INVALID_CHAR)
-done:
-	runtime.KeepAlive(src)
-	return ret
+	return -int(types.ERR_INVALID_CHAR)
 }
 
 func skipValueFast(src string, pos int) (ret int, start int) {

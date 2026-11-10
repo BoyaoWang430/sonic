@@ -21,10 +21,9 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	_ "unsafe"
+	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type FieldOpts int
@@ -49,13 +48,21 @@ type Offset struct {
 
 type FieldMeta struct {
 	Name                 string
-	PaddedCommaKey       string // "," + Quote(Name) + ":" backed by +32 zero-padded bytes
-	PaddedStructBeginKey string // "," + Quote(Name) + ":{" backed by +32 zero-padded bytes (when <= 32B)
+	KeyBlob              []byte // explicit []byte owner with trailing 32-byte zero padding
+	KeyOffset            int
+	CommaKeyLen          int
+	HasStructBegin       bool
+	PaddedCommaKey       string // logical "," + Quote(Name) + ":"
+	PaddedStructBeginKey string // logical "," + Quote(Name) + ":{" (when <= 32B)
 	Path                 []Offset
 	Opts                 FieldOpts
 	Type                 reflect.Type
 	IsZero               func(reflect.Value) bool
 	KeyNeedsSanitize     bool
+}
+
+func (self *FieldMeta) CommaKeyPtr() *byte {
+	return &self.KeyBlob[self.KeyOffset]
 }
 
 func (self *FieldMeta) String() string {
@@ -251,9 +258,8 @@ func handleOmitZero(fv StdField, fm *FieldMeta) {
 }
 
 // populateKeyBlob packs all fields' quoted JSON keys (,"name": and ,"name":{)
-// into a single per-struct byte slice with a single trailing 32-byte zero
-// safety zone so 16/32-byte unaligned loads in appendPaddedKey never cross an
-// unmapped page boundary.
+// into a single per-struct byte slice owner with a trailing 32-byte zero
+// safety zone so 16/32-byte loads from KeyBlob never cross the slice boundary.
 func populateKeyBlob(ret []FieldMeta) {
 	if len(ret) == 0 {
 		return
@@ -293,11 +299,16 @@ func populateKeyBlob(ret []FieldMeta) {
 			hasStructB: hasStructB,
 		}
 	}
+	logicalLen := len(blob)
 	var z32 [32]byte
 	blob = append(blob, z32[:]...)
-	blobStr := rt.Mem2Str(blob)
+	blobStr := unsafe.String(unsafe.SliceData(blob), logicalLen)
 	for i := range ret {
 		sp := spans[i]
+		ret[i].KeyBlob = blob
+		ret[i].KeyOffset = sp.start
+		ret[i].CommaKeyLen = sp.commaLen
+		ret[i].HasStructBegin = sp.hasStructB
 		ret[i].PaddedCommaKey = blobStr[sp.start : sp.start+sp.commaLen]
 		if sp.hasStructB {
 			ret[i].PaddedStructBeginKey = blobStr[sp.start : sp.start+sp.commaLen+1]

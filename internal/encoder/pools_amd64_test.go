@@ -1,11 +1,7 @@
-//go:build amd64 && go1.16 && !go1.28
-// +build amd64,go1.16,!go1.28
-
 package encoder
 
 import (
 	"encoding/json"
-	"os"
 	"reflect"
 	"testing"
 
@@ -22,30 +18,6 @@ type testMutualA struct {
 type testMutualB struct {
 	ID int          `json:"id"`
 	A  *testMutualA `json:"a,omitempty"`
-}
-
-func TestPretouchTypeX86(t *testing.T) {
-	type subA struct{}
-	type subB struct{}
-	type subC struct{}
-	type data struct {
-		SubA subA
-		SubB subB
-		SubC subC
-	}
-
-	sub, err := pretouchTypeX86(
-		reflect.TypeOf(data{}),
-		option.CompileOptions{
-			MaxInlineDepth: 1,
-			RecursiveDepth: 1000,
-		},
-		0,
-	)
-	assert.NoError(t, err)
-	assert.Contains(t, sub, reflect.TypeOf(subA{}))
-	assert.Contains(t, sub, reflect.TypeOf(subB{}))
-	assert.Contains(t, sub, reflect.TypeOf(subC{}))
 }
 
 func TestPretouchEncodeMultiLevelStructWithRec(t *testing.T) {
@@ -171,6 +143,5 @@ func TestPretouchManyMutualRefValueCycleEncodeError(t *testing.T) {
 }
 
 func TestEncoderBackendSelection(t *testing.T) {
-	wantVM := os.Getenv("SONIC_ENCODER_USE_JIT") == ""
-	assert.Equal(t, wantVM, vars.UseVM)
+	assert.True(t, vars.UseVM)
 }

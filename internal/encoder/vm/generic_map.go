@@ -3,28 +3,19 @@ package vm
 import (
 	"encoding/json"
 	"math"
-	"sync"
-	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/encoder/vars"
-	"github.com/bytedance/sonic/internal/rt"
 )
-
-var stringAnyMapType = rt.MapType(rt.UnpackType(vars.StringAnyMapType))
-
-var mapValuePool = sync.Pool{New: func() any { return new(any) }}
 
 // The surrounding instructions handle braces, nil maps, and stack depth.
 func encodeStringAnyMap(b *[]byte, m map[string]any, s *vars.Stack, flags uint64) error {
 	sanitize := flags & alg.SanitizeMask
 	if flags&(1<<alg.BitSortMapKeys) != 0 {
-		e := rt.UnpackEface(m)
-		it, err := alg.IteratorStart(stringAnyMapType, e.Value, flags)
+		it, err := alg.IteratorStartStringAnySorted(m)
 		if err != nil {
 			return err
 		}
-		defer alg.IteratorStop(it)
 		first := true
 		for it.It.K != nil {
 			if !first {
@@ -33,10 +24,12 @@ func encodeStringAnyMap(b *[]byte, m map[string]any, s *vars.Stack, flags uint64
 			first = false
 			*b = alg.QuoteKeyFlags(*b, *(*string)(it.It.K), sanitize)
 			if err := encodeAnyValue(b, *(*any)(it.It.V), s, flags); err != nil {
+				alg.IteratorStop(it)
 				return err
 			}
 			alg.IteratorNext(it)
 		}
+		alg.IteratorStop(it)
 		return nil
 	}
 	first := true
@@ -149,12 +142,6 @@ func encodeAnyValue(b *[]byte, val any, s *vars.Stack, flags uint64) error {
 		*b = append(*b, ']')
 		return nil
 	default:
-		slot := mapValuePool.Get().(*any)
-		*slot = val
-		e := (*rt.GoEface)(unsafe.Pointer(slot))
-		err := EncodeTypedPointer(b, e.Type, &e.Value, s, flags)
-		*slot = nil
-		mapValuePool.Put(slot)
-		return err
+		return EncodeValue(b, val, s, flags&^uint64(1<<alg.BitPointerValue))
 	}
 }

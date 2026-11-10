@@ -34,12 +34,6 @@ const (
 	_S_init
 )
 
-var (
-	_T_json_Marshaler         = rt.UnpackType(vars.JsonMarshalerType)
-	_T_encoding_TextMarshaler = rt.UnpackType(vars.EncodingTextMarshalerType)
-	_T_json_Appender          = rt.UnpackType(prim.JSONAppenderType)
-)
-
 func print_instr(buf []byte, pc int, op ir.Op, ins *ir.Instr, p unsafe.Pointer) {
 	if len(buf) > 20 {
 		fmt.Println(string(buf[len(buf)-20:]))
@@ -63,7 +57,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 
 	var pro = &(*prog)[0]
 	for pc := 0; pc < pl; {
-		ins := (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc)))
+		ins := (*ir.Instr)(unsafe.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc)))
 		pc++
 		op := ins.Op()
 
@@ -76,7 +70,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			buf = append(buf, v)
 		case ir.OP_text:
 			v := ins.Vs()
-			if sanitize != 0 && len(v) > 2 {
+			if sanitize != 0 && ins.NeedsSanitize() {
 				buf = alg.AppendSanitizedLiteral(buf, v, sanitize)
 			} else {
 				buf = append(buf, v...)
@@ -86,7 +80,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			specs := ins.VFields()
 			for i := range specs {
 				spec := &specs[i]
-				fp := rt.Add(base, spec.Offset)
+				fp := unsafe.Add(base, spec.Offset)
 				sflags := spec.Flags
 				if sflags&ir.SpecFlagIsPtr != 0 {
 					fp = *(*unsafe.Pointer)(fp)
@@ -94,12 +88,12 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 						if sflags&ir.SpecFlagOmitNil != 0 {
 							continue
 						}
-						key := spec.CommaKey
+						keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 						if f&(1<<_S_cond) != 0 {
 							f &^= 1 << _S_cond
-							key = spec.FirstKey()
+							keyPtr, keyLen = spec.FirstKey()
 						}
-						buf = appendPaddedKey(buf, key)
+						buf = appendPaddedKey(buf, keyPtr, keyLen)
 						buf = append(buf, 'n', 'u', 'l', 'l')
 						continue
 					}
@@ -110,133 +104,131 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = alg.QuoteWithPaddedKeyFlags(buf, key, v, sanitize)
+					buf = alg.QuoteWithPaddedKeyFlags(buf, keyPtr, keyLen, v, sanitize)
 				case ir.OP_i64:
 					v := *(*int64)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.I64toa(buf, v)
 				case ir.OP_bool:
 					v := *(*bool)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && !v {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
 					if cap(buf)-len(buf) >= 40 {
-						sl := (*rt.GoSlice)(unsafe.Pointer(&buf))
-						dp := unsafe.Add(sl.Ptr, sl.Len)
+						dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 						dk := (*[4]uint64)(dp)
-						sk := (*[4]uint64)((*rt.GoString)(unsafe.Pointer(&key)).Ptr)
+						sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
 						dk[0], dk[1] = sk[0], sk[1]
-						if len(key) > 16 {
+						if keyLen > 16 {
 							dk[2], dk[3] = sk[2], sk[3]
 						}
-						vp := unsafe.Add(dp, len(key))
+						vp := unsafe.Add(dp, keyLen)
 						if v {
 							*(*[4]byte)(vp) = [4]byte{'t', 'r', 'u', 'e'}
-							sl.Len += len(key) + 4
+							buf = buf[:len(buf)+keyLen+4]
 						} else {
 							*(*[5]byte)(vp) = [5]byte{'f', 'a', 'l', 's', 'e'}
-							sl.Len += len(key) + 5
+							buf = buf[:len(buf)+keyLen+5]
 						}
 					} else {
-						buf = append(buf, key...)
+						buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
 						buf = appendBool(buf, v)
 					}
 				case ir.OP_eface:
-					if (*rt.GoEface)(fp).Type == nil {
-						if (sflags&ir.SpecFlagOmitEmpty != 0) {
+					val := *(*any)(fp)
+					if val == nil {
+						if sflags&ir.SpecFlagOmitEmpty != 0 {
 							continue
 						}
-						key := spec.CommaKey
+						keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 						if f&(1<<_S_cond) != 0 {
 							f &^= 1 << _S_cond
-							key = spec.FirstKey()
+							keyPtr, keyLen = spec.FirstKey()
 						}
 						if cap(buf)-len(buf) >= 36 {
-							sl := (*rt.GoSlice)(unsafe.Pointer(&buf))
-							dp := unsafe.Add(sl.Ptr, sl.Len)
+							dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 							dk := (*[4]uint64)(dp)
-							sk := (*[4]uint64)((*rt.GoString)(unsafe.Pointer(&key)).Ptr)
+							sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
 							dk[0], dk[1] = sk[0], sk[1]
-							if len(key) > 16 {
+							if keyLen > 16 {
 								dk[2], dk[3] = sk[2], sk[3]
 							}
-							*(*[4]byte)(unsafe.Add(dp, len(key))) = [4]byte{'n', 'u', 'l', 'l'}
-							sl.Len += len(key) + 4
+							*(*[4]byte)(unsafe.Add(dp, keyLen)) = [4]byte{'n', 'u', 'l', 'l'}
+							buf = buf[:len(buf)+keyLen+4]
 						} else {
-							buf = append(buf, key...)
+							buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
 							buf = append(buf, "null"...)
 						}
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					*b = buf
-					if err := encodeAnyValue(b, *(*any)(fp), s, flags); err != nil {
+					if err := encodeAnyValue(b, val, s, flags); err != nil {
 						return err
 					}
 					buf = *b
 				case ir.OP_struct_begin:
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					f |= 1 << _S_cond
 				case ir.OP_struct_end:
 					f &^= 1 << _S_cond
 					buf = append(buf, '}')
 				case ir.OP_slice_eface:
-					shdr := (*rt.GoSlice)(fp)
-					if shdr.Len == 0 {
-						if (sflags&ir.SpecFlagOmitEmpty != 0) {
+					items := *(*[]any)(fp)
+					if len(items) == 0 {
+						if sflags&ir.SpecFlagOmitEmpty != 0 {
 							continue
 						}
-						key := spec.CommaKey
+						keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 						if f&(1<<_S_cond) != 0 {
 							f &^= 1 << _S_cond
-							key = spec.FirstKey()
+							keyPtr, keyLen = spec.FirstKey()
 						}
-						buf = appendPaddedKey(buf, key)
-						if shdr.Ptr != nil || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
+						buf = appendPaddedKey(buf, keyPtr, keyLen)
+						if items != nil || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
 							buf = append(buf, '[', ']')
 						} else {
 							buf = append(buf, "null"...)
 						}
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					if !s.Save(0, 0, nil, nil) {
 						return vars.ERR_too_deep
 					}
 					buf = append(buf, '[')
-					items := *(*[]any)(fp)
 					*b = buf
 					for idx, elem := range items {
 						if idx > 0 {
@@ -250,65 +242,63 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 					s.Drop()
 					buf = append(buf, ']')
 				case ir.OP_slice_i64:
-					shdr := (*rt.GoSlice)(fp)
-					if shdr.Len == 0 {
-						if (sflags&ir.SpecFlagOmitEmpty != 0) {
+					items := *(*[]int64)(fp)
+					if len(items) == 0 {
+						if sflags&ir.SpecFlagOmitEmpty != 0 {
 							continue
 						}
-						key := spec.CommaKey
+						keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 						if f&(1<<_S_cond) != 0 {
 							f &^= 1 << _S_cond
-							key = spec.FirstKey()
+							keyPtr, keyLen = spec.FirstKey()
 						}
-						buf = appendPaddedKey(buf, key)
-						if shdr.Ptr != nil || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
+						buf = appendPaddedKey(buf, keyPtr, keyLen)
+						if items != nil || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
 							buf = append(buf, '[', ']')
 						} else {
 							buf = append(buf, "null"...)
 						}
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = append(buf, '[')
-					ep := shdr.Ptr
-					buf = alg.I64toa(buf, *(*int64)(ep))
-					for idx := 1; idx < shdr.Len; idx++ {
+					buf = alg.I64toa(buf, items[0])
+					for idx := 1; idx < len(items); idx++ {
 						buf = append(buf, ',')
-						buf = alg.I64toa(buf, *(*int64)(unsafe.Add(ep, uintptr(idx)*8)))
+						buf = alg.I64toa(buf, items[idx])
 					}
 					buf = append(buf, ']')
 				case ir.OP_slice_str:
-					shdr := (*rt.GoSlice)(fp)
-					if shdr.Len == 0 {
-						if (sflags&ir.SpecFlagOmitEmpty != 0) {
+					items := *(*[]string)(fp)
+					if len(items) == 0 {
+						if sflags&ir.SpecFlagOmitEmpty != 0 {
 							continue
 						}
-						key := spec.CommaKey
+						keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 						if f&(1<<_S_cond) != 0 {
 							f &^= 1 << _S_cond
-							key = spec.FirstKey()
+							keyPtr, keyLen = spec.FirstKey()
 						}
-						buf = appendPaddedKey(buf, key)
-						if shdr.Ptr != nil || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
+						buf = appendPaddedKey(buf, keyPtr, keyLen)
+						if items != nil || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
 							buf = append(buf, '[', ']')
 						} else {
 							buf = append(buf, "null"...)
 						}
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = append(buf, '[')
-					items := *(*[]string)(fp)
 					buf = alg.QuoteFlags(buf, items[0], false, sanitize)
 					for idx := 1; idx < len(items); idx++ {
 						buf = append(buf, ',')
@@ -320,95 +310,95 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.I64toa(buf, int64(v))
 				case ir.OP_i16:
 					v := *(*int16)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.I64toa(buf, int64(v))
 				case ir.OP_i8:
 					v := *(*int8)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.I64toa(buf, int64(v))
 				case ir.OP_u64:
 					v := *(*uint64)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.U64toa(buf, v)
 				case ir.OP_u32:
 					v := *(*uint32)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.U64toa(buf, uint64(v))
 				case ir.OP_u16:
 					v := *(*uint16)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.U64toa(buf, uint64(v))
 				case ir.OP_u8:
 					v := *(*uint8)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.U64toa(buf, uint64(v))
 				case ir.OP_f64:
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint64)(fp) == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					v := *(*float64)(fp)
 					if math.IsNaN(v) || math.IsInf(v, 0) {
 						if flags&(1<<alg.BitEncodeNullForInfOrNan) != 0 {
@@ -422,12 +412,12 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint32)(fp) == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					v := *(*float32)(fp)
 					if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 						if flags&(1<<alg.BitEncodeNullForInfOrNan) != 0 {
@@ -442,24 +432,24 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					buf = alg.QuoteFlags(buf, v, true, sanitize)
 				case ir.OP_number:
 					v := *(*json.Number)(fp)
 					if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 						continue
 					}
-					key := spec.CommaKey
+					keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
 					if f&(1<<_S_cond) != 0 {
 						f &^= 1 << _S_cond
-						key = spec.FirstKey()
+						keyPtr, keyLen = spec.FirstKey()
 					}
-					buf = appendPaddedKey(buf, key)
+					buf = appendPaddedKey(buf, keyPtr, keyLen)
 					if v == "" {
 						buf = append(buf, '0')
 					} else if !alg.IsValidNumber(string(v)) {
@@ -472,7 +462,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 		case ir.OP_deref:
 			p = *(*unsafe.Pointer)(p)
 		case ir.OP_index:
-			p = rt.Add(p, uintptr(ins.I64()))
+			p = unsafe.Add(p, uintptr(ins.I64()))
 		case ir.OP_load:
 			// NOTICE: load CANNOT change f!
 			x, _, p, q = s.Load()
@@ -490,17 +480,12 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			f := flags
 			if pv {
 				f |= (1 << alg.BitPointerValue)
+			} else {
+				f &^= (1 << alg.BitPointerValue)
 			}
 			*b = buf
-			if vt.Indirect() {
-				if err := EncodeTypedPointer(b, vt, (*unsafe.Pointer)(rt.NoEscape(unsafe.Pointer(&p))), s, f); err != nil {
-					return err
-				}
-			} else {
-				vp := (*unsafe.Pointer)(p)
-				if err := EncodeTypedPointer(b, vt, vp, s, f); err != nil {
-					return err
-				}
+			if err := EncodeValuePointer(b, vt, p, s, f); err != nil {
+				return err
 			}
 			buf = *b
 		case ir.OP_is_nil:
@@ -509,7 +494,12 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				continue
 			}
 		case ir.OP_is_nil_p1:
-			if (*rt.GoEface)(p).Value == nil {
+			if vt := ins.Vr(); vt != nil {
+				if reflect.NewAt(vt, p).Elem().Len() == 0 {
+					pc = ins.Vi()
+					continue
+				}
+			} else if len(*(*string)(p)) == 0 {
 				pc = ins.Vi()
 				continue
 			}
@@ -602,14 +592,19 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 			buf = *b
 		case ir.OP_iface:
+			rv := reflect.NewAt(ins.Vr(), p).Elem()
+			if rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
+			}
 			*b = buf
-			if err := EncodeTypedPointer(b, (*(**rt.GoItab)(p)).Vt, (*unsafe.Pointer)(rt.Add(p, 8)), s, flags); err != nil {
+			if err := encodeAnyValue(b, rv.Interface(), s, flags); err != nil {
 				return err
 			}
 			buf = *b
 		case ir.OP_is_zero_map:
 			v := *(*unsafe.Pointer)(p)
-			if v == nil || rt.Maplen(v) == 0 {
+			if v == nil || reflect.NewAt(ins.Vr(), p).Elem().Len() == 0 {
 				pc = ins.Vi()
 				continue
 			}
@@ -620,9 +615,8 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 			buf = *b
 		case ir.OP_map_iter:
-			v := *(*unsafe.Pointer)(p)
 			vt := ins.Vr()
-			it, err := alg.IteratorStart(rt.MapType(vt), v, flags)
+			it, err := alg.IteratorStart(vt, p, flags)
 			if err != nil {
 				return err
 			}
@@ -643,27 +637,19 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 			p = it.It.K
 		case ir.OP_marshal_text:
-			vt, itab := ins.Vtab()
-			var it rt.GoIface
-			switch vt.Kind() {
-			case reflect.Interface:
-				if is_nil(p) {
-					buf = append(buf, 'n', 'u', 'l', 'l')
-					continue
-				}
-				it = rt.AssertI2I(_T_encoding_TextMarshaler, *(*rt.GoIface)(p))
-			case reflect.Ptr, reflect.Map:
-				it = convT2I(p, true, itab)
-			default:
-				it = convT2I(p, !vt.Indirect(), itab)
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
 			}
-			if err := prim.EncodeTextMarshaler(&buf, *(*encoding.TextMarshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			if err := prim.EncodeTextMarshaler(&buf, rv.Interface().(encoding.TextMarshaler), flags); err != nil {
 				return err
 			}
 		case ir.OP_marshal_text_p:
-			_, itab := ins.Vtab()
-			it := convT2I(p, false, itab)
-			if err := prim.EncodeTextMarshaler(&buf, *(*encoding.TextMarshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			pt := ins.Vr()
+			v := reflect.NewAt(pt.Elem(), p).Interface().(encoding.TextMarshaler)
+			if err := prim.EncodeTextMarshaler(&buf, v, flags); err != nil {
 				return err
 			}
 		case ir.OP_map_write_key:
@@ -674,10 +660,9 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				continue
 			}
 		case ir.OP_slice_len:
-			v := (*rt.GoSlice)(p)
-			x = v.Len
-			p = v.Ptr
-			//TODO: why?
+			rv := reflect.NewAt(ins.Vr(), p).Elem()
+			x = rv.Len()
+			p = rv.UnsafePointer()
 			f |= 1 << _S_init
 		case ir.OP_slice_next:
 			if x == 0 {
@@ -688,7 +673,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			if has_opts(f, _S_init) {
 				f &= ^uint64(1 << _S_init)
 			} else {
-				p = rt.Add(p, uintptr(ins.Vlen()))
+				p = unsafe.Add(p, uintptr(ins.Vlen()))
 			}
 		case ir.OP_cond_set:
 			f |= 1 << _S_cond
@@ -737,55 +722,39 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				buf = append(buf, 'n', 'u', 'l', 'l')
 			}
 		case ir.OP_marshal:
-			vt, itab := ins.Vtab()
-			var it rt.GoIface
-			switch vt.Kind() {
-			case reflect.Interface:
-				if is_nil(p) {
-					buf = append(buf, 'n', 'u', 'l', 'l')
-					continue
-				}
-				it = rt.AssertI2I(_T_json_Marshaler, *(*rt.GoIface)(p))
-			case reflect.Ptr, reflect.Map:
-				it = convT2I(p, true, itab)
-			default:
-				it = convT2I(p, !vt.Indirect(), itab)
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
 			}
-			if err := prim.EncodeJsonMarshaler(&buf, *(*json.Marshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			if err := prim.EncodeJsonMarshaler(&buf, rv.Interface().(json.Marshaler), flags); err != nil {
 				return err
 			}
 		case ir.OP_marshal_p:
-			_, itab := ins.Vtab()
-			it := convT2I(p, false, itab)
-			if err := prim.EncodeJsonMarshaler(&buf, *(*json.Marshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			pt := ins.Vr()
+			v := reflect.NewAt(pt.Elem(), p).Interface().(json.Marshaler)
+			if err := prim.EncodeJsonMarshaler(&buf, v, flags); err != nil {
 				return err
 			}
 		case ir.OP_marshal_append:
-			vt, itab := ins.Vtab()
-			var it rt.GoIface
-			switch vt.Kind() {
-			case reflect.Interface:
-				if is_nil(p) {
-					buf = append(buf, 'n', 'u', 'l', 'l')
-					continue
-				}
-				it = rt.AssertI2I(_T_json_Appender, *(*rt.GoIface)(p))
-			case reflect.Ptr, reflect.Map:
-				it = convT2I(p, true, itab)
-			default:
-				it = convT2I(p, !vt.Indirect(), itab)
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
 			}
-			if err := prim.EncodeJSONAppender(&buf, *(*prim.JSONAppender)(unsafe.Pointer(&it)), flags); err != nil {
+			if err := prim.EncodeJSONAppender(&buf, rv.Interface().(prim.JSONAppender), flags); err != nil {
 				return err
 			}
 		case ir.OP_marshal_append_p:
-			_, itab := ins.Vtab()
-			it := convT2I(p, false, itab)
-			if err := prim.EncodeJSONAppender(&buf, *(*prim.JSONAppender)(unsafe.Pointer(&it)), flags); err != nil {
+			pt := ins.Vr()
+			v := reflect.NewAt(pt.Elem(), p).Interface().(prim.JSONAppender)
+			if err := prim.EncodeJSONAppender(&buf, v, flags); err != nil {
 				return err
 			}
 		case ir.OP_unsupported:
-			return vars.Error_unsuppoted(ins.GoType())
+			return vars.Error_unsuppoted(ins.Vt())
 		default:
 			panic(fmt.Sprintf("not implement %s at %d", ins.Op().String(), pc))
 		}
@@ -803,43 +772,28 @@ func is_nil(p unsafe.Pointer) bool {
 	return *(*unsafe.Pointer)(p) == nil
 }
 
-func convT2I(ptr unsafe.Pointer, deref bool, itab *rt.GoItab) rt.GoIface {
-	if deref {
-		ptr = *(*unsafe.Pointer)(ptr)
-	}
-	return rt.GoIface{
-		Itab:  itab,
-		Value: ptr,
-	}
-}
-
-func appendPaddedKey(buf []byte, key string) []byte {
+func appendPaddedKey(buf []byte, keyPtr *byte, keyLen int) []byte {
 	if cap(buf)-len(buf) >= 32 {
-		b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-		dp := (*[4]uint64)(unsafe.Add(b.Ptr, b.Len))
-		sp := (*[4]uint64)((*rt.GoString)(unsafe.Pointer(&key)).Ptr)
+		dp := (*[4]uint64)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf)))
+		sp := (*[4]uint64)(unsafe.Pointer(keyPtr))
 		dp[0], dp[1] = sp[0], sp[1]
-		if len(key) > 16 {
+		if keyLen > 16 {
 			dp[2], dp[3] = sp[2], sp[3]
 		}
-		b.Len += len(key)
-		return buf
+		return buf[:len(buf)+keyLen]
 	}
-	return append(buf, key...)
+	return append(buf, unsafe.Slice(keyPtr, keyLen)...)
 }
 
 func appendBool(buf []byte, v bool) []byte {
 	if cap(buf)-len(buf) >= 8 {
-		b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-		dp := unsafe.Add(b.Ptr, b.Len)
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 		if v {
 			*(*[4]byte)(dp) = [4]byte{'t', 'r', 'u', 'e'}
-			b.Len += 4
-		} else {
-			*(*[5]byte)(dp) = [5]byte{'f', 'a', 'l', 's', 'e'}
-			b.Len += 5
+			return buf[:len(buf)+4]
 		}
-		return buf
+		*(*[5]byte)(dp) = [5]byte{'f', 'a', 'l', 's', 'e'}
+		return buf[:len(buf)+5]
 	}
 	if v {
 		return append(buf, "true"...)

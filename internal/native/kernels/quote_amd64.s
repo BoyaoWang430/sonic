@@ -2,23 +2,23 @@
 
 #include "textflag.h"
 
-DATA ·q_ctrl_vec<>+0(SB)/8, $0x1f1f1f1f1f1f1f1f
-DATA ·q_ctrl_vec<>+8(SB)/8, $0x1f1f1f1f1f1f1f1f
-DATA ·q_ctrl_vec<>+16(SB)/8, $0x1f1f1f1f1f1f1f1f
-DATA ·q_ctrl_vec<>+24(SB)/8, $0x1f1f1f1f1f1f1f1f
-GLOBL ·q_ctrl_vec<>(SB), RODATA|NOPTR, $32
+DATA q_ctrl_vec<>+0(SB)/8, $0x1f1f1f1f1f1f1f1f
+DATA q_ctrl_vec<>+8(SB)/8, $0x1f1f1f1f1f1f1f1f
+DATA q_ctrl_vec<>+16(SB)/8, $0x1f1f1f1f1f1f1f1f
+DATA q_ctrl_vec<>+24(SB)/8, $0x1f1f1f1f1f1f1f1f
+GLOBL q_ctrl_vec<>(SB), RODATA|NOPTR, $32
 
-DATA ·q_quote_vec<>+0(SB)/8, $0x2222222222222222
-DATA ·q_quote_vec<>+8(SB)/8, $0x2222222222222222
-DATA ·q_quote_vec<>+16(SB)/8, $0x2222222222222222
-DATA ·q_quote_vec<>+24(SB)/8, $0x2222222222222222
-GLOBL ·q_quote_vec<>(SB), RODATA|NOPTR, $32
+DATA q_quote_vec<>+0(SB)/8, $0x2222222222222222
+DATA q_quote_vec<>+8(SB)/8, $0x2222222222222222
+DATA q_quote_vec<>+16(SB)/8, $0x2222222222222222
+DATA q_quote_vec<>+24(SB)/8, $0x2222222222222222
+GLOBL q_quote_vec<>(SB), RODATA|NOPTR, $32
 
-DATA ·q_slash_vec<>+0(SB)/8, $0x5c5c5c5c5c5c5c5c
-DATA ·q_slash_vec<>+8(SB)/8, $0x5c5c5c5c5c5c5c5c
-DATA ·q_slash_vec<>+16(SB)/8, $0x5c5c5c5c5c5c5c5c
-DATA ·q_slash_vec<>+24(SB)/8, $0x5c5c5c5c5c5c5c5c
-GLOBL ·q_slash_vec<>(SB), RODATA|NOPTR, $32
+DATA q_slash_vec<>+0(SB)/8, $0x5c5c5c5c5c5c5c5c
+DATA q_slash_vec<>+8(SB)/8, $0x5c5c5c5c5c5c5c5c
+DATA q_slash_vec<>+16(SB)/8, $0x5c5c5c5c5c5c5c5c
+DATA q_slash_vec<>+24(SB)/8, $0x5c5c5c5c5c5c5c5c
+GLOBL q_slash_vec<>(SB), RODATA|NOPTR, $32
 
 // func quote(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int)
 TEXT ·quote(SB), NOSPLIT, $0-56
@@ -30,7 +30,6 @@ TEXT ·quote(SB), NOSPLIT, $0-56
 	ANDQ $1, R8                   // R8 = double-quote flag (0 or 1)
 	MOVQ CX, R9                   // R9 = original size
 	MOVQ DX, R10                  // R10 = original capacity
-	XORQ R15, R15                 // R15 = 1 if YMM registers used
 
 	CMPQ CX, $32
 	JB   q_short_entry
@@ -40,19 +39,20 @@ TEXT ·quote(SB), NOSPLIT, $0-56
 	JE   q_short_entry
 
 	MOVQ $1, R15
-	VMOVDQU ·q_ctrl_vec<>(SB), Y3
-	VMOVDQU ·q_quote_vec<>(SB), Y4
-	VMOVDQU ·q_slash_vec<>(SB), Y5
+	VMOVDQU q_ctrl_vec<>(SB), Y3
+	VMOVDQU q_quote_vec<>(SB), Y4
+	VMOVDQU q_slash_vec<>(SB), Y5
 	JMP  q_scan
 
 q_short_entry:
+	XORQ R15, R15                 // R15 = 1 if YMM registers used
 	CMPQ CX, $16
 	JB   q_scan_word_entry
 	CMPQ DX, $16
 	JB   q_scan_word_entry
-	MOVOU ·q_ctrl_vec<>(SB), X3
-	MOVOU ·q_quote_vec<>(SB), X4
-	MOVOU ·q_slash_vec<>(SB), X5
+	MOVOU q_ctrl_vec<>(SB), X3
+	MOVOU q_quote_vec<>(SB), X4
+	MOVOU q_slash_vec<>(SB), X5
 	JMP  q_scan_16
 
 q_scan:

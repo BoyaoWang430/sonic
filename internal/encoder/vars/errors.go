@@ -24,8 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 var ERR_too_deep = &json.UnsupportedValueError{
@@ -49,8 +47,8 @@ func Error_number(number json.Number) error {
 	}
 }
 
-func Error_unsuppoted(typ *rt.GoType) error {
-	return &json.UnsupportedTypeError{Type: typ.Pack()}
+func Error_unsuppoted(typ reflect.Type) error {
+	return &json.UnsupportedTypeError{Type: typ}
 }
 
 func Error_marshaler(ret []byte, pos int) error {
@@ -65,7 +63,7 @@ func GoPanic(code int, val unsafe.Pointer, buf string) {
 	sb := strings.Builder{}
 	switch code {
 	case PanicNilPointerOfNonEmptyString:
-		sb.WriteString(fmt.Sprintf("val: %#v has nil pointer while its length is not zero!\nThis is a nil pointer exception (NPE) problem. There might be a data race issue. It is recommended to execute the tests related to the code with the `-race` compile flag to detect the problem.\n", (*rt.GoString)(val)))
+		sb.WriteString(fmt.Sprintf("val: %p has nil pointer while its length is not zero!\nThis is a nil pointer exception (NPE) problem. There might be a data race issue. It is recommended to execute the tests related to the code with the `-race` compile flag to detect the problem.\n", val))
 	default:
 		sb.WriteString("encoder error: ")
 		sb.WriteString(strconv.Itoa(code))

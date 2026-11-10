@@ -64,22 +64,24 @@ const (
 //go:nocheckptr
 func cParityParseRunsAsm(p *Parser, state *cParityRunsState) (event int)
 
-//go:nocheckptr
 func cParityParseWithPadding(p *Parser) ErrorCode {
 	var state cParityRunsState
 	buf := &p.nbuf
 	if buf.parent != -1 {
 		// C's grow/restart contract records the continuation in the last node
 		// plus the current parent's type and the key-capacity-failure flag.
-		switch (*node)(unsafe.Pointer(buf.ncur-unsafe.Sizeof(node{}))).typ & TypeMask {
+		iskey := buf.iskey
+		buf.iskey = false
+		used := int((buf.ncur - buf.nstart) / unsafe.Sizeof(node{}))
+		switch p.nodes[used-1].typ & TypeMask {
 		case KObject:
 			state.phase = cParityRunsObjectStart
 		case KArray:
 			state.phase = cParityRunsArrayStart
 		default:
-			parent := (*node)(unsafe.Pointer(buf.nstart + uintptr(buf.parent)*unsafe.Sizeof(node{})))
+			parent := &p.nodes[buf.parent]
 			state.phase = cParityRunsParentContinue
-			if parent.typ&TypeMask == KObject && buf.iskey {
+			if parent.typ&TypeMask == KObject && iskey {
 				state.phase = cParityRunsObjectValue
 			}
 		}
@@ -102,8 +104,15 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 			}
 			state.phase = cParityRunsParentContinue
 		case cParityRunsUnicode:
-			src, dst, stringCode := cParityDecodeUnicode(unsafe.Pointer(p.cur), unsafe.Pointer(state.stringDst), true)
-			p.cur, state.stringDst = uintptr(src), uintptr(dst)
+			raw := p.JsonBytes()
+			curOff := int(p.cur - p.start)
+			dstOff := int(state.stringDst - p.start)
+			base := unsafe.Pointer(unsafe.SliceData(raw))
+			srcPtr := unsafe.Add(base, curOff)
+			dstPtr := unsafe.Add(base, dstOff)
+			nextSrc, nextDst, stringCode := cParityDecodeUnicode(srcPtr, dstPtr, true)
+			p.cur += uintptr(nextSrc) - uintptr(srcPtr)
+			state.stringDst += uintptr(nextDst) - uintptr(dstPtr)
 			state.stringErr = stringCode
 			state.phase = cParityRunsStringResume
 		case cParityRunsLiteral:
@@ -124,13 +133,16 @@ done:
 // FinishNumber owns the complete cold numeric operation: decode, publish its
 // partial node/statistics, and apply error/capacity ordering. Successful nested
 // values resume ordinary parent grammar; no numeric result returns to assembly.
-//go:nocheckptr
 func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 	// Assembly leaves cur at the number body, which may be invalid input.
 	// The token's first byte retains its sign, so no separate cross-language
 	// negative flag is needed.
-	negative := *(*byte)(unsafe.Pointer(p.start + state.pos)) == '-'
-	cur := unsafe.Pointer(p.cur)
+	raw := p.JsonBytes()
+	negative := raw[state.pos] == '-'
+	curOff := int(p.cur - p.start)
+	base := unsafe.Pointer(unsafe.SliceData(raw))
+	startCur := unsafe.Add(base, curOff)
+	cur := startCur
 	var code ErrorCode
 	if p.options&(1<<_F_use_number) != 0 {
 		remain := int(p.end - p.cur)
@@ -154,18 +166,18 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 		if code != SONIC_OK {
 			kind := state.num.typ
 			if kind != KUint && kind != KSint && kind != KReal {
-				p.cur = uintptr(cur)
+				p.cur += uintptr(cur) - uintptr(startCur)
 				return code
 			}
 		}
 	}
-	p.cur = uintptr(cur)
+	p.cur += uintptr(cur) - uintptr(startCur)
 
 	num := state.num
 	buf := &p.nbuf
 	ncur := buf.ncur
-	n := (*node)(unsafe.Pointer(ncur))
-	n.typ, n.val = num.typ|uint64(state.pos)<<PosBits, num.val
+	nIdx := int((ncur - buf.nstart) / unsafe.Sizeof(node{}))
+	p.nodes[nIdx] = node{typ: num.typ | uint64(state.pos)<<PosBits, val: num.val}
 	buf.ncur = ncur + unsafe.Sizeof(node{})
 	buf.stat.number++
 	// C publishes values before returning decode errors. Only success checks
@@ -182,25 +194,27 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 // The fixed-width assembly probe has already rejected this literal. Go locates
 // the first mismatch, consumes that byte, publishes C's partial literal node,
 // and terminates parsing without an assembly resume or a capacity check.
-//go:nocheckptr
 func cParityRunsFailLiteral(p *Parser, pos uintptr) ErrorCode {
+	raw := p.JsonBytes()
 	suffix, kind := "ull", uint64(KNull)
-	switch *(*byte)(unsafe.Pointer(p.start + pos)) {
+	switch raw[pos] {
 	case 't':
 		suffix, kind = "rue", KTrue
 	case 'f':
 		suffix, kind = "alse", KFalse
 	}
+	curOff := int(p.cur - p.start)
 	for i := 0; i < len(suffix); i++ {
-		c := *(*byte)(unsafe.Pointer(p.cur))
+		c := raw[curOff]
+		curOff++
 		p.cur++
 		if c != suffix[i] {
 			break
 		}
 	}
 	ncur := p.nbuf.ncur
-	n := (*node)(unsafe.Pointer(ncur))
-	n.typ = kind | uint64(pos)<<PosBits // The null/bool payload stays unspecified.
+	nIdx := int((ncur - p.nbuf.nstart) / unsafe.Sizeof(node{}))
+	p.nodes[nIdx].typ = kind | uint64(pos)<<PosBits // The null/bool payload stays unspecified.
 	p.nbuf.ncur = ncur + unsafe.Sizeof(node{})
 	return SONIC_INVALID_LITERAL
 }

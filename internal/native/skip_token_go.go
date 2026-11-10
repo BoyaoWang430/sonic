@@ -5,7 +5,6 @@ package native
 import (
 	"encoding/binary"
 	"math/bits"
-	"runtime"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/kernels"
@@ -56,55 +55,45 @@ func tokenSpace(src string, pos int) int {
 }
 
 // Short whitespace runs are scanned inline; longer runs use the native scanner.
-//
-//go:nocheckptr
 func tokenSpaceSlow(src string, pos int) int {
-	// Keep scan addresses as integers. A pointer at or past the end of the
-	// allocation may be shared across calls after inlining and scanned by GC.
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	se := base + uintptr(len(src))
-	if sp >= se {
+	se := len(src)
+	if pos >= se {
 		return -int(types.ERR_EOF)
 	}
-	if !utils.IsSpace(*(*byte)(unsafe.Pointer(sp))) {
-		runtime.KeepAlive(src)
+	if !utils.IsSpace(src[pos]) {
 		return pos
 	}
-	sp++
+	base := unsafe.Pointer(unsafe.StringData(src))
+	sp := pos + 1
 	stop := minNative(se, sp+24)
 	for sp < stop && se-sp >= 8 {
-		d := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:]) ^ 0x2020202020202020
+		d := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:]) ^ 0x2020202020202020
 		if d == 0 {
 			sp += 8
 			continue
 		}
-		sp += uintptr(bits.TrailingZeros64(d) >> 3)
-		if *(*byte)(unsafe.Pointer(sp)) > ' ' {
-			ret := int(sp - base)
-			runtime.KeepAlive(src)
-			return ret
+		sp += bits.TrailingZeros64(d) >> 3
+		if src[sp] > ' ' {
+			return sp
 		}
 		break
 	}
 	for sp < stop {
-		if !utils.IsSpace(*(*byte)(unsafe.Pointer(sp))) {
+		if !utils.IsSpace(src[sp]) {
 			break
 		}
-		sp += 1
+		sp++
 	}
 	if sp >= se {
-		runtime.KeepAlive(src)
 		return -int(types.ERR_EOF)
 	}
-	ret := int(sp - base)
+	ret := sp
 	if sp == stop {
 		ret = kernels.SkipSpace(src, ret)
 		if ret == len(src) {
 			return -int(types.ERR_EOF)
 		}
 	}
-	runtime.KeepAlive(src)
 	return ret
 }
 
@@ -447,14 +436,12 @@ const tokenByteHighBits uint64 = 0x8080808080808080
 // Probe short strings using the same word-at-a-time approach as the portable
 // scanner. Escapes and longer strings continue in the native scanner without
 // rescanning the completed prefix. Every word load stays within src.
-//
-//go:nocheckptr
 func tokenString(src string, pos int) int {
-	base := uintptr(unsafe.Pointer(rt.StringData(src)))
-	sp, se := base+uintptr(pos), base+uintptr(len(src))
+	base := unsafe.Pointer(rt.StringData(src))
+	sp, se := pos, len(src)
 	stop := minNative(se, sp+32)
 	for sp < stop && se-sp >= 8 {
-		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 		b := x ^ ('\\' * tokenByteOnes)
 		if (b-tokenByteOnes)&^b&tokenByteHighBits != 0 {
 			goto scanNative
@@ -462,42 +449,36 @@ func tokenString(src string, pos int) int {
 		q := x ^ ('"' * tokenByteOnes)
 		mask := (q - tokenByteOnes) &^ q & tokenByteHighBits
 		if mask != 0 {
-			end := int(sp + uintptr(bits.TrailingZeros64(mask)>>3) + 1 - base)
-			runtime.KeepAlive(src)
-			return end
+			return sp + (bits.TrailingZeros64(mask) >> 3) + 1
 		}
 		sp += 8
 	}
-	if sp < stop && sp-base >= 8 {
+	if sp < stop && sp >= 8 {
 		// A leading escape can continue directly in the native scanner.
-		if *(*byte)(unsafe.Pointer(sp)) == '\\' {
+		if src[sp] == '\\' {
 			goto scanNative
 		}
 		// Falling out of the word loop before stop leaves fewer than eight bytes.
 		// Keep the already scanned prefix available for a bounded last word.
 		// Discard it before classification: SWAR subtraction may borrow into
 		// later bytes, so masking its flags afterward would not be equivalent.
-		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(se - 8))[:])
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, se-8))[:])
 		x >>= (8 - (se - sp)) * 8
 		b := x ^ ('\\' * tokenByteOnes)
 		backslashes := (b - tokenByteOnes) &^ b & tokenByteHighBits
 		q := x ^ ('"' * tokenByteOnes)
 		quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
 		if quotes != 0 && (backslashes == 0 || bits.TrailingZeros64(quotes) < bits.TrailingZeros64(backslashes)) {
-			end := int(sp + uintptr(bits.TrailingZeros64(quotes)>>3) + 1 - base)
-			runtime.KeepAlive(src)
-			return end
+			return sp + (bits.TrailingZeros64(quotes) >> 3) + 1
 		}
 		if backslashes == 0 {
-			runtime.KeepAlive(src)
 			return -1
 		}
-		sp += uintptr(bits.TrailingZeros64(backslashes) >> 3)
+		sp += bits.TrailingZeros64(backslashes) >> 3
 	}
 scanNative:
-	pos = int(sp - base)
+	pos = sp
 	end, err := kernels.SkipStringRelaxed(src[pos:])
-	runtime.KeepAlive(src)
 	if err != 0 {
 		return -1
 	}

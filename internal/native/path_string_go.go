@@ -5,7 +5,6 @@ package native
 import (
 	"encoding/binary"
 	"math/bits"
-	"runtime"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/kernels"
@@ -14,17 +13,14 @@ import (
 )
 
 // stringTail scans relaxed JSON string content after its opening quote.
-// Bounds checks precede every load; integer addresses avoid exposing pointers
-// beyond the allocation while crossing an escape or returning at EOF.
-//
-//go:nocheckptr
+// Bounds checks precede every load.
 func (b *pathBlock) stringTail(src string, pos int) (end, escape int, err types.ParsingError) {
-	base := uintptr(unsafe.Pointer(rt.StringData(src)))
-	sp, se := base+uintptr(pos), base+uintptr(len(src))
+	base := unsafe.Pointer(rt.StringData(src))
+	sp, se := pos, len(src)
 	stop := minNative(se, sp+32)
 	escape = -1
 	for sp < stop && se-sp >= 8 {
-		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(sp))[:])
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
 		slash := x ^ ('\\' * tokenByteOnes)
 		backslashes := (slash - tokenByteOnes) &^ slash & tokenByteHighBits
 		q := x ^ ('"' * tokenByteOnes)
@@ -32,21 +28,17 @@ func (b *pathBlock) stringTail(src string, pos int) (end, escape int, err types.
 		// Only the first match is used: subtraction may mark later bytes too.
 		if (quotes | backslashes) != 0 {
 			if backslashes == 0 || (quotes != 0 && bits.TrailingZeros64(quotes) < bits.TrailingZeros64(backslashes)) {
-				end = int(sp + uintptr(bits.TrailingZeros64(quotes)>>3) + 1 - base)
-				runtime.KeepAlive(src)
-				return end, escape, 0
+				return sp + (bits.TrailingZeros64(quotes) >> 3) + 1, escape, 0
 			}
-			sp += uintptr(bits.TrailingZeros64(backslashes) >> 3)
+			sp += bits.TrailingZeros64(backslashes) >> 3
 			goto scanEscape
 		}
 		sp += 8
 	}
 	if sp < stop {
-		c := *(*byte)(unsafe.Pointer(sp))
+		c := src[sp]
 		if c == '"' {
-			end = int(sp + 1 - base)
-			runtime.KeepAlive(src)
-			return end, escape, 0
+			return sp + 1, escape, 0
 		}
 		if c == '\\' {
 			goto scanEscape
@@ -54,49 +46,44 @@ func (b *pathBlock) stringTail(src string, pos int) (end, escape int, err types.
 		// Reuse the checked ordinary byte. The remaining one-byte suffix is
 		// cheaper to inspect directly; longer tails can amortize classification.
 		sp++
-		if se-sp >= 2 && sp-base >= 8 {
+		if se-sp >= 2 && sp >= 8 {
 			goto scanTail
 		}
 	}
 scanBytes:
 	for sp < stop {
-		c := *(*byte)(unsafe.Pointer(sp))
+		c := src[sp]
 		if c == '"' {
-			end = int(sp + 1 - base)
-			runtime.KeepAlive(src)
-			return end, escape, 0
+			return sp + 1, escape, 0
 		}
 		if c == '\\' {
 			goto scanEscape
 		}
 		sp++
 	}
-	if se-sp == 1 && *(*byte)(unsafe.Pointer(sp)) == '\\' && escape < 0 {
-		escape = int(sp - base)
+	if se-sp == 1 && src[sp] == '\\' && escape < 0 {
+		escape = sp
 	}
-	if sp >= se || se-sp == 1 && *(*byte)(unsafe.Pointer(sp)) == '\\' {
-		runtime.KeepAlive(src)
+	if sp >= se || se-sp == 1 && src[sp] == '\\' {
 		return len(src), escape, types.ERR_EOF
 	}
 	{
-		off := int(sp - base)
+		off := sp
 		end, nextEscape, err, events, width := kernels.ScanPathStringBlock(src[off:])
 		end += off
 		b.saveStringTail(end, events, width)
 		if escape < 0 && nextEscape >= 0 {
 			escape = off + nextEscape
 		}
-		runtime.KeepAlive(src)
 		return end, escape, err
 	}
 
 scanEscape:
 	// Word and byte scans already located the slash; do not reload it.
 	if escape < 0 {
-		escape = int(sp - base)
+		escape = sp
 	}
 	if se-sp < 2 {
-		runtime.KeepAlive(src)
 		return len(src), escape, types.ERR_EOF
 	}
 	sp += 2
@@ -106,21 +93,18 @@ scanTail:
 	// Falling out of the word loop before stop leaves fewer than eight bytes.
 	// Shift away the consumed prefix before classifying the bounded last word,
 	// avoiding both repeated escapes and subtraction's cross-byte borrow flags.
-	x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Pointer(se - 8))[:])
+	x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, se-8))[:])
 	x >>= (8 - (se - sp)) * 8
 	slash := x ^ ('\\' * tokenByteOnes)
 	backslashes := (slash - tokenByteOnes) &^ slash & tokenByteHighBits
 	q := x ^ ('"' * tokenByteOnes)
 	quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
 	if quotes != 0 && (backslashes == 0 || bits.TrailingZeros64(quotes) < bits.TrailingZeros64(backslashes)) {
-		end = int(sp + uintptr(bits.TrailingZeros64(quotes)>>3) + 1 - base)
-		runtime.KeepAlive(src)
-		return end, escape, 0
+		return sp + (bits.TrailingZeros64(quotes) >> 3) + 1, escape, 0
 	}
 	if backslashes == 0 {
-		runtime.KeepAlive(src)
 		return len(src), escape, types.ERR_EOF
 	}
-	sp += uintptr(bits.TrailingZeros64(backslashes) >> 3)
+	sp += bits.TrailingZeros64(backslashes) >> 3
 	goto scanEscape
 }

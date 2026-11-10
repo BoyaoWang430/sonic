@@ -20,7 +20,6 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/bytedance/gopkg/lang/dirtmake"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
@@ -99,7 +98,7 @@ func (self *Node) MarshalJSON() ([]byte, error) {
 
 	// fast path for raw node
 	if self.isRaw() {
-		return rt.Str2Mem(self.toString()), nil
+		return []byte(self.toString()), nil
 	}
 
 	buf := newBuffer()
@@ -112,7 +111,7 @@ func (self *Node) MarshalJSON() ([]byte, error) {
 	if !rt.CanSizeResue(cap(*buf)) {
 		ret = *buf
 	} else {
-		ret = dirtmake.Bytes(len(*buf), len(*buf))
+		ret = make([]byte, len(*buf))
 		copy(ret, *buf)
 		freeBuffer(buf)
 	}

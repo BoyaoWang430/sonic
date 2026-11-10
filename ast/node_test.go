@@ -27,7 +27,6 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,7 +131,7 @@ func TestNodeSortKeys2(t *testing.T) {
 //go:noinline
 func stackObj() interface{} {
 	var a int = 1
-	return rt.UnpackEface(a).Pack()
+	return a
 }
 
 func TestLoadAll(t *testing.T) {

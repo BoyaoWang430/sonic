@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"testing"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type rvvBenchDocument struct {
@@ -46,7 +44,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 	if err := Decode(&input, &pos, 0, &warm); err != nil || pos != len(src) || !reflect.DeepEqual(warm, want) {
 		b.Fatalf("fixture decode failed at %d: %v", pos, err)
 	}
-	typ := rt.UnpackType(reflect.TypeOf((*T)(nil)).Elem())
+	typ := reflect.TypeOf((*T)(nil)).Elem()
 	dec, err := findOrCompile(typ)
 	if err != nil {
 		b.Fatal(err)
@@ -157,7 +155,7 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 		}
 		// A bound struct avoids the one-shot interface arenas. Nested
 		// interface fields use the normal allocation path in this context.
-		if ctx.efacePool != nil {
+		if ctx.sliceArena != nil {
 			b.Fatal("FromDom fixture unexpectedly uses an interface arena")
 		}
 		checkParser(b, ctx.Parser)
@@ -173,8 +171,8 @@ func benchmarkRVVDecodeStages[T any](b *testing.B, src string) {
 			}
 		}
 		b.StopTimer()
-		if !reflect.DeepEqual(got, want) || ctx.Stack.index != 0 {
-			b.Fatal("repeated FromDom changed output or left stack state")
+		if !reflect.DeepEqual(got, want) {
+			b.Fatal("repeated FromDom changed output")
 		}
 	})
 

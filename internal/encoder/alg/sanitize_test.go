@@ -51,14 +51,12 @@ func TestQuoteFlagsHTMLAndUTF8(t *testing.T) {
 			}
 		}
 		// Verify QuoteWithPaddedKeyFlags with 32B padded key
-		paddedKey := ",\"field\":                       "[:9] + string(make([]byte, 32))[:0]
 		buf := make([]byte, 0, 256)
 		key := ",\"field\":"
-		padded := key + "                                "
-		_ = paddedKey
-		raw := QuoteWithPaddedKey(nil, padded[:len(key)], s)
+		keyBlob := append([]byte(key), make([]byte, 32)...)
+		raw := QuoteWithPaddedKey(nil, &keyBlob[0], len(key), s)
 		want := SanitizeAppended(append([]byte(nil), raw...), len(key), SanitizeMask)
-		got := QuoteWithPaddedKeyFlags(buf, padded[:len(key)], s, SanitizeMask)
+		got := QuoteWithPaddedKeyFlags(buf, &keyBlob[0], len(key), s, SanitizeMask)
 		if !bytes.Equal(got, want) {
 			t.Fatalf("padded s=%q:\ngot:  %q\nwant: %q", s, got, want)
 		}

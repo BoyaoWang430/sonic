@@ -1,5 +1,3 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
-
 package alg
 
 import (
@@ -8,8 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
-
-	"github.com/bytedance/sonic/internal/rt"
+	"unsafe"
 )
 
 type iteratorLargeValue struct {
@@ -30,12 +27,12 @@ func iteratorPayload(i int) iteratorLargeValue {
 func detachedMapIterator(t *testing.T, makeMap func() any, flags uint64) (*MapIterator, reflect.Type) {
 	t.Helper()
 	value := makeMap()
-	eface := rt.UnpackEface(value)
-	it, err := IteratorStart(rt.MapType(eface.Type), eface.Value, flags)
+	rv := reflect.ValueOf(value)
+	it, err := IteratorStartValue(rv, flags)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return it, reflect.TypeOf(value).Elem()
+	return it, rv.Type().Elem()
 }
 
 func TestMapIteratorGCOwnership(t *testing.T) {
@@ -113,8 +110,7 @@ func TestMapIteratorGCOwnership(t *testing.T) {
 func TestMapIteratorEmpty(t *testing.T) {
 	for _, flags := range []uint64{0, 1 << BitSortMapKeys} {
 		for _, value := range []map[string]int{nil, {}} {
-			eface := rt.UnpackEface(value)
-			it, err := IteratorStart(rt.MapType(eface.Type), eface.Value, flags)
+			it, err := IteratorStart(reflect.TypeOf(value), unsafe.Pointer(&value), flags)
 			if err != nil || it.It.K != nil || it.It.V != nil {
 				t.Fatalf("empty map: iterator=%+v err=%v", it, err)
 			}
@@ -128,8 +124,7 @@ func TestMapIteratorDeletion(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		value[strconv.Itoa(i)] = i
 	}
-	eface := rt.UnpackEface(value)
-	it, err := IteratorStart(rt.MapType(eface.Type), eface.Value, 0)
+	it, err := IteratorStart(reflect.TypeOf(value), unsafe.Pointer(&value), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +151,7 @@ func TestMapIteratorGrowth(t *testing.T) {
 				v := iteratorPayload(i)
 				value[strconv.Itoa(i)] = &v
 			}
-			eface := rt.UnpackEface(value)
-			it, err := IteratorStart(rt.MapType(eface.Type), eface.Value, flags)
+			it, err := IteratorStart(reflect.TypeOf(value), unsafe.Pointer(&value), flags)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -170,7 +164,6 @@ func TestMapIteratorGrowth(t *testing.T) {
 				value[strconv.Itoa(i)] = &v
 			}
 			value = nil
-			eface = rt.GoEface{}
 			IteratorNext(it)
 			runtime.GC()
 			if got := *(**iteratorLargeValue)(ptr); got != want || string(got.Bytes) != key {

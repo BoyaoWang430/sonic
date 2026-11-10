@@ -22,7 +22,6 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type fieldCacheEntry struct {
@@ -42,33 +41,33 @@ type FieldCache struct {
 	exact     []fieldCacheEntry
 	mask      uint32
 	numFields uint32
-	foldedPtr unsafe.Pointer // *foldedCache, lazily initialized via atomic
+	foldedPtr atomic.Pointer[foldedCache]
 }
 
 //go:nosplit
 func strSig(s string) (n, lo, hi uint32) {
 	l := len(s)
 	n = uint32(l)
-	p := (*rt.GoString)(unsafe.Pointer(&s)).Ptr
-	if l >= 4 {
-		lo = *(*uint32)(p)
-		hi = *(*uint32)(unsafe.Pointer(uintptr(p) + uintptr(l-4)))
-		return
-	}
 	if l == 0 {
 		return
 	}
-	b0 := uint32(*(*uint8)(p))
+	if l >= 4 {
+		p := unsafe.Pointer(unsafe.StringData(s))
+		lo = *(*uint32)(p)
+		hi = *(*uint32)(unsafe.Add(p, l-4))
+		return
+	}
+	b0 := uint32(s[0])
 	if l == 1 {
 		lo = b0
 		return
 	}
-	b1 := uint32(*(*uint8)(unsafe.Pointer(uintptr(p) + 1)))
+	b1 := uint32(s[1])
 	if l == 2 {
 		lo = b0 | (b1 << 8)
 		return
 	}
-	b2 := uint32(*(*uint8)(unsafe.Pointer(uintptr(p) + 2)))
+	b2 := uint32(s[2])
 	lo = b0 | (b1 << 8) | (b2 << 16)
 	return
 }
@@ -182,7 +181,7 @@ func (f *FieldCache) initFolded() *foldedCache {
 			}
 		}
 	}
-	atomic.StorePointer(&f.foldedPtr, unsafe.Pointer(fc))
+	f.foldedPtr.Store(fc)
 	return fc
 }
 
@@ -210,7 +209,7 @@ func (f *FieldCache) Get(name string, caseSensitive bool) int {
 }
 
 func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
-	fc := (*foldedCache)(atomic.LoadPointer(&f.foldedPtr))
+	fc := f.foldedPtr.Load()
 	if fc == nil {
 		fc = f.initFolded()
 	}
@@ -234,7 +233,7 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 				idx = (idx + 1) & mask
 			}
 		}
-		p := (*rt.GoString)(unsafe.Pointer(&name)).Ptr
+		p := unsafe.Pointer(unsafe.StringData(name))
 		midLen := uintptr(n - 8)
 		for {
 			e := &fc.folded[idx]
@@ -242,7 +241,7 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 				break
 			}
 			if e.n == n && e.lo == loFold && e.hi == hiFold {
-				ep := (*rt.GoString)(unsafe.Pointer(&e.name)).Ptr
+				ep := unsafe.Pointer(unsafe.StringData(e.name))
 				off := uintptr(4)
 				matched := true
 				for off+8 <= 4+midLen {

@@ -17,9 +17,9 @@ GLOBL ·sc_slash_vec<>(SB), RODATA|NOPTR, $32
 // func skipContainer(src uintptr, size int, open uint64) (end int, err int)
 TEXT ·skipContainer(SB), NOSPLIT, $16-40
 	MOVQ src+0(FP), SI
-	MOVQ size+8(FP), R15          // R15 = remaining length
-	MOVQ R15, 0(SP)               // 0(SP) = original size
-	TESTQ R15, R15
+	MOVQ size+8(FP), AX
+	MOVQ AX, 0(SP)                // 0(SP) = original size
+	TESTQ AX, AX
 	JLE  sc_eof_no_avx
 
 	MOVQ open+16(FP), DX          // DX = open byte
@@ -32,11 +32,13 @@ TEXT ·skipContainer(SB), NOSPLIT, $16-40
 
 	CMPB ·hasAVX2(SB), $0
 	JE   sc_sse_check_short
+	MOVQ 0(SP), R15               // R15 = remaining length
 	CMPQ R15, $32
 	JB   sc_avx_short
 
 	VMOVDQU ·sc_quote_vec<>(SB), Y4
 	VMOVDQU ·sc_slash_vec<>(SB), Y5
+	MOVQ 0(SP), R15
 	VMOVQ DX, X6
 	VPBROADCASTB X6, Y6           // Y6 = broadcast open byte
 	VMOVQ BX, X7
@@ -278,6 +280,7 @@ sc_avx_short:
 	JLT  sc_avx_short_tail
 	VMOVDQU ·sc_quote_vec<>(SB), X4
 	VMOVDQU ·sc_slash_vec<>(SB), X5
+	MOVQ 0(SP), R15
 	VMOVQ DX, X6
 	VPBROADCASTB X6, X6
 	VMOVQ BX, X7
@@ -293,11 +296,13 @@ sc_avx_short_tail:
 	JMP  sc_avx_tail
 
 sc_sse_check_short:
+	MOVQ 0(SP), R15               // R15 = remaining length
 	CMPQ R15, $16
 	JLT  sc_sse_short_scalar
 sc_sse_entry:
 	MOVOU ·sc_quote_vec<>(SB), X4
 	MOVOU ·sc_slash_vec<>(SB), X5
+	MOVQ 0(SP), R15
 	PXOR X1, X1
 	MOVQ DX, X6
 	PSHUFB X1, X6

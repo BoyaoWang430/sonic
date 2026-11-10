@@ -86,7 +86,7 @@ func TestEncoderPanicString(t *testing.T) {
 	}{
 		A: "a",
 	}
-	(*rt.GoString)(unsafe.Pointer(&s.S)).Len = 1
+	s.S = unsafe.String((*byte)(nil), 1)
 	Encode(s, 0)
 }
 

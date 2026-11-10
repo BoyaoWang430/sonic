@@ -25,11 +25,8 @@ import (
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/native"
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/utf8"
 )
-
-var typeByte = rt.UnpackEface(byte(0)).Type
 
 func quote(buf *[]byte, val string) {
 	*buf = alg.Quote(*buf, val, false)
@@ -40,14 +37,13 @@ func quoteKey(buf *[]byte, val string) {
 }
 
 func (self *Parser) decodeValue() (val types.JsonState) {
-	sv := (*rt.GoString)(unsafe.Pointer(&self.s))
 	flag := types.F_USE_NUMBER
 	if self.dbuf != nil {
 		flag = 0
 		val.Dbuf = self.dbuf
 		val.Dcap = types.MaxDigitNums
 	}
-	self.p = native.Value(sv.Ptr, sv.Len, self.p, &val, uint64(flag))
+	self.p = native.Value(unsafe.Pointer(unsafe.StringData(self.s)), len(self.s), self.p, &val, uint64(flag))
 	return
 }
 

@@ -1,14 +1,13 @@
 package optdec
 
 import (
+	"encoding/json"
 	"reflect"
 	"unsafe"
 
-	"encoding/json"
 	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/decoder/consts"
 	"github.com/bytedance/sonic/internal/decoder/errors"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -38,6 +37,129 @@ const (
 	OptionValidateString   = consts.OptionValidateString
 )
 
+type rootPtrInfo struct {
+	etp     reflect.Type
+	dec     decFunc
+	isNamed bool
+}
+
+var (
+	rootPtrCache     = caching.CreateProgramCache()
+	efaceRootDec     = &efaceDecoder{}
+	mapEfaceRootDec  = &mapEfaceDecoder{}
+	sliceEfaceRootDec = &sliceEfaceDecoder{}
+	mapStringRootDec = &mapStringDecoder{}
+	stringRootDec    = &stringDecoder{}
+	intRootDec       = (&compiler{}).compileInt(intType)
+	int64RootDec     = &i64Decoder{}
+	float64RootDec   = &f64Decoder{}
+	boolRootDec      = &boolDecoder{}
+)
+
+func unpackRootValue(val interface{}) (etp reflect.Type, vp unsafe.Pointer, err error) {
+	etp, vp, _, err = unpackAndCompileRoot(val)
+	return
+}
+
+func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer, dec decFunc, err error) {
+	if val == nil {
+		return nil, nil, nil, &json.InvalidUnmarshalError{}
+	}
+	switch v := val.(type) {
+	case *interface{}:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return anyType, unsafe.Pointer(v), efaceRootDec, nil
+	case *map[string]interface{}:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return mapEfaceType, unsafe.Pointer(v), mapEfaceRootDec, nil
+	case *[]interface{}:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return sliceEfaceType, unsafe.Pointer(v), sliceEfaceRootDec, nil
+	case *map[string]string:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return mapStringType, unsafe.Pointer(v), mapStringRootDec, nil
+	case *string:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return stringType, unsafe.Pointer(v), stringRootDec, nil
+	case *int:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return intType, unsafe.Pointer(v), intRootDec, nil
+	case *int64:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return int64Type, unsafe.Pointer(v), int64RootDec, nil
+	case *float64:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return float64Type, unsafe.Pointer(v), float64RootDec, nil
+	case *bool:
+		if v == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+		}
+		return boolType, unsafe.Pointer(v), boolRootDec, nil
+	}
+
+	rv := reflect.ValueOf(val)
+	vt := rv.Type()
+	if cached := rootPtrCache.Get(vt); cached != nil {
+		info := cached.(*rootPtrInfo)
+		vp = rv.UnsafePointer()
+		if vp == nil {
+			return nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
+		}
+		if info.isNamed {
+			ptrSlot := reflect.New(vt)
+			*(*unsafe.Pointer)(ptrSlot.UnsafePointer()) = vp
+			vp = ptrSlot.UnsafePointer()
+		}
+		return info.etp, vp, info.dec, nil
+	}
+
+	if vt.Kind() != reflect.Ptr || rv.IsNil() {
+		return nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
+	}
+
+	vp = rv.UnsafePointer()
+	etp = vt.Elem()
+	isNamed := vt.Name() != ""
+
+	/* check the defined pointer type for issue 379 */
+	if isNamed {
+		ptrSlot := reflect.New(vt)
+		*(*unsafe.Pointer)(ptrSlot.UnsafePointer()) = vp
+		etp = vt
+		vp = ptrSlot.UnsafePointer()
+	}
+
+	dec, err = findOrCompile(etp)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	rootPtrCache.PutMany([]caching.ProgramBatchItem{{
+		Vt: vt,
+		Fn: &rootPtrInfo{
+			etp:     etp,
+			dec:     dec,
+			isNamed: isNamed,
+		},
+	}})
+	return etp, vp, dec, nil
+}
+
 func Decode(s *string, i *int, f uint64, val interface{}) error {
 	return DecodeWithSession(s, i, f, val, nil)
 }
@@ -47,29 +169,8 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	if sessPtr != nil {
 		sess = *sessPtr
 	}
-	vv := rt.UnpackEface(val)
-	vp := vv.Value
 
-	/* check for nil type */
-	if vv.Type == nil {
-		return &json.InvalidUnmarshalError{}
-	}
-
-	/* must be a non-nil pointer */
-	if vp == nil || vv.Type.Kind() != reflect.Ptr {
-		return &json.InvalidUnmarshalError{Type: vv.Type.Pack()}
-	}
-
-	etp := rt.PtrElem(vv.Type)
-
-	/* check the defined pointer type for issue 379 */
-	if vv.Type.IsNamed() {
-		newp := vp
-		etp = vv.Type
-		vp = unsafe.Pointer(&newp)
-	}
-
-	dec, err := findOrCompile(etp)
+	etp, vp, dec, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return err
 	}
@@ -170,23 +271,23 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 
 func ResetProgramCache() {
 	programCache.Reset()
+	rootPtrCache.Reset()
 }
 
 func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
 		return nil
 	}
-	seen := make(map[*rt.GoType]struct{}, len(vtm))
+	seen := make(map[reflect.Type]struct{}, len(vtm))
 	var batch []caching.ProgramBatchItem
 	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
 		next := make(map[reflect.Type]bool)
 		for vt := range vtm {
-			gvt := rt.UnpackType(vt)
-			if _, ok := seen[gvt]; ok {
+			if _, ok := seen[vt]; ok {
 				continue
 			}
-			seen[gvt] = struct{}{}
-			if programCache.Get(gvt) != nil {
+			seen[vt] = struct{}{}
+			if programCache.Get(vt) != nil {
 				continue
 			}
 			compiler := newCompiler().apply(opts)
@@ -194,7 +295,7 @@ func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 			if err != nil {
 				return err
 			}
-			batch = append(batch, caching.ProgramBatchItem{Vt: gvt, Fn: f})
+			batch = append(batch, caching.ProgramBatchItem{Vt: vt, Fn: f})
 			for svt := range compiler.visited {
 				next[svt] = true
 			}

@@ -3,11 +3,11 @@ package optdec
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type decFunc interface {
@@ -15,7 +15,7 @@ type decFunc interface {
 }
 
 type ptrDecoder struct {
-	typ   *rt.GoType
+	typ   reflect.Type
 	deref decFunc
 }
 
@@ -27,7 +27,7 @@ func (d *ptrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	}
 
 	if *(*unsafe.Pointer)(vp) == nil {
-		*(*unsafe.Pointer)(vp) = rt.Mallocgc(d.typ.Size, d.typ, true)
+		*(*unsafe.Pointer)(vp) = reflect.New(d.typ).UnsafePointer()
 	}
 
 	return d.deref.FromDom(*(*unsafe.Pointer)(vp), node, ctx)
@@ -46,13 +46,12 @@ func (d *embeddedFieldPtrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *con
 	}
 
 	// seek into the pointer
-	vp = unsafe.Pointer(uintptr(vp) - uintptr(d.field.Path[0].Size))
+	vp = unsafe.Add(vp, -int(d.field.Path[0].Size))
 	for _, f := range d.field.Path {
-		deref := rt.UnpackType(f.Type)
-		vp = unsafe.Pointer(uintptr(vp) + f.Size)
+		vp = unsafe.Add(vp, f.Size)
 		if f.Kind == resolver.F_deref {
 			if *(*unsafe.Pointer)(vp) == nil {
-				*(*unsafe.Pointer)(vp) = rt.Mallocgc(deref.Size, deref, true)
+				*(*unsafe.Pointer)(vp) = reflect.New(f.Type).UnsafePointer()
 			}
 			vp = *(*unsafe.Pointer)(vp)
 		}
@@ -270,7 +269,7 @@ func (d *numberDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 }
 
 type recuriveDecoder struct {
-	typ *rt.GoType
+	typ reflect.Type
 	dec unsafe.Pointer
 }
 
@@ -293,7 +292,7 @@ func (d *recuriveDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) er
 }
 
 type unsupportedTypeDecoder struct {
-	typ *rt.GoType
+	typ reflect.Type
 }
 
 func (d *unsupportedTypeDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {

@@ -90,7 +90,7 @@ num_strict_markers:
 	MOVQ $3, R9           // R9 = phase = 3 (strict integer)
 	MOVQ $-1, R12         // dot pos
 	MOVQ $-1, R13         // exp pos
-	MOVQ $-1, R15         // sign pos (R15 instead of R14 so g is preserved)
+	MOVQ $-1, DX          // sign pos (DX instead of R15 so dynamic linking does not clobber it)
 
 num_digits:
 	TESTQ CX, CX
@@ -267,9 +267,9 @@ num_strict_event:
 	JNE  num_strict_finish
 
 num_strict_sign:
-	TESTQ R15, R15
+	TESTQ DX, DX
 	JGE  num_invalid
-	MOVQ R8, R15
+	MOVQ R8, DX
 	JMP  num_strict_advance
 
 num_strict_dot:
@@ -309,11 +309,11 @@ num_strict_finish:
 	JE   num_strict_trailing
 	CMPQ R13, BX
 	JE   num_strict_trailing
-	CMPQ R15, BX
+	CMPQ DX, BX
 	JE   num_strict_trailing
-	TESTQ R15, R15
+	TESTQ DX, DX
 	JLT  num_strict_dot_order
-	LEAQ -1(R15), DI
+	LEAQ -1(DX), DI
 	CMPQ R13, DI
 	JNE  num_strict_bad_sign
 num_strict_dot_order:
@@ -332,7 +332,7 @@ num_strict_trailing:
 	MOVQ BX, R8
 	JMP  num_invalid
 num_strict_bad_sign:
-	MOVQ R15, R8
+	MOVQ DX, R8
 	JMP  num_invalid
 num_strict_bad_dot:
 	MOVQ R12, R8

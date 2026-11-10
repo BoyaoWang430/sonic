@@ -77,3 +77,35 @@ func TestARMParserCorrectedSourceOwnership(t *testing.T) {
 		}
 	}
 }
+
+func TestParserGrowTapeAfterKeyThenValue(t *testing.T) {
+	// Construct a JSON document that forces multiple node-tape growths across
+	// both an object key boundary and a subsequent object value boundary.
+	var sb strings.Builder
+	sb.WriteString(`{"items":[`)
+	for i := 0; i < 6000; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`{"a":"1","b":"2","c":{"d":"3","e":"4"}}`)
+	}
+	sb.WriteString(`]}`)
+	input := sb.String()
+	pos := 0
+	var got struct {
+		Items []struct {
+			A string `json:"a"`
+			B string `json:"b"`
+			C struct {
+				D string `json:"d"`
+				E string `json:"e"`
+			} `json:"c"`
+		} `json:"items"`
+	}
+	if err := Decode(&input, &pos, 0, &got); err != nil {
+		t.Fatalf("Decode failed after multiple tape growths: %v", err)
+	}
+	if len(got.Items) != 6000 || got.Items[5999].C.E != "4" {
+		t.Fatalf("unexpected decoded result: len=%d last=%+v", len(got.Items), got.Items[len(got.Items)-1])
+	}
+}

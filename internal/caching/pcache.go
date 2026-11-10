@@ -17,159 +17,64 @@
 package caching
 
 import (
+	"reflect"
 	"sync"
 	"sync/atomic"
-	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
-)
-
-/** Program Map **/
-
-const (
-	_LoadFactor   = 0.5
-	_InitCapacity = 4096 // must be a power of 2
 )
 
 type _ProgramMap struct {
-	n uint64
-	m uint32
-	b []_ProgramEntry
-}
-
-type _ProgramEntry struct {
-	vt *rt.GoType
-	fn interface{}
+	m map[reflect.Type]interface{}
 }
 
 func newProgramMap() *_ProgramMap {
 	return &_ProgramMap{
-		n: 0,
-		m: _InitCapacity - 1,
-		b: make([]_ProgramEntry, _InitCapacity),
+		m: make(map[reflect.Type]interface{}, 64),
 	}
 }
 
-func (self *_ProgramMap) copy() *_ProgramMap {
+func (self *_ProgramMap) get(vt reflect.Type) interface{} {
+	return self.m[vt]
+}
+
+func (self *_ProgramMap) add(vt reflect.Type, fn interface{}) *_ProgramMap {
 	fork := &_ProgramMap{
-		n: self.n,
-		m: self.m,
-		b: make([]_ProgramEntry, len(self.b)),
+		m: make(map[reflect.Type]interface{}, len(self.m)+1),
 	}
-	copy(fork.b, self.b)
+	for k, v := range self.m {
+		fork.m[k] = v
+	}
+	fork.m[vt] = fn
 	return fork
 }
 
-func (self *_ProgramMap) get(vt *rt.GoType) interface{} {
-	i := self.m + 1
-	p := vt.Hash & self.m
-
-	/* linear probing */
-	for ; i > 0; i-- {
-		if b := self.b[p]; b.vt == vt {
-			return b.fn
-		} else if b.vt == nil {
-			break
-		} else {
-			p = (p + 1) & self.m
-		}
-	}
-
-	/* not found */
-	return nil
-}
-
-func (self *_ProgramMap) add(vt *rt.GoType, fn interface{}) *_ProgramMap {
-	p := self.copy()
-	f := float64(atomic.LoadUint64(&p.n)+1) / float64(p.m+1)
-
-	/* check for load factor */
-	if f > _LoadFactor {
-		p = p.rehash()
-	}
-
-	/* insert the value */
-	p.insert(vt, fn)
-	return p
-}
-
-func (self *_ProgramMap) rehash() *_ProgramMap {
-	c := (self.m + 1) << 1
-	r := &_ProgramMap{m: c - 1, b: make([]_ProgramEntry, int(c))}
-
-	/* rehash every entry */
-	for i := uint32(0); i <= self.m; i++ {
-		if b := self.b[i]; b.vt != nil {
-			r.insert(b.vt, b.fn)
-		}
-	}
-
-	/* rebuild successful */
-	return r
-}
-
 type ProgramBatchItem struct {
-	Vt *rt.GoType
+	Vt reflect.Type
 	Fn interface{}
 }
 
 func (self *_ProgramMap) addMany(items []ProgramBatchItem) *_ProgramMap {
 	missing := 0
 	for i := range items {
-		if items[i].Vt != nil && self.get(items[i].Vt) == nil {
+		if items[i].Vt != nil && self.m[items[i].Vt] == nil {
 			missing++
 		}
 	}
 	if missing == 0 {
 		return nil
 	}
-	targetCount := atomic.LoadUint64(&self.n) + uint64(missing)
-	capNeeded := self.m + 1
-	for float64(targetCount)/float64(capNeeded) > _LoadFactor {
-		capNeeded <<= 1
+	fork := &_ProgramMap{
+		m: make(map[reflect.Type]interface{}, len(self.m)+missing),
 	}
-	var fork *_ProgramMap
-	if capNeeded == self.m+1 {
-		fork = self.copy()
-	} else {
-		fork = &_ProgramMap{
-			m: capNeeded - 1,
-			b: make([]_ProgramEntry, int(capNeeded)),
-		}
-		for i := uint32(0); i <= self.m; i++ {
-			if b := self.b[i]; b.vt != nil {
-				fork.insert(b.vt, b.fn)
-			}
-		}
+	for k, v := range self.m {
+		fork.m[k] = v
 	}
 	for i := range items {
 		vt := items[i].Vt
-		if vt != nil && fork.get(vt) == nil {
-			fork.insert(vt, items[i].Fn)
+		if vt != nil && fork.m[vt] == nil {
+			fork.m[vt] = items[i].Fn
 		}
 	}
 	return fork
-}
-
-func (self *_ProgramMap) insert(vt *rt.GoType, fn interface{}) {
-	h := vt.Hash
-	p := h & self.m
-
-	/* linear probing */
-	for i := uint32(0); i <= self.m; i++ {
-		if b := &self.b[p]; b.vt != nil {
-			p += 1
-			p &= self.m
-		} else {
-			b.vt = vt
-			b.fn = fn
-			atomic.AddUint64(&self.n, 1)
-			return
-		}
-	}
-
-	/* should never happens */
-	panic("no available slots")
 }
 
 /** RCU Program Cache with Per-Type Singleflight **/
@@ -183,30 +88,30 @@ type inflightProgram struct {
 
 type ProgramCache struct {
 	m        sync.Mutex
-	p        unsafe.Pointer
+	p        atomic.Pointer[_ProgramMap]
 	epoch    uint64
-	inflight map[*rt.GoType]*inflightProgram
+	inflight map[reflect.Type]*inflightProgram
 }
 
 func CreateProgramCache() *ProgramCache {
-	return &ProgramCache{
-		p: unsafe.Pointer(newProgramMap()),
-	}
+	pc := &ProgramCache{}
+	pc.p.Store(newProgramMap())
+	return pc
 }
 
 func (self *ProgramCache) Reset() {
 	self.m.Lock()
 	self.epoch++
 	self.inflight = nil
-	atomic.StorePointer(&self.p, unsafe.Pointer(newProgramMap()))
+	self.p.Store(newProgramMap())
 	self.m.Unlock()
 }
 
-func (self *ProgramCache) Get(vt *rt.GoType) interface{} {
-	return (*_ProgramMap)(atomic.LoadPointer(&self.p)).get(vt)
+func (self *ProgramCache) Get(vt reflect.Type) interface{} {
+	return self.p.Load().get(vt)
 }
 
-func (self *ProgramCache) Compute(vt *rt.GoType, compute func(*rt.GoType, ...interface{}) (interface{}, error), ex ...interface{}) (interface{}, error) {
+func (self *ProgramCache) Compute(vt reflect.Type, compute func(reflect.Type, ...interface{}) (interface{}, error), ex ...interface{}) (interface{}, error) {
 	if val := self.Get(vt); val != nil {
 		return val, nil
 	}
@@ -226,7 +131,7 @@ func (self *ProgramCache) Compute(vt *rt.GoType, compute func(*rt.GoType, ...int
 			continue
 		}
 		if self.inflight == nil {
-			self.inflight = make(map[*rt.GoType]*inflightProgram)
+			self.inflight = make(map[reflect.Type]*inflightProgram)
 		}
 		call := &inflightProgram{}
 		call.wg.Add(1)
@@ -258,8 +163,8 @@ func (self *ProgramCache) Compute(vt *rt.GoType, compute func(*rt.GoType, ...int
 			if existing := self.Get(vt); existing != nil {
 				val = existing
 			} else {
-				cur := (*_ProgramMap)(atomic.LoadPointer(&self.p))
-				atomic.StorePointer(&self.p, unsafe.Pointer(cur.add(vt, val)))
+				cur := self.p.Load()
+				self.p.Store(cur.add(vt, val))
 			}
 		}
 		call.val = val
@@ -276,9 +181,9 @@ func (self *ProgramCache) PutMany(items []ProgramBatchItem) {
 		return
 	}
 	self.m.Lock()
-	cur := (*_ProgramMap)(atomic.LoadPointer(&self.p))
+	cur := self.p.Load()
 	if next := cur.addMany(items); next != nil {
-		atomic.StorePointer(&self.p, unsafe.Pointer(next))
+		self.p.Store(next)
 	}
 	self.m.Unlock()
 }

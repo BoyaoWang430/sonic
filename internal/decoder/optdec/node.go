@@ -3,6 +3,7 @@ package optdec
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/envs"
@@ -10,119 +11,66 @@ import (
 )
 
 type Context struct {
-	Parser    *Parser
-	efacePool *efacePool
-	Stack     boundedStack
-	Utf8Inv   bool
+	Parser     *Parser
+	sliceArena []interface{}
+	sliceIdx   int
+	Utf8Inv    bool
 }
 
 func (ctx *Context) Options() uint64 {
 	return ctx.Parser.options
 }
 
-/************************* Stack and Pool Helper *******************/
-
-type parentStat struct {
-	con    unsafe.Pointer
-	remain uint64
-}
-type boundedStack struct {
-	stack []parentStat
-	index int
-}
-
-func newStack(size int) boundedStack {
-	return boundedStack{
-		stack: make([]parentStat, size+2),
-		index: 0,
+func (ctx *Context) initSliceArena() {
+	if n := int(ctx.Parser.nbuf.stat.array_elems); n > 0 && ctx.sliceArena == nil {
+		ctx.sliceArena = make([]interface{}, n)
+		ctx.sliceIdx = 0
 	}
 }
 
-//go:nosplit
-func (s *boundedStack) Pop() (unsafe.Pointer, int, bool) {
-	s.index--
-	con := s.stack[s.index].con
-	remain := s.stack[s.index].remain &^ (uint64(1) << 63)
-	isObj := (s.stack[s.index].remain & (uint64(1) << 63)) != 0
-	s.stack[s.index].con = nil
-	s.stack[s.index].remain = 0
-	return con, int(remain), isObj
-}
-
-//go:nosplit
-func (s *boundedStack) Push(p unsafe.Pointer, remain int, isObj bool) {
-	s.stack[s.index].con = p
-	s.stack[s.index].remain = uint64(remain)
-	if isObj {
-		s.stack[s.index].remain |= (uint64(1) << 63)
+func (ctx *Context) allocEfaceSlice(size int) []interface{} {
+	if size == 0 {
+		return []interface{}{}
 	}
-	s.index++
-}
-
-type efacePool struct {
-	t64        rt.T64Pool
-	tslice     rt.TslicePool
-	tstring    rt.TstringPool
-	efaceSlice rt.SlicePool
-}
-
-func newEfacePool(stat *jsonStat, useNumber bool) *efacePool {
-	strs := int(stat.str)
-	nums := 0
-	if useNumber {
-		strs += int(stat.number)
-	} else {
-		nums = int(stat.number)
+	if rem := len(ctx.sliceArena) - ctx.sliceIdx; rem >= size {
+		s := ctx.sliceArena[ctx.sliceIdx : ctx.sliceIdx+size : ctx.sliceIdx+size]
+		ctx.sliceIdx += size
+		return s
 	}
+	return make([]interface{}, size)
+}
 
-	return &efacePool{
-		t64:        rt.NewT64Pool(nums),
-		tslice:     rt.NewTslicePool(int(stat.array)),
-		tstring:    rt.NewTstringPool(strs),
-		efaceSlice: rt.NewPool(rt.AnyType, int(stat.array_elems)),
+func prepareSlice[T any](vp *[]T, size int) []T {
+	if size == 0 {
+		if *vp == nil {
+			return []T{}
+		}
+		return (*vp)[:0]
 	}
+	old := *vp
+	if cap(old) >= size {
+		return old[:size]
+	}
+	s := make([]T, size)
+	if len(old) > 0 {
+		copy(s, old)
+	}
+	return s
 }
 
-func (self *efacePool) GetMap(hint int) unsafe.Pointer {
-	m := make(map[string]interface{}, hint)
-	return *(*unsafe.Pointer)(unsafe.Pointer(&m))
+func canUseFastMap(opts uint64, root reflect.Type) bool {
+	return envs.UseFastMap && (opts&(1<<_F_use_int64)) == 0 && (root == anyType || root == mapEfaceType || root == sliceEfaceType)
 }
 
-func (self *efacePool) GetSlice(hint int) unsafe.Pointer {
-	return unsafe.Pointer(self.efaceSlice.GetSlice(hint))
-}
-
-func (self *efacePool) ConvTSlice(val rt.GoSlice, typ *rt.GoType, dst unsafe.Pointer) {
-	self.tslice.Conv(val, typ, (*interface{})(dst))
-}
-
-func (self *efacePool) ConvF64(val float64, dst unsafe.Pointer) {
-	self.t64.Conv(castU64(val), rt.Float64Type, (*interface{})(dst))
-}
-
-func (self *efacePool) ConvTstring(val string, dst unsafe.Pointer) {
-	self.tstring.Conv(val, (*interface{})(dst))
-}
-
-func (self *efacePool) ConvTnum(val json.Number, dst unsafe.Pointer) {
-	self.tstring.ConvNum(val, (*interface{})(dst))
-}
-
-/********************************************************/
-
-func canUseFastMap(opts uint64, root *rt.GoType) bool {
-	return envs.UseFastMap && (opts&(1<<_F_use_int64)) == 0 && (root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType)
-}
-
-func NewContext(json string, pos int, opts uint64, root *rt.GoType) (Context, error) {
+func NewContext(json string, pos int, opts uint64, root reflect.Type) (Context, error) {
 	return NewContextWithSession(json, pos, opts, root, nil)
 }
 
-func NewContextWithSession(json string, pos int, opts uint64, root *rt.GoType, sess *InputSession) (Context, error) {
+func NewContextWithSession(json string, pos int, opts uint64, root reflect.Type, sess *InputSession) (Context, error) {
 	ctx := Context{
 		Parser: newParserFromSession(json, pos, opts, sess),
 	}
-	if root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType {
+	if root == anyType || root == mapEfaceType || root == sliceEfaceType {
 		ctx.Parser.isEface = true
 	}
 
@@ -132,10 +80,8 @@ func NewContextWithSession(json string, pos int, opts uint64, root *rt.GoType, s
 		return ctx, ctx.Parser.fixError(ecode)
 	}
 
-	useNumber := (opts & (1 << _F_use_number)) != 0
 	if canUseFastMap(opts, root) {
-		ctx.efacePool = newEfacePool(&ctx.Parser.nbuf.stat, useNumber)
-		ctx.Stack = newStack(int(ctx.Parser.nbuf.stat.max_depth))
+		ctx.initSliceArena()
 	}
 
 	return ctx, nil
@@ -144,55 +90,48 @@ func NewContextWithSession(json string, pos int, opts uint64, root *rt.GoType, s
 func (ctx *Context) Delete() {
 	ctx.Parser.free()
 	ctx.Parser = nil
+	ctx.sliceArena = nil
+	ctx.sliceIdx = 0
 }
 
 type Node struct {
-	cptr uintptr
+	ptr *node
 }
 
-func NewNode(cptr uintptr) Node {
-	return Node{cptr: cptr}
-}
-
-type Dom struct {
-	cdom uintptr
+func NewNode(ptr *node) Node {
+	return Node{ptr: ptr}
 }
 
 func (ctx *Context) Root() Node {
-	root := (uintptr)(((*rt.GoSlice)(unsafe.Pointer(&ctx.Parser.nodes))).Ptr)
-	return Node{cptr: root}
+	return Node{ptr: unsafe.SliceData(ctx.Parser.nodes)}
 }
 
 type Array struct {
-	cptr uintptr
+	ptr *node
 }
 
 type Object struct {
-	cptr uintptr
+	ptr *node
 }
 
 func (obj Object) Len() int {
-	cobj := ptrCast(obj.cptr)
-	return int(uint64(cobj.val) & ConLenMask)
+	return int(uint64(obj.ptr.val) & ConLenMask)
 }
 
 func (arr Array) Len() int {
-	carr := ptrCast(arr.cptr)
-	return int(uint64(carr.val) & ConLenMask)
+	return int(uint64(arr.ptr.val) & ConLenMask)
 }
 
-// / Helper functions to eliminate CGO calls
 func (val Node) Type() uint8 {
-	ctype := ptrCast(val.cptr)
-	return uint8(ctype.typ & TypeMask)
+	return uint8(val.ptr.typ & TypeMask)
 }
 
-func (val Node) Next() uintptr {
-	cobj := ptrCast(val.cptr)
+func (val Node) Next() *node {
+	cobj := val.ptr
 	if uint8(cobj.typ)-KObject > 1 {
-		return val.cptr + unsafe.Sizeof(node{})
+		return PtrOffset(cobj, 1)
 	}
-	return val.cptr + uintptr(cobj.val>>ConLenBits)*unsafe.Sizeof(node{})
+	return PtrOffset(cobj, int64(cobj.val>>ConLenBits))
 }
 
 func (val *Node) next() {
@@ -200,11 +139,11 @@ func (val *Node) next() {
 }
 
 type NodeIter struct {
-	next uintptr
+	next *node
 }
 
-func NewNodeIter(node Node) NodeIter {
-	return NodeIter{next: node.cptr}
+func NewNodeIter(n Node) NodeIter {
+	return NodeIter{next: n.ptr}
 }
 
 func (iter *NodeIter) Next() Node {
@@ -218,13 +157,11 @@ func (iter *NodeIter) Peek() Node {
 }
 
 func (val Node) U64() uint64 {
-	cnum := ptrCast(val.cptr)
-	return *(*uint64)((unsafe.Pointer)(&(cnum.val)))
+	return val.ptr.val
 }
 
 func (val Node) I64() int64 {
-	cnum := ptrCast(val.cptr)
-	return *(*int64)((unsafe.Pointer)(&(cnum.val)))
+	return int64(val.ptr.val)
 }
 
 func (val Node) IsNull() bool {
@@ -236,8 +173,7 @@ func (val Node) IsNumber() bool {
 }
 
 func (val Node) F64() float64 {
-	cnum := ptrCast(val.cptr)
-	return *(*float64)((unsafe.Pointer)(&(cnum.val)))
+	return math.Float64frombits(val.ptr.val)
 }
 
 func (val Node) Bool() bool {
@@ -264,16 +200,16 @@ func (val *Node) AsObj() (Object, bool) {
 		return ret, false
 	}
 	return Object{
-		cptr: val.cptr,
+		ptr: val.ptr,
 	}, true
 }
 
 func (val Node) Obj() Object {
-	return Object{cptr: val.cptr}
+	return Object{ptr: val.ptr}
 }
 
 func (val Node) Arr() Array {
-	return Array{cptr: val.cptr}
+	return Array{ptr: val.ptr}
 }
 
 func (val *Node) AsArr() (Array, bool) {
@@ -282,7 +218,7 @@ func (val *Node) AsArr() (Array, bool) {
 		return ret, false
 	}
 	return Array{
-		cptr: val.cptr,
+		ptr: val.ptr,
 	}, true
 }
 
@@ -449,7 +385,7 @@ func (val Node) AsBool() (bool, bool) {
 }
 
 func (val Node) AsStr(ctx *Context) (string, bool) {
-	cnode := ptrCast(val.cptr)
+	cnode := val.ptr
 	t := uint8(cnode.typ)
 	if t == KStringCommon {
 		offset := int(cnode.typ >> PosBits)
@@ -463,7 +399,7 @@ func (val Node) AsStr(ctx *Context) (string, bool) {
 }
 
 func (val Node) AsStrRef(ctx *Context) (string, bool) {
-	cnode := ptrCast(val.cptr)
+	cnode := val.ptr
 	t := uint8(cnode.typ)
 	if t == KStringCommon {
 		offset := int(cnode.typ >> PosBits)
@@ -499,15 +435,14 @@ func (val Node) Number(ctx *Context) json.Number {
 }
 
 func (val Node) Raw(ctx *Context) string {
-	node := ptrCast(val.cptr)
-	len := int(node.val)
+	n := val.ptr
+	length := int(n.val)
 	offset := val.Position()
-	return ctx.Parser.strCommon(offset, len, ctx.Parser.options&(1<<_F_copy_string) != 0)
+	return ctx.Parser.strCommon(offset, length, ctx.Parser.options&(1<<_F_copy_string) != 0)
 }
 
 func (val Node) Position() int {
-	node := ptrCast(val.cptr)
-	return int(node.typ >> PosBits)
+	return int(val.ptr.typ >> PosBits)
 }
 
 func (val Node) AsNumber(ctx *Context) (json.Number, bool) {
@@ -556,15 +491,15 @@ func (val Node) rawSpan(p *Parser) string {
 		pos := val.Position()
 		return p.rawSlice(pos, pos+5)
 	case KStringCommon:
-		node := ptrCast(val.cptr)
-		len := int(node.val)
+		n := val.ptr
+		length := int(n.val)
 		offset := val.Position()
-		return p.rawSlice(offset-1, offset+len+1)
+		return p.rawSlice(offset-1, offset+length+1)
 	case KRawNumber, KRaw:
-		node := ptrCast(val.cptr)
-		len := int(node.val)
+		n := val.ptr
+		length := int(n.val)
 		offset := val.Position()
-		return p.rawSlice(offset, offset+len)
+		return p.rawSlice(offset, offset+length)
 	case KUint, KSint, KReal:
 		start := val.Position()
 		end, ok := SkipNumberFast(p.Json, start)
@@ -589,7 +524,7 @@ func (val Node) rawSpan(p *Parser) string {
 
 func (val Node) containerAsRaw(p *Parser) string {
 	s := p.Json
-	cnode := ptrCast(val.cptr)
+	cnode := val.ptr
 	start := int(cnode.typ >> PosBits)
 	span := int(cnode.val >> ConLenBits)
 	if span <= 0 {
@@ -599,11 +534,11 @@ func (val Node) containerAsRaw(p *Parser) string {
 		}
 		return raw
 	}
-	cur := val.cptr
-	end := cur + uintptr(span)*unsafe.Sizeof(node{})
+	curOff := 0
+	endOff := span
 	depth := 0
-	for cur < end {
-		cn := ptrCast(cur)
+	for curOff < endOff {
+		cn := PtrOffset(cnode, int64(curOff))
 		ctyp := uint8(cn.typ)
 		if ctyp != KObject && ctyp != KArray {
 			break
@@ -615,30 +550,30 @@ func (val Node) containerAsRaw(p *Parser) string {
 			break
 		}
 		if (ctyp == KObject && cspan == 1+2*csize) || (ctyp == KArray && cspan == 1+csize) {
-			cur = end - unsafe.Sizeof(node{})
+			curOff = endOff - 1
 			continue
 		}
-		child := cur + unsafe.Sizeof(node{})
+		childOff := curOff + 1
 		for {
-			vptr := child
+			vOff := childOff
 			if ctyp == KObject {
-				vptr += unsafe.Sizeof(node{})
+				vOff++
 			}
-			vnode := ptrCast(vptr)
-			var next uintptr
+			vnode := PtrOffset(cnode, int64(vOff))
+			var nextOff int
 			if uint8(vnode.typ)-KObject > 1 {
-				next = vptr + unsafe.Sizeof(node{})
+				nextOff = vOff + 1
 			} else {
-				next = vptr + uintptr(vnode.val>>ConLenBits)*unsafe.Sizeof(node{})
+				nextOff = vOff + int(vnode.val>>ConLenBits)
 			}
-			if next >= end {
-				cur = vptr
+			if nextOff >= endOff {
+				curOff = vOff
 				break
 			}
-			child = next
+			childOff = nextOff
 		}
 	}
-	lnode := ptrCast(cur)
+	lnode := PtrOffset(cnode, int64(curOff))
 	ltyp := uint8(lnode.typ)
 	lpos := int(lnode.typ >> PosBits)
 	var pos int
@@ -683,40 +618,33 @@ func (val Node) StringRef(ctx *Context) string {
 	return val.Raw(ctx)
 }
 
-//go:nocheckptr
-func ptrCast(p uintptr) *node {
-	return (*node)(unsafe.Pointer(p))
-}
-
 func (val Node) StringCopyEsc(ctx *Context) string {
-	// check whether there are in padded
-	node := ptrCast(val.cptr)
+	n := val.ptr
 	offset := val.Position()
-	return ctx.Parser.strEscaped(offset, node.val)
+	return ctx.Parser.strEscaped(offset, n.val)
 }
 
 func (val Node) Object() Object {
-	return Object{cptr: val.cptr}
+	return Object{ptr: val.ptr}
 }
 
 func (val Node) Array() Array {
-	return Array{cptr: val.cptr}
+	return Array{ptr: val.ptr}
 }
 
-func (val *Array) Children() uintptr {
-	return PtrOffset(val.cptr, 1)
+func (val *Array) Children() *node {
+	return PtrOffset(val.ptr, 1)
 }
 
-func (val *Object) Children() uintptr {
-	return PtrOffset(val.cptr, 1)
+func (val *Object) Children() *node {
+	return PtrOffset(val.ptr, 1)
 }
 
 func (val *Node) Equal(ctx *Context, lhs string) bool {
-	// check whether escaped
-	cstr := ptrCast(val.cptr)
-	offset := int(val.Position())
-	len := int(cstr.val)
-	return lhs == ctx.Parser.strRefCommon(offset, len)
+	cstr := val.ptr
+	offset := val.Position()
+	length := int(cstr.val)
+	return lhs == ctx.Parser.strRefCommon(offset, length)
 }
 
 func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
@@ -726,22 +654,16 @@ func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
 
 	obj, ok := node.AsObj()
 	if !ok {
-		return newUnmatched(node.Position(), rt.MapEfaceType)
+		return newUnmatched(node.Position(), mapEfaceType)
 	}
 
 	var err, gerr error
 	size := obj.Len()
 
-	var m map[string]interface{}
-	if *(*unsafe.Pointer)(vp) == nil {
-		if ctx.efacePool != nil {
-			p := ctx.efacePool.GetMap(size)
-			m = *(*map[string]interface{})(unsafe.Pointer(&p))
-		} else {
-			m = make(map[string]interface{}, size)
-		}
-	} else {
-		m = *(*map[string]interface{})(vp)
+	dst := (*map[string]interface{})(vp)
+	m := *dst
+	if m == nil {
+		m = make(map[string]interface{}, size)
 	}
 
 	next := obj.Children()
@@ -750,29 +672,28 @@ func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
 		key, _ := knode.AsStr(ctx)
 		val := NewNode(PtrOffset(next, 1))
 		m[key], err = val.AsEface(ctx)
-		next = val.cptr
+		next = val.ptr
 		if gerr == nil && err != nil {
 			gerr = err
 		}
 	}
 
-	*(*map[string]interface{})(vp) = m
+	*dst = m
 	return gerr
 }
 
 func (node *Node) AsMapString(ctx *Context, vp unsafe.Pointer) error {
 	obj, ok := node.AsObj()
 	if !ok {
-		return newUnmatched(node.Position(), rt.MapStringType)
+		return newUnmatched(node.Position(), mapStringType)
 	}
 
 	size := obj.Len()
 
-	var m map[string]string
-	if *(*unsafe.Pointer)(vp) == nil {
+	dst := (*map[string]string)(vp)
+	m := *dst
+	if m == nil {
 		m = make(map[string]string, size)
-	} else {
-		m = *(*map[string]string)(vp)
 	}
 
 	var gerr error
@@ -784,35 +705,42 @@ func (node *Node) AsMapString(ctx *Context, vp unsafe.Pointer) error {
 		m[key], ok = val.AsStr(ctx)
 		if !ok {
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.StringType)
+				gerr = newUnmatched(val.Position(), stringType)
 			}
 			next = val.Next()
 		} else {
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*map[string]string)(vp) = m
+	*dst = m
 	return gerr
 }
 
 func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceEfaceType)
+		return newUnmatched(node.Position(), sliceEfaceType)
 	}
 
 	size := arr.Len()
+	dst := (*[]interface{})(vp)
 	var s []interface{}
-	if size != 0 && ctx.efacePool != nil {
-		slice := rt.GoSlice{
-			Ptr: ctx.efacePool.GetSlice(size),
-			Len: size,
-			Cap: size,
+	if size == 0 {
+		if *dst == nil {
+			s = []interface{}{}
+		} else {
+			s = (*dst)[:0]
 		}
-		*(*rt.GoSlice)(unsafe.Pointer(&s)) = slice
+		*dst = s
+		return nil
+	}
+	if cap(*dst) >= size {
+		s = (*dst)[:size]
+	} else if *dst == nil && ctx.sliceArena != nil {
+		s = ctx.allocEfaceSlice(size)
 	} else {
-		s = *(*[]interface{})((unsafe.Pointer)(rt.MakeSlice(vp, rt.AnyType, size)))
+		s = prepareSlice(dst, size)
 	}
 
 	*node = NewNode(arr.Children())
@@ -825,18 +753,19 @@ func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 		}
 	}
 
-	*(*[]interface{})(vp) = s
+	*dst = s
 	return nil
 }
 
 func (node *Node) AsSliceI32(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceI32Type)
+		return newUnmatched(node.Position(), sliceI32Type)
 	}
 
 	size := arr.Len()
-	s := *(*[]int32)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Int32Type, size)))
+	dst := (*[]int32)(vp)
+	s := prepareSlice(dst, size)
 	next := arr.Children()
 
 	var gerr error
@@ -845,27 +774,28 @@ func (node *Node) AsSliceI32(ctx *Context, vp unsafe.Pointer) error {
 		ret, ok := val.AsI64(ctx)
 		if !ok || ret > math.MaxInt32 || ret < math.MinInt32 {
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Int32Type)
+				gerr = newUnmatched(val.Position(), int32Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = int32(ret)
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]int32)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceI64(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceI64Type)
+		return newUnmatched(node.Position(), sliceI64Type)
 	}
 
 	size := arr.Len()
-	s := *(*[]int64)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Int64Type, size)))
+	dst := (*[]int64)(vp)
+	s := prepareSlice(dst, size)
 	next := arr.Children()
 
 	var gerr error
@@ -875,28 +805,29 @@ func (node *Node) AsSliceI64(ctx *Context, vp unsafe.Pointer) error {
 		ret, ok := val.AsI64(ctx)
 		if !ok {
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Int64Type)
+				gerr = newUnmatched(val.Position(), int64Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]int64)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceU32(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceU32Type)
+		return newUnmatched(node.Position(), sliceU32Type)
 	}
 
 	size := arr.Len()
 	next := arr.Children()
-	s := *(*[]uint32)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Uint32Type, size)))
+	dst := (*[]uint32)(vp)
+	s := prepareSlice(dst, size)
 
 	var gerr error
 	for i := 0; i < size; i++ {
@@ -904,57 +835,59 @@ func (node *Node) AsSliceU32(ctx *Context, vp unsafe.Pointer) error {
 		ret, ok := val.AsU64(ctx)
 		if !ok || ret > math.MaxUint32 {
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Uint32Type)
+				gerr = newUnmatched(val.Position(), uint32Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = uint32(ret)
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]uint32)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceU64(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceU64Type)
+		return newUnmatched(node.Position(), sliceU64Type)
 	}
 
 	size := arr.Len()
 	next := arr.Children()
 
-	s := *(*[]uint64)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Uint64Type, size)))
+	dst := (*[]uint64)(vp)
+	s := prepareSlice(dst, size)
 	var gerr error
 	for i := 0; i < size; i++ {
 		val := NewNode(next)
 		ret, ok := val.AsU64(ctx)
 		if !ok {
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Uint64Type)
+				gerr = newUnmatched(val.Position(), uint64Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]uint64)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceString(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceStringType)
+		return newUnmatched(node.Position(), sliceStringType)
 	}
 
 	size := arr.Len()
 	next := arr.Children()
-	s := *(*[]string)((unsafe.Pointer)(rt.MakeSlice(vp, rt.StringType, size)))
+	dst := (*[]string)(vp)
+	s := prepareSlice(dst, size)
 
 	var gerr error
 	for i := 0; i < size; i++ {
@@ -962,16 +895,16 @@ func (node *Node) AsSliceString(ctx *Context, vp unsafe.Pointer) error {
 		ret, ok := val.AsStr(ctx)
 		if !ok {
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.StringType)
+				gerr = newUnmatched(val.Position(), stringType)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]string)(vp) = s
+	*dst = s
 	return gerr
 }
 
@@ -979,9 +912,9 @@ func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
 	var origin []byte
 	switch val.Type() {
 	case KStringEscaped:
-		node := ptrCast(val.cptr)
+		n := val.ptr
 		offset := val.Position()
-		origin = ctx.Parser.bytesEscaped(offset, node.val)
+		origin = ctx.Parser.bytesEscaped(offset, n.val)
 	case KStringCommon:
 		origin = rt.Str2Mem(val.StringRef(ctx))
 	case KArray:
@@ -994,363 +927,28 @@ func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
 		for i := 0; i < size; i++ {
 			a[i], ok = elem.AsByte(ctx)
 			if !ok && gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.BytesType)
+				gerr = newUnmatched(val.Position(), bytesType)
 			}
-			elem = NewNode(PtrOffset(elem.cptr, 1))
+			elem = NewNode(PtrOffset(elem.ptr, 1))
 		}
 		return a, gerr
 	default:
-		return nil, newUnmatched(val.Position(), rt.BytesType)
+		return nil, newUnmatched(val.Position(), bytesType)
 	}
 
 	b64, err := rt.DecodeBase64(origin)
 	if err != nil {
-		return nil, newUnmatched(val.Position(), rt.BytesType)
+		return nil, newUnmatched(val.Position(), bytesType)
 	}
 	return b64, nil
 }
 
 // AsEface will always ok, because we have parse in native.
 func (node *Node) AsEface(ctx *Context) (interface{}, error) {
-	if ctx.efacePool != nil {
-		iter := NewNodeIter(*node)
-		v := AsEfaceFast(&iter, ctx)
-		*node = iter.Peek()
-		return v, nil
-	}
-	if ctx.Parser != nil && ctx.Parser.isEface && (ctx.Parser.options&(1<<_F_use_int64)) == 0 && node.cptr == ctx.Root().cptr {
-		useNumber := (ctx.Parser.options & (1 << _F_use_number)) != 0
-		ctx.efacePool = newEfacePool(&ctx.Parser.nbuf.stat, useNumber)
-		if len(ctx.Stack.stack) <= int(ctx.Parser.nbuf.stat.max_depth)+1 {
-			ctx.Stack = newStack(int(ctx.Parser.nbuf.stat.max_depth))
-		}
-		iter := NewNodeIter(*node)
-		v := AsEfaceFast(&iter, ctx)
-		*node = iter.Peek()
-		ctx.efacePool = nil
-		return v, nil
+	if ctx.Parser != nil && ctx.Parser.isEface && (ctx.Parser.options&(1<<_F_use_int64)) == 0 && node.ptr == ctx.Root().ptr && ctx.sliceArena == nil {
+		ctx.initSliceArena()
 	}
 	return node.AsEfaceFallback(ctx)
-}
-
-func parseSingleNode(node Node, ctx *Context) interface{} {
-	var v interface{}
-	switch node.Type() {
-	case KObject:
-		v = map[string]interface{}{}
-	case KArray:
-		v = []interface{}{}
-	case KStringCommon:
-		v = node.StringRef(ctx)
-	case KStringEscaped:
-		v = node.StringCopyEsc(ctx)
-	case KTrue:
-		v = true
-	case KFalse:
-		v = false
-	case KNull:
-		v = nil
-	case KUint:
-		v = float64(node.U64())
-	case KSint:
-		v = float64(node.I64())
-	case KReal:
-		v = float64(node.F64())
-	case KRawNumber:
-		v = node.Number(ctx)
-	default:
-		panic("unreachable for as eface")
-	}
-	return v
-}
-
-func castU64(val float64) uint64 {
-	return *((*uint64)(unsafe.Pointer((&val))))
-}
-
-func AsEfaceFast(iter *NodeIter, ctx *Context) interface{} {
-	var mp, sp, parent unsafe.Pointer // current container pointer
-	var node Node
-	var size int
-	var isObj bool
-	var slice rt.GoSlice
-	var val unsafe.Pointer
-	var vt **rt.GoType
-	var vp *unsafe.Pointer
-	var rootM unsafe.Pointer
-	var rootS rt.GoSlice
-	var root interface{}
-	var key string
-
-	node = iter.Next()
-
-	switch node.Type() {
-	case KObject:
-		size = node.Object().Len()
-		if size != 0 {
-			ctx.Stack.Push(nil, 0, true)
-			mp = ctx.efacePool.GetMap(size)
-			rootM = mp
-			isObj = true
-			goto _object_key
-		} else {
-			return rt.GoEface{
-				Type:  rt.MapEfaceType,
-				Value: ctx.efacePool.GetMap(0),
-			}.Pack()
-		}
-	case KArray:
-		size = node.Array().Len()
-		if size != 0 {
-			ctx.Stack.Push(nil, 0, false)
-			sp = ctx.efacePool.GetSlice(size)
-			slice = rt.GoSlice{
-				Ptr: sp,
-				Len: size,
-				Cap: size,
-			}
-			rootS = slice
-			isObj = false
-			val = sp
-			goto _arr_val
-		} else {
-			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, unsafe.Pointer(&root))
-		}
-	case KStringCommon:
-		s, _ := node.AsStr(ctx)
-		ctx.efacePool.ConvTstring(s, unsafe.Pointer(&root))
-	case KStringEscaped:
-		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), unsafe.Pointer(&root))
-	case KTrue:
-		root = true
-	case KFalse:
-		root = false
-	case KNull:
-		root = nil
-	case KUint:
-		ctx.efacePool.ConvF64(float64(node.U64()), unsafe.Pointer(&root))
-	case KSint:
-		ctx.efacePool.ConvF64(float64(node.I64()), unsafe.Pointer(&root))
-	case KReal:
-		ctx.efacePool.ConvF64(node.F64(), unsafe.Pointer(&root))
-	case KRawNumber:
-		ctx.efacePool.ConvTnum(node.Number(ctx), unsafe.Pointer(&root))
-	default:
-		panic("unreachable for as eface")
-	}
-	return root
-
-_object_key:
-	node = iter.Next()
-	key, _ = node.AsStr(ctx)
-
-	// interface{} slot in map bucket
-	val = rt.Mapassign_faststr(rt.MapEfaceMapType, mp, key)
-	vt = &(*rt.GoEface)(val).Type
-	vp = &(*rt.GoEface)(val).Value
-
-	// parse value node
-	node = iter.Next()
-	switch node.Type() {
-	case KObject:
-		newSize := node.Object().Len()
-		newMp := ctx.efacePool.GetMap(newSize)
-		*vt = rt.MapEfaceType
-		*vp = newMp
-		remain := size - 1
-		isObj = true
-		if newSize != 0 {
-			if remain > 0 {
-				ctx.Stack.Push(mp, remain, true)
-			}
-			mp = newMp
-			size = newSize
-			goto _object_key
-		}
-	case KArray:
-		newSize := node.Array().Len()
-		if newSize == 0 {
-			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, val)
-			break
-		}
-
-		newSp := ctx.efacePool.GetSlice(newSize)
-		// pack to []interface{}
-		ctx.efacePool.ConvTSlice(rt.GoSlice{
-			Ptr: newSp,
-			Len: newSize,
-			Cap: newSize,
-		}, rt.SliceEfaceType, val)
-		remain := size - 1
-		if remain > 0 {
-			ctx.Stack.Push(mp, remain, true)
-		}
-		val = newSp
-		isObj = false
-		size = newSize
-		goto _arr_val
-	case KStringCommon:
-		s, _ := node.AsStr(ctx)
-		ctx.efacePool.ConvTstring(s, val)
-	case KStringEscaped:
-		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), val)
-	case KTrue:
-		rt.ConvTBool(true, (*interface{})(val))
-	case KFalse:
-		rt.ConvTBool(false, (*interface{})(val))
-	case KNull:
-		// Write nil explicitly. A fresh slot is already zero, but for a
-		// duplicate key mapassign returns the *existing* slot, which still
-		// holds the previous value; falling through would wrongly keep it
-		// instead of overwriting it with null like encoding/json does.
-		*(*any)(val) = nil
-	case KUint:
-		ctx.efacePool.ConvF64(float64(node.U64()), val)
-	case KSint:
-		ctx.efacePool.ConvF64(float64(node.I64()), val)
-	case KReal:
-		ctx.efacePool.ConvF64(node.F64(), val)
-	case KRawNumber:
-		ctx.efacePool.ConvTnum(node.Number(ctx), val)
-	default:
-		panic("unreachable for as eface")
-	}
-
-	// check size
-	size -= 1
-	if size != 0 {
-		goto _object_key
-	}
-
-	parent, size, isObj = ctx.Stack.Pop()
-
-	// parent is empty
-	if parent == nil {
-		if isObj {
-			return rt.GoEface{
-				Type:  rt.MapEfaceType,
-				Value: rootM,
-			}.Pack()
-		} else {
-			ctx.efacePool.ConvTSlice(rootS, rt.SliceEfaceType, (unsafe.Pointer)(&root))
-			return root
-		}
-	}
-
-	// continue to parse parent
-	if isObj {
-		mp = parent
-		goto _object_key
-	} else {
-		val = rt.PtrAdd(parent, rt.AnyType.Size)
-		goto _arr_val
-	}
-
-_arr_val:
-	// interface{} slot in slice
-	vt = &(*rt.GoEface)(val).Type
-	vp = &(*rt.GoEface)(val).Value
-
-	// parse value node
-	node = iter.Next()
-	switch node.Type() {
-	case KObject:
-		newSize := node.Object().Len()
-		newMp := ctx.efacePool.GetMap(newSize)
-		*vt = rt.MapEfaceType
-		*vp = newMp
-		remain := size - 1
-		if newSize != 0 {
-			// push next array elem into stack
-			if remain > 0 {
-				ctx.Stack.Push(val, remain, false)
-			}
-			mp = newMp
-			size = newSize
-			isObj = true
-			goto _object_key
-		}
-	case KArray:
-		newSize := node.Array().Len()
-		if newSize == 0 {
-			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, val)
-			break
-		}
-
-		newSp := ctx.efacePool.GetSlice(newSize)
-		// pack to []interface{}
-		ctx.efacePool.ConvTSlice(rt.GoSlice{
-			Ptr: newSp,
-			Len: newSize,
-			Cap: newSize,
-		}, rt.SliceEfaceType, val)
-
-		remain := size - 1
-		if remain > 0 {
-			ctx.Stack.Push(val, remain, false)
-		}
-
-		val = newSp
-		isObj = false
-		size = newSize
-		goto _arr_val
-	case KStringCommon:
-		s, _ := node.AsStr(ctx)
-		ctx.efacePool.ConvTstring(s, val)
-	case KStringEscaped:
-		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), val)
-	case KTrue:
-		rt.ConvTBool(true, (*interface{})(val))
-	case KFalse:
-		rt.ConvTBool(false, (*interface{})(val))
-	case KNull:
-		// Write nil explicitly. A fresh slot is already zero, but for a
-		// duplicate key mapassign returns the *existing* slot, which still
-		// holds the previous value; falling through would wrongly keep it
-		// instead of overwriting it with null like encoding/json does.
-		*(*any)(val) = nil
-	case KUint:
-		ctx.efacePool.ConvF64(float64(node.U64()), val)
-	case KSint:
-		ctx.efacePool.ConvF64(float64(node.I64()), val)
-	case KReal:
-		ctx.efacePool.ConvF64(node.F64(), val)
-	case KRawNumber:
-		ctx.efacePool.ConvTnum(node.Number(ctx), val)
-	default:
-		panic("unreachable for as eface")
-	}
-
-	// check size
-	size -= 1
-	if size != 0 {
-		val = rt.PtrAdd(val, rt.AnyType.Size)
-		goto _arr_val
-	}
-
-	parent, size, isObj = ctx.Stack.Pop()
-
-	// parent is empty
-	if parent == nil {
-		if isObj {
-			return rt.GoEface{
-				Type:  rt.MapEfaceType,
-				Value: rootM,
-			}.Pack()
-		} else {
-			ctx.efacePool.ConvTSlice(rootS, rt.SliceEfaceType, unsafe.Pointer(&root))
-			return root
-		}
-	}
-
-	// continue to parse parent
-	if isObj {
-		mp = parent
-		goto _object_key
-	} else {
-		val = rt.PtrAdd(parent, rt.AnyType.Size)
-		goto _arr_val
-	}
 }
 
 func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
@@ -1367,128 +965,135 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 		cur := obj.Children()
 		var gerr, err error
 		for i := 0; i < size; i++ {
-			knode := ptrCast(cur)
+			knode := cur
 			var key string
 			if uint8(knode.typ) == KStringCommon {
 				key = p.strCommon(int(knode.typ>>PosBits), int(knode.val), copyStr)
 			} else {
 				key = p.strEscaped(int(knode.typ>>PosBits), knode.val)
 			}
-			vptr := cur + unsafe.Sizeof(struct{ typ, val uint64 }{})
+			vptr := PtrOffset(cur, 1)
 			if !numSpecial {
-				vnode := ptrCast(vptr)
+				vnode := vptr
 				switch uint8(vnode.typ) {
 				case KNull:
 					m[key] = nil
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KTrue:
 					m[key] = true
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KFalse:
 					m[key] = false
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KStringCommon:
 					m[key] = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KStringEscaped:
 					m[key] = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KUint:
 					m[key] = float64(vnode.val)
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KSint:
 					m[key] = float64(int64(vnode.val))
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(vptr, 1)
 					continue
 				case KReal:
-					m[key] = *(*float64)(unsafe.Pointer(&vnode.val))
-					cur = vptr + unsafe.Sizeof(struct{ typ, val uint64 }{})
+					m[key] = math.Float64frombits(vnode.val)
+					cur = PtrOffset(vptr, 1)
 					continue
 				}
 			}
-			*node = Node{cptr: vptr}
+			*node = Node{ptr: vptr}
 			m[key], err = node.AsEfaceFallback(ctx)
-			cur = node.cptr
+			cur = node.ptr
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
-		*node = Node{cptr: cur}
+		*node = Node{ptr: cur}
 		return m, gerr
 	case KArray:
 		arr := node.Array()
 		size := arr.Len()
-		a := make([]interface{}, size)
+		var a []interface{}
+		if ctx.sliceArena != nil {
+			a = ctx.allocEfaceSlice(size)
+		} else if size == 0 {
+			a = []interface{}{}
+		} else {
+			a = make([]interface{}, size)
+		}
 		cur := arr.Children()
 		var gerr, err error
 		for i := 0; i < size; i++ {
 			if !numSpecial {
-				vnode := ptrCast(cur)
+				vnode := cur
 				switch uint8(vnode.typ) {
 				case KNull:
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KTrue:
 					a[i] = true
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KFalse:
 					a[i] = false
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KStringCommon:
 					a[i] = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KStringEscaped:
 					a[i] = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KUint:
 					a[i] = float64(vnode.val)
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KSint:
 					a[i] = float64(int64(vnode.val))
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					cur = PtrOffset(cur, 1)
 					continue
 				case KReal:
-					a[i] = *(*float64)(unsafe.Pointer(&vnode.val))
-					cur += unsafe.Sizeof(struct{ typ, val uint64 }{})
+					a[i] = math.Float64frombits(vnode.val)
+					cur = PtrOffset(cur, 1)
 					continue
 				}
 			}
-			*node = Node{cptr: cur}
+			*node = Node{ptr: cur}
 			a[i], err = node.AsEfaceFallback(ctx)
-			cur = node.cptr
+			cur = node.ptr
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
-		*node = Node{cptr: cur}
+		*node = Node{ptr: cur}
 		return a, gerr
 	case KStringCommon:
 		str, _ := node.AsStr(ctx)
-		*node = NewNode(PtrOffset(node.cptr, 1))
+		*node = NewNode(PtrOffset(node.ptr, 1))
 		return str, nil
 	case KStringEscaped:
 		str := node.StringCopyEsc(ctx)
-		*node = NewNode(PtrOffset(node.cptr, 1))
+		*node = NewNode(PtrOffset(node.ptr, 1))
 		return str, nil
 	case KTrue:
-		*node = NewNode(PtrOffset(node.cptr, 1))
+		*node = NewNode(PtrOffset(node.ptr, 1))
 		return true, nil
 	case KFalse:
-		*node = NewNode(PtrOffset(node.cptr, 1))
+		*node = NewNode(PtrOffset(node.ptr, 1))
 		return false, nil
 	case KNull:
-		*node = NewNode(PtrOffset(node.cptr, 1))
+		*node = NewNode(PtrOffset(node.ptr, 1))
 		return nil, nil
 	default:
 		// use float64
@@ -1497,37 +1102,37 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 			if !ok {
 				// skip the unmatched type
 				*node = NewNode(node.Next())
-				return nil, newUnmatched(node.Position(), rt.JsonNumberType)
+				return nil, newUnmatched(node.Position(), jsonNumberType)
 			} else {
-				*node = NewNode(PtrOffset(node.cptr, 1))
+				*node = NewNode(PtrOffset(node.ptr, 1))
 				return num, nil
 			}
 		} else if ctx.Parser.options&(1<<_F_use_int64) != 0 {
 			// first try int64
 			i, ok := node.AsI64(ctx)
 			if ok {
-				*node = NewNode(PtrOffset(node.cptr, 1))
+				*node = NewNode(PtrOffset(node.ptr, 1))
 				return i, nil
 			}
 
 			// is not integer, then use float64
 			f, ok := node.AsF64(ctx)
 			if ok {
-				*node = NewNode(PtrOffset(node.cptr, 1))
+				*node = NewNode(PtrOffset(node.ptr, 1))
 				return f, nil
 			}
 
 			// skip the unmatched type
 			*node = NewNode(node.Next())
-			return nil, newUnmatched(node.Position(), rt.Int64Type)
+			return nil, newUnmatched(node.Position(), int64Type)
 		} else {
 			num, ok := node.AsF64(ctx)
 			if !ok {
 				// skip the unmatched type
 				*node = NewNode(node.Next())
-				return nil, newUnmatched(node.Position(), rt.Float64Type)
+				return nil, newUnmatched(node.Position(), float64Type)
 			} else {
-				*node = NewNode(PtrOffset(node.cptr, 1))
+				*node = NewNode(PtrOffset(node.ptr, 1))
 				return num, nil
 			}
 		}
@@ -1535,6 +1140,6 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 }
 
 //go:nosplit
-func PtrOffset(ptr uintptr, off int64) uintptr {
-	return uintptr(int64(ptr) + off*int64(unsafe.Sizeof(node{})))
+func PtrOffset(ptr *node, off int64) *node {
+	return (*node)(unsafe.Add(unsafe.Pointer(ptr), uintptr(off)*unsafe.Sizeof(node{})))
 }

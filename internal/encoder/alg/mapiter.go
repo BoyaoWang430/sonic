@@ -27,30 +27,33 @@ import (
 )
 
 type _MapPair struct {
-	k string // when the map key is integer, k is pointed to m
+	k string
 	v unsafe.Pointer
 	m [32]byte
 }
 
+type MapIterState struct {
+	K unsafe.Pointer
+	V unsafe.Pointer
+}
+
 type MapIterator struct {
-	It rt.GoMapIterator // must be the first field
+	It      MapIterState
+	ki      int
+	kvs     []_MapPair
+	anyVals []any
+	vals    reflect.Value
+	iter    reflect.MapIter
+	keySlot reflect.Value
+	valSlot [2]reflect.Value
+	slotIdx uint8
+	sorted  bool
 	platformMapOrder
-	kv     rt.GoSlice // slice of _MapPair
-	ki     int
-	values []any
 }
 
 var (
-	iteratorPool     = sync.Pool{}
-	iteratorPair     = rt.UnpackType(reflect.TypeOf(_MapPair{}))
-	stringAnyMapType = rt.MapType(rt.UnpackType(vars.StringAnyMapType))
+	iteratorPool = sync.Pool{}
 )
-
-func init() {
-	if unsafe.Offsetof(MapIterator{}.It) != 0 {
-		panic("_MapIterator.it is not the first field")
-	}
-}
 
 func newIterator() *MapIterator {
 	if v := iteratorPool.Get(); v == nil {
@@ -61,240 +64,282 @@ func newIterator() *MapIterator {
 }
 
 func resetIterator(p *MapIterator) *MapIterator {
+	p.It = MapIterState{}
 	p.ki = 0
-	p.It = rt.GoMapIterator{}
-	p.kv.Len = 0
+	p.slotIdx = 0
+	p.sorted = false
+	p.iter.Reset(reflect.Value{})
+	p.keySlot = reflect.Value{}
+	p.valSlot[0] = reflect.Value{}
+	p.valSlot[1] = reflect.Value{}
+	p.vals = reflect.Value{}
+	for i := range p.anyVals {
+		p.anyVals[i] = nil
+	}
+	p.anyVals = p.anyVals[:0]
+	for i := range p.kvs {
+		p.kvs[i].k = ""
+		p.kvs[i].v = nil
+	}
+	p.kvs = p.kvs[:0]
 	return p
 }
 
 func (self *MapIterator) at(i int) *_MapPair {
-	return (*_MapPair)(unsafe.Add(self.kv.Ptr, uintptr(i)*unsafe.Sizeof(_MapPair{})))
+	return &self.kvs[i]
 }
 
-func (self *MapIterator) add() (p *_MapPair) {
-	p = self.at(self.kv.Len)
-	self.kv.Len++
-	return
+func (self *MapIterator) data() []_MapPair {
+	return self.kvs
 }
 
-func (self *MapIterator) data() (p []_MapPair) {
-	*(*rt.GoSlice)(unsafe.Pointer(&p)) = self.kv
-	return
+func ensurePairs(kvs []_MapPair, n int) []_MapPair {
+	if cap(kvs) < n {
+		return make([]_MapPair, n)
+	}
+	return kvs[:n]
 }
 
-func (self *MapIterator) append(t *rt.GoType, k unsafe.Pointer, v unsafe.Pointer) (err error) {
-	p := self.add()
-	p.v = v
-	tk := t.Kind()
+func ensureAnyVals(vals []any, n int) []any {
+	if cap(vals) < n {
+		return make([]any, n)
+	}
+	return vals[:n]
+}
 
-	// followed as `encoding/json/emcode.go:resolveKeyName
-	if tk == reflect.String {
-		p.k = *(*string)(k)
+func appendKey(p *_MapPair, kt reflect.Type, keySlot reflect.Value) error {
+	kind := kt.Kind()
+	if kind == reflect.String {
+		p.k = keySlot.String()
 		return nil
 	}
-
-	// check if the key implements the encoding.TextMarshaler interface
-	if t.Pack().Implements(vars.EncodingTextMarshalerType) {
-		if tk != reflect.Interface {
-			return self.appendConcrete(p, t, k)
-		} else {
-			return self.appendInterface(p, t, k)
+	if kt.Implements(vars.EncodingTextMarshalerType) {
+		if (kind == reflect.Ptr || kind == reflect.Interface) && keySlot.IsNil() {
+			p.k = ""
+			return nil
 		}
+		out, err := keySlot.Interface().(encoding.TextMarshaler).MarshalText()
+		if err != nil {
+			return err
+		}
+		p.k = rt.Mem2Str(out)
+		return nil
 	}
-
-	return self.appendGeneric(p, t, tk, k)
-}
-
-func (self *MapIterator) appendGeneric(p *_MapPair, t *rt.GoType, v reflect.Kind, k unsafe.Pointer) error {
-	switch v {
-	case reflect.Int:
-		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int)(k))))
+	switch kind {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		p.k = rt.Mem2Str(I64toa(p.m[:0], keySlot.Int()))
 		return nil
-	case reflect.Int8:
-		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int8)(k))))
-		return nil
-	case reflect.Int16:
-		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int16)(k))))
-		return nil
-	case reflect.Int32:
-		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int32)(k))))
-		return nil
-	case reflect.Int64:
-		p.k = rt.Mem2Str(I64toa(p.m[:0], int64(*(*int64)(k))))
-		return nil
-	case reflect.Uint:
-		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint)(k))))
-		return nil
-	case reflect.Uint8:
-		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint8)(k))))
-		return nil
-	case reflect.Uint16:
-		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint16)(k))))
-		return nil
-	case reflect.Uint32:
-		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint32)(k))))
-		return nil
-	case reflect.Uint64:
-		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uint64)(k))))
-		return nil
-	case reflect.Uintptr:
-		p.k = rt.Mem2Str(U64toa(p.m[:0], uint64(*(*uintptr)(k))))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		p.k = rt.Mem2Str(U64toa(p.m[:0], keySlot.Uint()))
 		return nil
 	case reflect.Bool:
-		if *(*bool)(k) {
+		if keySlot.Bool() {
 			p.k = "true"
 		} else {
 			p.k = "false"
 		}
 		return nil
+	case reflect.Interface:
+		if keySlot.IsNil() {
+			panic("map key is nil")
+		}
+		elem := keySlot.Elem()
+		return appendKey(p, elem.Type(), elem)
 	default:
-		return vars.Error_type(t.Pack())
+		return vars.Error_type(kt)
 	}
 }
 
-func (self *MapIterator) appendConcrete(p *_MapPair, t *rt.GoType, k unsafe.Pointer) error {
-	// compiler has already checked that the type implements the encoding.MarshalText interface
-	if !t.Indirect() {
-		k = *(*unsafe.Pointer)(k)
-	}
-
-	// check the TextMarshaler interface
-	eface := rt.GoEface{Value: k, Type: t}.Pack()
-	e, ok := eface.(encoding.TextMarshaler)
-	if !ok {
-		return vars.Error_type(t.Pack())
-	}
-
-	// check for nil pointer
-	if t.Kind() == reflect.Ptr && k == nil {
-		p.k = ""
-		return nil
-	}
-
-	out, err := e.MarshalText()
-	if err != nil {
-		return err
-	}
-	p.k = rt.Mem2Str(out)
-	return nil
+// IteratorStartStringAnySorted initializes a sorted MapIterator directly from a map[string]any value without taking its address.
+func IteratorStartStringAnySorted(m map[string]any) (*MapIterator, error) {
+	return startStringAnyMapSorted(m)
 }
 
-func (self *MapIterator) appendInterface(p *_MapPair, t *rt.GoType, k unsafe.Pointer) (err error) {
-	if len(rt.IfaceType(t).Methods) == 0 {
-		panic("unexpected map key type")
-	}
-	p.k, err = asText(k)
-	return
-}
-
-func IteratorStop(p *MapIterator) {
-	if len(p.values) != 0 {
-		for i := range p.values {
-			p.values[i] = nil
-			pair := p.at(i)
-			pair.k = ""
-			pair.v = nil
-		}
-		p.values = p.values[:0]
-		p.It = rt.GoMapIterator{}
-	}
-	iteratorPool.Put(p)
-}
-
-func IteratorNext(p *MapIterator) {
-	i := p.ki
-	t := &p.It
-
-	/* check for unordered iteration */
-	if i < 0 {
-		rt.Mapiternext(t)
-		return
-	}
-
-	/* check for end of iteration */
-	if p.ki >= p.kv.Len {
-		t.K = nil
-		t.V = nil
-		return
-	}
-
-	/* update the key-value pair, and increase the pointer */
-	pair := p.orderedMapPair(p.ki)
-	t.K = unsafe.Pointer(&pair.k)
-	t.V = pair.v
-	p.ki++
-}
-
-func IteratorStart(t *rt.GoMapType, m unsafe.Pointer, fv uint64) (*MapIterator, error) {
+func startStringAnyMapSorted(m map[string]any) (*MapIterator, error) {
 	it := newIterator()
-	if t == stringAnyMapType && fv&(1<<BitSortMapKeys) != 0 {
-		value := (rt.GoEface{Type: &t.GoType, Value: m}).Pack().(map[string]any)
-		it.startStringAnyMap(value)
+	n := len(m)
+	if n == 0 {
 		return it, nil
 	}
-	rt.Mapiterinit(t, m, &it.It)
-	count := rt.Maplen(m)
-
-	/* check for key-sorting, empty map don't need sorting */
-	if count == 0 || (fv&(1<<BitSortMapKeys)) == 0 {
-		it.ki = -1
-		return it, nil
-	}
-
-	/* pre-allocate space if needed */
-	if count > it.kv.Cap {
-		it.kv = rt.GrowSlice(iteratorPair, it.kv, count)
-	}
-
-	/* dump all the key-value pairs */
-	for ; it.It.K != nil; rt.Mapiternext(&it.It) {
-		if err := it.append(t.Key, it.It.K, it.It.V); err != nil {
-			IteratorStop(it)
-			return nil, err
+	it.kvs = ensurePairs(it.kvs, n)
+	it.anyVals = ensureAnyVals(it.anyVals, n)
+	i := 0
+	for k, v := range m {
+		if i >= len(it.kvs) {
+			it.kvs = append(it.kvs, _MapPair{})
+			it.anyVals = append(it.anyVals, nil)
+			// Rebind v pointers if anyVals reallocated.
+			for j := 0; j < i; j++ {
+				it.kvs[j].v = unsafe.Pointer(&it.anyVals[j])
+			}
 		}
+		it.anyVals[i] = v
+		it.kvs[i].k = k
+		it.kvs[i].v = unsafe.Pointer(&it.anyVals[i])
+		i++
 	}
-
-	/* prepare the sorted key order */
-	it.ki = 1
+	it.kvs = it.kvs[:i]
+	it.anyVals = it.anyVals[:i]
+	if i == 0 {
+		return it, nil
+	}
+	it.sorted = true
 	it.sortMapPairs()
-
-	/* load the first pair into iterator */
 	pair := it.orderedMapPair(0)
-	it.It.V = pair.v
+	it.ki = 1
 	it.It.K = unsafe.Pointer(&pair.k)
+	it.It.V = pair.v
 	return it, nil
 }
 
-func (p *MapIterator) startStringAnyMap(m map[string]any) {
-	n := len(m)
-	if n == 0 {
-		return
+// IteratorStart initializes a MapIterator from a pointer `mp` to a map variable of type `vt`.
+func IteratorStart(vt reflect.Type, mp unsafe.Pointer, fv uint64) (*MapIterator, error) {
+	if mp == nil || *(*unsafe.Pointer)(mp) == nil {
+		return newIterator(), nil
 	}
-	if n > p.kv.Cap {
-		p.kv = rt.GrowSlice(iteratorPair, p.kv, n)
+	if vt == vars.StringAnyMapType && (fv&(1<<BitSortMapKeys)) != 0 {
+		return startStringAnyMapSorted(*(*map[string]any)(mp))
 	}
-	if n > cap(p.values) {
-		p.values = make([]any, n)
-	} else {
-		p.values = p.values[:n]
-	}
-	// Keep value snapshots in typed storage while pairs are sorted.
-	for key, value := range m {
-		i := p.kv.Len
-		p.values[i] = value
-		pair := p.add()
-		pair.k = key
-		pair.v = unsafe.Pointer(&p.values[i])
-	}
-	p.sortMapPairs()
-	p.ki = 0
-	IteratorNext(p)
+	return IteratorStartValue(reflect.NewAt(vt, mp).Elem(), fv)
 }
 
-func asText(v unsafe.Pointer) (string, error) {
-	text := rt.AssertI2I(rt.UnpackType(vars.EncodingTextMarshalerType), *(*rt.GoIface)(v))
-	r, e := (*(*encoding.TextMarshaler)(unsafe.Pointer(&text))).MarshalText()
-	return rt.Mem2Str(r), e
+// IteratorStartValue initializes a MapIterator from a reflect.Value of Kind Map.
+func IteratorStartValue(mapVal reflect.Value, fv uint64) (*MapIterator, error) {
+	if !mapVal.IsValid() || mapVal.IsNil() {
+		return newIterator(), nil
+	}
+	vt := mapVal.Type()
+	if vt == vars.StringAnyMapType && (fv&(1<<BitSortMapKeys)) != 0 {
+		return startStringAnyMapSorted(mapVal.Interface().(map[string]any))
+	}
+
+	it := newIterator()
+	if (fv & (1 << BitSortMapKeys)) == 0 {
+		it.iter.Reset(mapVal)
+		if !it.iter.Next() {
+			it.iter.Reset(reflect.Value{})
+			return it, nil
+		}
+		kt := vt.Key()
+		et := vt.Elem()
+		it.keySlot = reflect.New(kt).Elem()
+		it.valSlot[0] = reflect.New(et).Elem()
+		it.valSlot[1] = reflect.New(et).Elem()
+		it.slotIdx = 0
+		it.sorted = false
+		it.keySlot.SetIterKey(&it.iter)
+		it.valSlot[0].SetIterValue(&it.iter)
+		it.It.K = it.keySlot.Addr().UnsafePointer()
+		it.It.V = it.valSlot[0].Addr().UnsafePointer()
+		return it, nil
+	}
+
+	count := mapVal.Len()
+	if count == 0 {
+		return it, nil
+	}
+	it.iter.Reset(mapVal)
+	kt := vt.Key()
+	et := vt.Elem()
+	keySlot := reflect.New(kt).Elem()
+	it.kvs = ensurePairs(it.kvs, count)
+
+	useAnyVals := et.Kind() == reflect.Interface && et.NumMethod() == 0
+	if useAnyVals {
+		it.anyVals = ensureAnyVals(it.anyVals, count)
+	} else {
+		it.vals = reflect.MakeSlice(reflect.SliceOf(et), count, count)
+	}
+
+	i := 0
+	for it.iter.Next() {
+		if i >= len(it.kvs) {
+			newCap := len(it.kvs) * 2
+			if newCap < i+1 {
+				newCap = i + 1
+			}
+			newKvs := make([]_MapPair, i+1, newCap)
+			copy(newKvs, it.kvs)
+			it.kvs = newKvs
+			if useAnyVals {
+				newAny := make([]any, i+1, newCap)
+				copy(newAny, it.anyVals)
+				it.anyVals = newAny
+				for j := 0; j < i; j++ {
+					it.kvs[j].v = unsafe.Pointer(&it.anyVals[j])
+				}
+			} else {
+				newVals := reflect.MakeSlice(reflect.SliceOf(et), i+1, newCap)
+				reflect.Copy(newVals, it.vals)
+				it.vals = newVals
+				for j := 0; j < i; j++ {
+					it.kvs[j].v = it.vals.Index(j).Addr().UnsafePointer()
+				}
+			}
+		}
+		keySlot.SetIterKey(&it.iter)
+		if err := appendKey(&it.kvs[i], kt, keySlot); err != nil {
+			IteratorStop(it)
+			return nil, err
+		}
+		if useAnyVals {
+			valSlot := reflect.New(et).Elem()
+			valSlot.SetIterValue(&it.iter)
+			it.anyVals[i] = valSlot.Interface()
+			it.kvs[i].v = unsafe.Pointer(&it.anyVals[i])
+		} else {
+			ev := it.vals.Index(i)
+			ev.SetIterValue(&it.iter)
+			it.kvs[i].v = ev.Addr().UnsafePointer()
+		}
+		i++
+	}
+	it.iter.Reset(reflect.Value{})
+	it.kvs = it.kvs[:i]
+	if useAnyVals {
+		it.anyVals = it.anyVals[:i]
+	}
+	if i == 0 {
+		return it, nil
+	}
+	it.sorted = true
+	it.sortMapPairs()
+	pair := it.orderedMapPair(0)
+	it.ki = 1
+	it.It.K = unsafe.Pointer(&pair.k)
+	it.It.V = pair.v
+	return it, nil
+}
+
+func IteratorNext(p *MapIterator) {
+	if !p.sorted {
+		if !p.iter.Next() {
+			p.iter.Reset(reflect.Value{})
+			p.It.K = nil
+			p.It.V = nil
+			return
+		}
+		nextSlot := p.slotIdx ^ 1
+		p.slotIdx = nextSlot
+		p.keySlot.SetIterKey(&p.iter)
+		p.valSlot[nextSlot].SetIterValue(&p.iter)
+		p.It.K = p.keySlot.Addr().UnsafePointer()
+		p.It.V = p.valSlot[nextSlot].Addr().UnsafePointer()
+		return
+	}
+	if p.ki >= len(p.kvs) {
+		p.It.K = nil
+		p.It.V = nil
+	} else {
+		pair := p.orderedMapPair(p.ki)
+		p.ki++
+		p.It.K = unsafe.Pointer(&pair.k)
+		p.It.V = pair.v
+	}
+}
+
+func IteratorStop(p *MapIterator) {
+	iteratorPool.Put(resetIterator(p))
 }
 
 func IsValidNumber(s string) bool {

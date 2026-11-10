@@ -26,7 +26,6 @@ import (
 	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/internal/encoder/vm"
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -37,10 +36,10 @@ func ForceUseVM() {
 	vars.UseVM = true
 }
 
-var encodeValuePointer func(buf *[]byte, vt *rt.GoType, p unsafe.Pointer, sb *vars.Stack, fv uint64) error
+var encodeValuePointer func(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars.Stack, fv uint64) error
 
-func makeEncoderVM(vt *rt.GoType, ex ...interface{}) (interface{}, error) {
-	pp, err := NewCompiler().Compile(vt.Pack(), ex[0].(bool))
+func makeEncoderVM(vt reflect.Type, ex ...interface{}) (interface{}, error) {
+	pp, err := NewCompiler().Compile(vt, ex[0].(bool))
 	if err != nil {
 		return nil, err
 	}
@@ -49,11 +48,11 @@ func makeEncoderVM(vt *rt.GoType, ex ...interface{}) (interface{}, error) {
 
 var pretouchType func(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error)
 
-func pretouchTypeVM(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error) {
+func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error) {
 	/* compile function */
 	compiler := NewCompiler().apply(opts)
-	encoder := func(vt *rt.GoType, ex ...interface{}) (interface{}, error) {
-		pp, err := compiler.Compile(vt.Pack(), ex[0].(bool))
+	encoder := func(vt reflect.Type, ex ...interface{}) (interface{}, error) {
+		pp, err := compiler.Compile(vt, ex[0].(bool))
 		if err != nil {
 			return nil, err
 		}
@@ -61,7 +60,6 @@ func pretouchTypeVM(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[
 	}
 
 	/* find or compile */
-	vt := rt.UnpackType(_vt)
 	pv := v == 1
 	if val := vars.GetProgram(vt, pv); val != nil {
 		return nil, nil
@@ -73,7 +71,7 @@ func pretouchTypeVM(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[
 }
 
 type vmPretouchKey struct {
-	vt *rt.GoType
+	vt reflect.Type
 	pv bool
 }
 
@@ -88,14 +86,13 @@ func pretouchRecVMBatch(vtm map[reflect.Type]uint8, opts option.CompileOptions) 
 	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
 		next := make(map[reflect.Type]uint8)
 		for vt, v := range vtm {
-			gvt := rt.UnpackType(vt)
 			pv := v == 1
-			key := vmPretouchKey{vt: gvt, pv: pv}
+			key := vmPretouchKey{vt: vt, pv: pv}
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			if vars.GetProgram(gvt, pv) != nil {
+			if vars.GetProgram(vt, pv) != nil {
 				continue
 			}
 			compiler := NewCompiler().apply(opts)
@@ -105,9 +102,9 @@ func pretouchRecVMBatch(vtm map[reflect.Type]uint8, opts option.CompileOptions) 
 			}
 			prog := &pp
 			if pv {
-				batchPV = append(batchPV, caching.ProgramBatchItem{Vt: gvt, Fn: prog})
+				batchPV = append(batchPV, caching.ProgramBatchItem{Vt: vt, Fn: prog})
 			} else {
-				batchVal = append(batchVal, caching.ProgramBatchItem{Vt: gvt, Fn: prog})
+				batchVal = append(batchVal, caching.ProgramBatchItem{Vt: vt, Fn: prog})
 			}
 			for svt, sv := range compiler.rec {
 				next[svt] = sv
@@ -338,7 +335,7 @@ func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
 	p.Tag(sp + 1)
 	p.Int(ir.OP_byte, '{')
 	e := p.PC()
-	p.Add(ir.OP_is_zero_map)
+	p.Rtt(ir.OP_is_zero_map, vt)
 	p.Add(ir.OP_save)
 	if self.useVM && vt == vars.StringAnyMapType {
 		p.Add(ir.OP_save)
@@ -471,7 +468,7 @@ func (self *Compiler) compileSliceArray(p *ir.Program, sp int, vt reflect.Type) 
 	e := p.PC()
 	p.Add(ir.OP_is_nil)
 	p.Add(ir.OP_save)
-	p.Add(ir.OP_slice_len)
+	p.Rtt(ir.OP_slice_len, reflect.SliceOf(vt))
 	i := p.PC()
 	p.Rtt(ir.OP_slice_next, vt)
 	self.compileOne(p, sp+1, vt, true)
@@ -566,7 +563,7 @@ func specNoCommaSkip(hasGuaranteedField bool) uint8 {
 }
 
 func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffset uintptr, hasGuaranteedField bool) (ir.StructFieldSpec, bool) {
-	if !self.useVM || fv.KeyNeedsSanitize || len(fv.PaddedCommaKey) > 32 {
+	if !self.useVM || fv.KeyNeedsSanitize || fv.CommaKeyLen > 32 || len(fv.KeyBlob) == 0 {
 		return ir.StructFieldSpec{}, false
 	}
 	if (fv.Opts & resolver.F_omitzero) != 0 {
@@ -697,8 +694,9 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 		flags |= ir.SpecFlagOmitEmpty
 	}
 	return ir.StructFieldSpec{
-		CommaKey:    fv.PaddedCommaKey,
+		KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
 		Offset:      offset,
+		KeyLen:      uint8(fv.CommaKeyLen),
 		NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 		Kind:        kind,
 		Flags:       flags,
@@ -710,7 +708,7 @@ func (self *Compiler) tryFlattenNestedStruct(fv *resolver.FieldMeta, baseOffset 
 	if self.useVM && maxDepth == option.DefaultMaxInlineDepth {
 		maxDepth = 16
 	}
-	if !self.useVM || sp+1 >= maxDepth || fv.PaddedStructBeginKey == "" {
+	if !self.useVM || sp+1 >= maxDepth || !fv.HasStructBegin || len(fv.KeyBlob) == 0 {
 		return 0, false
 	}
 	ft := fv.Type
@@ -761,7 +759,8 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 
 			if childOffset, ok := self.tryFlattenNestedStruct(&fvs[i], baseOffset, depth); ok {
 				specs = append(specs, ir.StructFieldSpec{
-					CommaKey:    fv.PaddedStructBeginKey,
+					KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
+					KeyLen:      uint8(fv.CommaKeyLen + 1),
 					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 					Kind:        ir.OP_struct_begin,
 				})
@@ -860,7 +859,6 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 
 func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Type) {
 	// NOTICE: according to encoding/json, Marshaler type has higher priority than string option
-	// see issue:
 	if self.tryCompileMarshaler(p, vt, self.pv) {
 		return
 	}
@@ -876,35 +874,11 @@ func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Ty
 
 	/* check if it can be stringized */
 	switch ft.Kind() {
-	case reflect.Bool:
-		sv = true
-	case reflect.Int:
-		sv = true
-	case reflect.Int8:
-		sv = true
-	case reflect.Int16:
-		sv = true
-	case reflect.Int32:
-		sv = true
-	case reflect.Int64:
-		sv = true
-	case reflect.Uint:
-		sv = true
-	case reflect.Uint8:
-		sv = true
-	case reflect.Uint16:
-		sv = true
-	case reflect.Uint32:
-		sv = true
-	case reflect.Uint64:
-		sv = true
-	case reflect.Uintptr:
-		sv = true
-	case reflect.Float32:
-		sv = true
-	case reflect.Float64:
-		sv = true
-	case reflect.String:
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64,
+		reflect.String:
 		sv = true
 	}
 
@@ -974,11 +948,11 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 	case reflect.Interface:
 		p.Add(ir.OP_is_nil)
 	case reflect.Map:
-		p.Add(ir.OP_is_zero_map)
+		p.Rtt(ir.OP_is_zero_map, vt)
 	case reflect.Ptr:
 		p.Add(ir.OP_is_nil)
 	case reflect.Slice:
-		p.Add(ir.OP_is_nil_p1)
+		p.Rtt(ir.OP_is_nil_p1, vt)
 	default:
 		panic(vars.Error_type(vt))
 	}
@@ -1017,8 +991,8 @@ func (self *Compiler) compileInterface(p *ir.Program, vt reflect.Type) {
 	}
 
 	x := p.PC()
-	p.Add(ir.OP_is_nil_p1)
-	p.Add(ir.OP_iface)
+	p.Add(ir.OP_is_nil)
+	p.Rtt(ir.OP_iface, vt)
 
 	/* the "null" value */
 	e := p.PC()
@@ -1053,12 +1027,6 @@ func (self *Compiler) compileMarshaler(p *ir.Program, op ir.Op, vt reflect.Type,
 	p.Pin(i)
 }
 
-func (self *Compiler) addMarshalerOp(p *ir.Program, op ir.Op, vt reflect.Type, mt reflect.Type) {
-	if self.useVM {
-		itab := rt.GetItab(rt.IfaceType(rt.UnpackType(mt)), rt.UnpackType(vt), true)
-		p.Vtab(op, vt, itab)
-	} else {
-		// OPT: get itab here
-		p.Rtt(op, vt)
-	}
+func (self *Compiler) addMarshalerOp(p *ir.Program, op ir.Op, vt reflect.Type, _ reflect.Type) {
+	p.Rtt(op, vt)
 }

@@ -21,11 +21,10 @@ import (
 	"encoding/json"
 	"reflect"
 	"runtime"
-	"unsafe"
 
-	"github.com/bytedance/gopkg/lang/dirtmake"
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/encoder/vars"
+	"github.com/bytedance/sonic/internal/encoder/vm"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 	"github.com/bytedance/sonic/utf8"
@@ -182,7 +181,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 	if !vars.UseVM {
 		if (opts&ValidateString != 0) && !utf8.Validate(*buf) {
 			if opts&EscapeHTML == 0 {
-				ret = utf8.CorrectWith(dirtmake.Bytes(0, len(*buf)+32), *buf, `\ufffd`)
+				ret = utf8.CorrectWith(make([]byte, 0, len(*buf)+32), *buf, `\ufffd`)
 				vars.FreeBytes(buf)
 				return ret, nil
 			}
@@ -192,7 +191,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 		}
 
 		if opts&EscapeHTML != 0 {
-			ret = HTMLEscape(dirtmake.Bytes(0, len(*buf)+len(*buf)>>3+32), *buf)
+			ret = HTMLEscape(make([]byte, 0, len(*buf)+len(*buf)>>3+32), *buf)
 			vars.FreeBytes(buf)
 			return ret, nil
 		}
@@ -200,7 +199,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 
 	/* make a copy of the result */
 	if rt.CanSizeResue(cap(*buf)) {
-		ret = dirtmake.Bytes(len(*buf), len(*buf))
+		ret = make([]byte, len(*buf))
 		copy(ret, *buf)
 		vars.FreeBytes(buf)
 	} else {
@@ -228,24 +227,14 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 
 func encodeInto(buf *[]byte, val interface{}, opts Options) error {
 	stk := vars.NewStack()
-	efv := rt.UnpackEface(val)
-	var err error
-	if efv.Type == nil || efv.Type.Indirect() {
-		err = encodeValuePointer(buf, efv.Type, efv.Value, stk, uint64(opts))
-	} else {
-		stk.ValPtr = efv.Value
-		err = encodeValuePointer(buf, efv.Type, unsafe.Pointer(&stk.ValPtr), stk, uint64(opts))
-	}
-
-	/* return the stack into pool */
+	err := vm.EncodeValue(buf, val, stk, uint64(opts))
 	if err != nil {
 		vars.ResetStack(stk)
 	}
 	vars.FreeStack(stk)
 
-	/* avoid GC ahead */
 	runtime.KeepAlive(buf)
-	runtime.KeepAlive(efv)
+	runtime.KeepAlive(val)
 	return err
 }
 

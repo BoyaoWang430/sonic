@@ -51,7 +51,6 @@ GLOBL ·utf8_80<>(SB), RODATA|NOPTR, $32
 // DI: positions (*int)
 // R9: limit (remaining output slots)
 // R10: count (offsets written)
-// R15: original size
 TEXT ·utf8Scan(SB), NOSPLIT, $0-57
 	MOVQ src+0(FP), SI
 	MOVQ size+8(FP), DX
@@ -59,7 +58,6 @@ TEXT ·utf8Scan(SB), NOSPLIT, $0-57
 	MOVQ positions+24(FP), DI
 	MOVQ limit+32(FP), R9
 	XORQ R10, R10
-	MOVQ DX, R15
 
 	CMPQ DX, $32
 	JB   utf8_vec16
@@ -666,7 +664,7 @@ utf8_advance:
 	JMP  utf8_vec16
 
 utf8_tail:
-	CMPQ R15, $8
+	CMPQ size+8(FP), $8
 	JB   utf8_scalar
 	LEAQ (SI)(DX*1), AX
 	MOVQ -8(AX), AX

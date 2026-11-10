@@ -1,13 +1,10 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
-
 package alg
 
 // Sort indices to avoid pointer write barriers and keep pair storage fixed.
 type platformMapOrder struct{ order []int }
 
 func (p *MapIterator) sortMapPairs() {
-	n := p.kv.Len
-	// Go 1.20 ARM64 builds cannot use slices.Grow; old indices are overwritten.
+	n := len(p.kvs)
 	if cap(p.order) < n {
 		p.order = make([]int, n)
 	} else {

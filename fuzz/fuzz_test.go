@@ -33,7 +33,6 @@ import (
     `github.com/bytedance/sonic`
     `github.com/stretchr/testify/require`
     `github.com/davecgh/go-spew/spew`
-    `github.com/bytedance/gopkg/util/gctuner`
 )
 
 func FuzzMain(f *testing.F) {
@@ -277,7 +276,7 @@ func setMemLimit(limit uint64) {
             limit = memGB * GB
         }
     }
-    gctuner.Tuning(threshold / numWorker)
+    debug.SetMemoryLimit(int64(threshold / numWorker))
     log.Printf("[%d] Memory Limit: %d GB, Memory Threshold: %d MB\n", os.Getpid(), limit/GB, threshold/MB)
     log.Printf("[%d] Memory Threshold Per Worker: %d MB\n", os.Getpid(), threshold/numWorker/MB)
 }

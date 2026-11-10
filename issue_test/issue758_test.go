@@ -20,7 +20,7 @@ func TestIssue758_UnmarshalIntoAnyPointer(t *testing.T) {
 		"non-nil iface pointer":                  {wantJSON: `{"id":"2"}`},
 		"root nil iface pointer shoule be error": {wantErr: true, wantJSON: `null`},
 		"nil iface pointer to be eface":          {wantJSON: `{"id":"2"}`},
-		"iface type should be error":             {wantErr: true, wantJSON: `null`},
+		"iface type should be error":             {wantErr: true, wantJSON: `{"id":null}`},
 		"non-nil iface type as struct field":     {wantJSON: `{"name":"name","id":{"id":"2"}}`},
 		"null iface type as struct field":        {wantJSON: `{"name":"name","id":null}`},
 	}

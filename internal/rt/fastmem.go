@@ -17,65 +17,29 @@
 package rt
 
 import (
-	"reflect"
 	"unsafe"
 
 	"github.com/bytedance/sonic/option"
 )
 
 //go:nosplit
-func Get16(v []byte) int16 {
-	return *(*int16)((*GoSlice)(unsafe.Pointer(&v)).Ptr)
+func Mem2Str(v []byte) string {
+	return unsafe.String(unsafe.SliceData(v), len(v))
 }
 
 //go:nosplit
-func Get32(v []byte) int32 {
-	return *(*int32)((*GoSlice)(unsafe.Pointer(&v)).Ptr)
+func Str2Mem(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 //go:nosplit
-func Get64(v []byte) int64 {
-	return *(*int64)((*GoSlice)(unsafe.Pointer(&v)).Ptr)
-}
-
-//go:nosplit
-func Mem2Str(v []byte) (s string) {
-	(*GoString)(unsafe.Pointer(&s)).Len = (*GoSlice)(unsafe.Pointer(&v)).Len
-	(*GoString)(unsafe.Pointer(&s)).Ptr = (*GoSlice)(unsafe.Pointer(&v)).Ptr
-	return
-}
-
-//go:nosplit
-func Str2Mem(s string) (v []byte) {
-	(*GoSlice)(unsafe.Pointer(&v)).Cap = (*GoString)(unsafe.Pointer(&s)).Len
-	(*GoSlice)(unsafe.Pointer(&v)).Len = (*GoString)(unsafe.Pointer(&s)).Len
-	(*GoSlice)(unsafe.Pointer(&v)).Ptr = (*GoString)(unsafe.Pointer(&s)).Ptr
-	return
-}
-
-func BytesFrom(p unsafe.Pointer, n int, c int) (r []byte) {
-	(*GoSlice)(unsafe.Pointer(&r)).Ptr = p
-	(*GoSlice)(unsafe.Pointer(&r)).Len = n
-	(*GoSlice)(unsafe.Pointer(&r)).Cap = c
-	return
-}
-
-func FuncAddr(f interface{}) unsafe.Pointer {
-	if vv := UnpackEface(f); vv.Type.Kind() != reflect.Func {
-		panic("f is not a function")
-	} else {
-		return *(*unsafe.Pointer)(vv.Value)
-	}
-}
-
-//go:nocheckptr
 func IndexChar(src string, index int) unsafe.Pointer {
-	return unsafe.Pointer(uintptr((*GoString)(unsafe.Pointer(&src)).Ptr) + uintptr(index))
+	return unsafe.Add(unsafe.Pointer(unsafe.StringData(src)), index)
 }
 
-//go:nocheckptr
+//go:nosplit
 func IndexByte(ptr []byte, index int) unsafe.Pointer {
-	return unsafe.Pointer(uintptr((*GoSlice)(unsafe.Pointer(&ptr)).Ptr) + uintptr(index))
+	return unsafe.Add(unsafe.Pointer(unsafe.SliceData(ptr)), index)
 }
 
 func GuardSlice(buf *[]byte, n int) {
@@ -108,49 +72,25 @@ func GuardSlice2(buf []byte, n int) []byte {
 }
 
 //go:nosplit
-func Ptr2SlicePtr(s unsafe.Pointer, l int, c int) unsafe.Pointer {
-	slice := &GoSlice{
-		Ptr: s,
-		Len: l,
-		Cap: c,
-	}
-	return unsafe.Pointer(slice)
-}
-
-//go:nosplit
 func StrPtr(s string) unsafe.Pointer {
-	return (*GoString)(unsafe.Pointer(&s)).Ptr
+	return unsafe.Pointer(unsafe.StringData(s))
 }
 
 //go:nosplit
-func StrFrom(p unsafe.Pointer, n int64) (s string) {
-	(*GoString)(unsafe.Pointer(&s)).Ptr = p
-	(*GoString)(unsafe.Pointer(&s)).Len = int(n)
-	return
+func StrFrom(p unsafe.Pointer, n int64) string {
+	return unsafe.String((*byte)(p), int(n))
 }
-
-// NoEscape hides a pointer from escape analysis. NoEscape is
-// the identity function but escape analysis doesn't think the
-// output depends on the input. NoEscape is inlined and currently
-// compiles down to zero instructions.
-// USE CAREFULLY!
-//
-//go:nosplit
-//goland:noinspection GoVetUnsafePointer
-func NoEscape(p unsafe.Pointer) unsafe.Pointer {
-	x := uintptr(p)
-	return unsafe.Pointer(x ^ 0)
-}
-
-//go:nosplit
-func MoreStack(size uintptr)
 
 //go:nosplit
 func Add(ptr unsafe.Pointer, off uintptr) unsafe.Pointer {
-	return unsafe.Pointer(uintptr(ptr) + off)
+	return unsafe.Add(ptr, off)
 }
 
-// CanSizeResue
+// CanSizeResue checks whether a pooled buffer of capacity cap should be reused.
 func CanSizeResue(cap int) bool {
 	return cap <= int(option.LimitBufferSize)
 }
+
+func StringData(s string) *byte    { return unsafe.StringData(s) }
+func SliceData[T any](s []T) *T    { return unsafe.SliceData(s) }
+func String(p *byte, n int) string { return unsafe.String(p, n) }

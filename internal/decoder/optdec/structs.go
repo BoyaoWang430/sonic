@@ -7,7 +7,6 @@ import (
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
 	caching "github.com/bytedance/sonic/internal/optcaching"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 const nodeSize = unsafe.Sizeof(node{})
@@ -99,13 +98,13 @@ func newFieldEntry(name string, offset uintptr, dec decFunc) fieldEntry {
 }
 
 type structDecoder struct {
-	fieldMap   *caching.FieldCache
-	fields     []fieldEntry
+	fieldMap    *caching.FieldCache
+	fields      []fieldEntry
 	fieldDecs   []decFunc
 	wideOffsets []uintptr
-	structName string
-	typ        reflect.Type
-	goType     *rt.GoType
+	structName  string
+	typ         reflect.Type
+	goType      reflect.Type
 }
 
 func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -135,7 +134,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 	expectedIdx := 0
 	next := obj.Children()
 	for i := 0; i < size; i++ {
-		knode := ptrCast(next)
+		knode := next
 		var key string
 		if uint8(knode.typ) == KStringCommon {
 			key = p.strRefCommon(int(knode.typ>>PosBits), int(knode.val))
@@ -143,13 +142,13 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			key, _ = NewNode(next).AsStrRef(ctx)
 		}
 
-		vptr := next + nodeSize
-		vnode := ptrCast(vptr)
+		vptr := PtrOffset(next, 1)
+		vnode := vptr
 		vtyp := uint8(vnode.typ)
 		if vtyp-KObject > 1 {
-			next = vptr + nodeSize
+			next = PtrOffset(vptr, 1)
 		} else {
-			next = vptr + uintptr(vnode.val>>ConLenBits)*nodeSize
+			next = PtrOffset(vptr, int64(vnode.val>>ConLenBits))
 		}
 
 		// find field idx
@@ -171,20 +170,38 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 		fe := &fields[idx]
 		var elem unsafe.Pointer
 		if fe.kind == fieldKindWideOffset {
-			elem = unsafe.Pointer(uintptr(vp) + d.wideOffsets[fe.offset])
+			elem = unsafe.Add(vp, d.wideOffsets[fe.offset])
 		} else {
-			elem = unsafe.Pointer(uintptr(vp) + uintptr(fe.offset))
+			elem = unsafe.Add(vp, uintptr(fe.offset))
 		}
 		if vtyp == KNull {
 			switch fe.kind {
 			case fieldKindPtrStruct:
 				*(*unsafe.Pointer)(elem) = nil
 				continue
-			case fieldKindSlice, fieldKindSliceEface, fieldKindSliceI64, fieldKindSliceI32, fieldKindSliceU64, fieldKindSliceU32, fieldKindSliceString:
-				*(*rt.GoSlice)(elem) = rt.GoSlice{}
+			case fieldKindSlice:
+				((*sliceDecoder)(fe.subDec)).setNil(elem)
+				continue
+			case fieldKindSliceEface:
+				*(*[]interface{})(elem) = nil
+				continue
+			case fieldKindSliceI64:
+				*(*[]int64)(elem) = nil
+				continue
+			case fieldKindSliceI32:
+				*(*[]int32)(elem) = nil
+				continue
+			case fieldKindSliceU64:
+				*(*[]uint64)(elem) = nil
+				continue
+			case fieldKindSliceU32:
+				*(*[]uint32)(elem) = nil
+				continue
+			case fieldKindSliceString:
+				*(*[]string)(elem) = nil
 				continue
 			case fieldKindEface:
-				if (*rt.GoEface)(elem).Type == nil {
+				if *(*interface{})(elem) == nil {
 					continue
 				}
 			case fieldKindGeneric, fieldKindWideOffset:
@@ -260,10 +277,10 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 					sd := (*structDecoder)(fe.subDec)
 					dst := *(*unsafe.Pointer)(elem)
 					if dst == nil {
-						dst = rt.Mallocgc(sd.goType.Size, sd.goType, true)
+						dst = reflect.New(sd.goType).UnsafePointer()
 						*(*unsafe.Pointer)(elem) = dst
 					}
-					err := sd.FromDom(dst, Node{cptr: vptr}, ctx)
+					err := sd.FromDom(dst, Node{ptr: vptr}, ctx)
 					if gerr == nil && err != nil {
 						gerr = err
 					}
@@ -271,7 +288,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 				}
 			case fieldKindStruct:
 				if vtyp == KObject {
-					err := ((*structDecoder)(fe.subDec)).FromDom(elem, Node{cptr: vptr}, ctx)
+					err := ((*structDecoder)(fe.subDec)).FromDom(elem, Node{ptr: vptr}, ctx)
 					if gerr == nil && err != nil {
 						gerr = err
 					}
@@ -279,18 +296,19 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 				}
 			case fieldKindSlice:
 				if vtyp == KArray {
+					sd := (*sliceDecoder)(fe.subDec)
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						sd.setEmpty(elem)
 						continue
 					}
-					err := ((*sliceDecoder)(fe.subDec)).FromDom(elem, Node{cptr: vptr}, ctx)
+					err := sd.FromDom(elem, Node{ptr: vptr}, ctx)
 					if gerr == nil && err != nil {
 						gerr = err
 					}
 					continue
 				}
 			case fieldKindEface:
-				if (*rt.GoEface)(elem).Value == nil {
+				if *(*interface{})(elem) == nil {
 					switch vtyp {
 					case KStringCommon:
 						*(*interface{})(elem) = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
@@ -307,12 +325,16 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 					}
 				}
 			case fieldKindSliceEface:
-				if vtyp == KArray && (*rt.GoSlice)(elem).Len == 0 {
+				if vtyp == KArray && len(*(*[]interface{})(elem)) == 0 {
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						if *(*[]interface{})(elem) == nil {
+							*(*[]interface{})(elem) = []interface{}{}
+						} else {
+							*(*[]interface{})(elem) = (*(*[]interface{})(elem))[:0]
+						}
 						continue
 					}
-					n := Node{cptr: vptr}
+					n := Node{ptr: vptr}
 					err := n.AsSliceEface(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
@@ -322,10 +344,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceI64:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						if *(*[]int64)(elem) == nil {
+							*(*[]int64)(elem) = []int64{}
+						} else {
+							*(*[]int64)(elem) = (*(*[]int64)(elem))[:0]
+						}
 						continue
 					}
-					n := Node{cptr: vptr}
+					n := Node{ptr: vptr}
 					err := n.AsSliceI64(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
@@ -335,10 +361,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceI32:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						if *(*[]int32)(elem) == nil {
+							*(*[]int32)(elem) = []int32{}
+						} else {
+							*(*[]int32)(elem) = (*(*[]int32)(elem))[:0]
+						}
 						continue
 					}
-					n := Node{cptr: vptr}
+					n := Node{ptr: vptr}
 					err := n.AsSliceI32(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
@@ -348,10 +378,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceU64:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						if *(*[]uint64)(elem) == nil {
+							*(*[]uint64)(elem) = []uint64{}
+						} else {
+							*(*[]uint64)(elem) = (*(*[]uint64)(elem))[:0]
+						}
 						continue
 					}
-					n := Node{cptr: vptr}
+					n := Node{ptr: vptr}
 					err := n.AsSliceU64(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
@@ -361,10 +395,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceU32:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						if *(*[]uint32)(elem) == nil {
+							*(*[]uint32)(elem) = []uint32{}
+						} else {
+							*(*[]uint32)(elem) = (*(*[]uint32)(elem))[:0]
+						}
 						continue
 					}
-					n := Node{cptr: vptr}
+					n := Node{ptr: vptr}
 					err := n.AsSliceU32(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
@@ -374,10 +412,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			case fieldKindSliceString:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
-						*(*rt.GoSlice)(elem) = rt.EmptySlice
+						if *(*[]string)(elem) == nil {
+							*(*[]string)(elem) = []string{}
+						} else {
+							*(*[]string)(elem) = (*(*[]string)(elem))[:0]
+						}
 						continue
 					}
-					n := Node{cptr: vptr}
+					n := Node{ptr: vptr}
 					err := n.AsSliceString(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
@@ -387,7 +429,7 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			}
 		}
 
-		err := d.fieldDecs[idx].FromDom(elem, Node{cptr: vptr}, ctx)
+		err := d.fieldDecs[idx].FromDom(elem, Node{ptr: vptr}, ctx)
 
 		// deal with mismatch type errors
 		if gerr == nil && err != nil {

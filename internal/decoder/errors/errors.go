@@ -25,7 +25,6 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type SyntaxError struct {
@@ -130,8 +129,8 @@ func error_wrap_heap(src string, pos int, code types.ParsingError) *SyntaxError 
 	}
 }
 
-func ErrorType(vt *rt.GoType) error {
-	return &json.UnmarshalTypeError{Type: vt.Pack()}
+func ErrorType(vt reflect.Type) error {
+	return &json.UnmarshalTypeError{Type: vt}
 }
 
 type MismatchTypeError struct {
@@ -177,11 +176,11 @@ func (self MismatchTypeError) Description() string {
 	return fmt.Sprintf("Mismatch type %s with value %s %s", self.Type.String(), swithchJSONType(self.Src, self.Pos), se.description())
 }
 
-func ErrorMismatch(src string, pos int, vt *rt.GoType) error {
+func ErrorMismatch(src string, pos int, vt reflect.Type) error {
 	return &MismatchTypeError{
 		Pos:  pos,
 		Src:  src,
-		Type: vt.Pack(),
+		Type: vt,
 	}
 }
 

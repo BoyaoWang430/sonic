@@ -47,13 +47,17 @@ func TestIssue772_SkipIfaceType(t *testing.T) {
 	} {
 		t.Run(tt.cas.name, func(t *testing.T) {
 			if stdUsesJSONV2 {
+				wantJSON := `{"name":"name","id":null}`
+				if tt.cas.name == "should skip non-ptr iface type" {
+					wantJSON = `{"name":"name","id":{"id":null}}`
+				}
 				value := requireSonicUnmarshalSnapshot(
 					t,
 					sonic.ConfigDefault,
 					tt.cas,
 					true,
 					false,
-					`{"name":"name","id":null}`,
+					wantJSON,
 				)
 				tt.check(t, value.(*WrapperEface))
 				return

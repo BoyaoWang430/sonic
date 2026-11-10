@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 // Use owned, padded input at every byte alignment without relying on the pool's
@@ -120,7 +118,7 @@ func cParityRunsTuneStats(value interface{}, depth uint32, stat *jsonStat) {
 // Semantic values and aggregate statistics come from encoding/json, not from
 // a snapshot of this parser's output.
 func TestCParityRunsCloseChainsGrowth(t *testing.T) {
-	dec, err := findOrCompile(rt.UnpackType(reflect.TypeOf((*interface{})(nil)).Elem()))
+	dec, err := findOrCompile(reflect.TypeOf((*interface{})(nil)).Elem())
 	if err != nil {
 		t.Fatal(err)
 	}

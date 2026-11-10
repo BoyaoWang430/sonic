@@ -21,8 +21,6 @@ import (
 	"errors"
 	"reflect"
 	"strconv"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 /** JIT Error Helpers **/
@@ -32,8 +30,8 @@ var stackOverflow = &json.UnsupportedValueError{
 	Value: reflect.ValueOf("..."),
 }
 
-func error_type(vt *rt.GoType) error {
-	return &json.UnmarshalTypeError{Type: vt.Pack()}
+func error_type(vt reflect.Type) error {
+	return &json.UnmarshalTypeError{Type: vt}
 }
 
 func error_mismatch(node Node, ctx *context, typ reflect.Type) error {
@@ -44,11 +42,11 @@ func error_mismatch(node Node, ctx *context, typ reflect.Type) error {
 	}
 }
 
-func newUnmatched(pos int, vt *rt.GoType) error {
+func newUnmatched(pos int, vt reflect.Type) error {
 	return MismatchTypeError{
 		Pos:  pos,
 		Src:  "",
-		Type: vt.Pack(),
+		Type: vt,
 	}
 }
 
@@ -71,8 +69,8 @@ func error_syntax(pos int, src string, msg string) error {
 	}
 }
 
-func error_unsuppoted(typ *rt.GoType) error {
+func error_unsuppoted(typ reflect.Type) error {
 	return &json.UnsupportedTypeError{
-		Type: typ.Pack(),
+		Type: typ,
 	}
 }

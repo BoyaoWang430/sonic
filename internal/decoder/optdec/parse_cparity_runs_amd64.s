@@ -7,7 +7,6 @@
 // Private register convention for cParityParseRunsAsm and its static helpers:
 // R12: p (*Parser)
 // R13: state (*cParityRunsState)
-// R15: Parser_options(p)
 // SI:  cur (Parser_cur(p) input cursor)
 // BP:  ncur (WB_CUR(p) tape cursor)
 // Stack frame of cParityParseRunsAsm ($48-24):
@@ -65,7 +64,6 @@ TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $48-24
 	MOVQ BP, 0(SP)
 	MOVQ p+0(FP), R12
 	MOVQ state+8(FP), R13
-	MOVQ Parser_options(R12), R15
 	MOVQ Parser_cur(R12), SI
 	MOVQ WB_CUR(R12), BP
 
@@ -235,7 +233,7 @@ runs_value_positive:
 runs_value_negative:
 	MOVQ $1, BX
 runs_value_number:
-	TESTQ $2, R15
+	TESTB $2, Parser_options(R12)
 	JNZ  runs_number_yield
 	CALL runs_number<>(SB)
 	CMPQ AX, $const_cParityRunsNumber
@@ -849,7 +847,7 @@ DATA runsPow10<>+176(SB)/8, $0x4480f0cf064dd592
 GLOBL runsPow10<>(SB), RODATA|NOPTR, $184
 
 
-// Input: SI follows opening quote; R15 holds options.
+// Input: SI follows opening quote; R12 holds *Parser.
 // Output: AX length or negative error, BX escape status, SI updated cursor.
 // On Unicode yield, DX returns dst.
 TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
@@ -861,7 +859,7 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOVO X0, X4; PCMPEQB X13, X4
 	MOVO X0, X5; PCMPEQB X14, X5
 	POR X5, X4
-	TESTQ $32, R15
+	TESTB $32, Parser_options(R12)
 	JZ   runs_string_short_events
 	MOVO X0, X6; PMAXUB X11, X6
 	PCMPEQB X11, X6
@@ -882,7 +880,7 @@ runs_string_scan:
 	VPMOVMSKB Y4, R9
 	VPCMPEQB Y14, Y0, Y4
 	VPMOVMSKB Y4, R10
-	TESTQ $32, R15
+	TESTB $32, Parser_options(R12)
 	JZ   runs_string_scan_events
 	VPMAXUB Y11, Y0, Y4
 	VPCMPEQB Y11, Y4, Y4
@@ -898,7 +896,7 @@ runs_string_scan_sse:
 	MOVO X0, X4; PCMPEQB X14, X4; PMOVMSKB X4, R10
 	MOVO X1, X4; PCMPEQB X14, X4; PMOVMSKB X4, AX
 	SHLL $16, AX; ORL AX, R10
-	TESTQ $32, R15
+	TESTB $32, Parser_options(R12)
 	JZ   runs_string_scan_events
 	MOVO X0, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, R8
 	MOVO X1, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, AX
@@ -944,7 +942,7 @@ runs_string_plain_return:
 	RET
 
 
-// Input: SI source, DI next output byte, DX original content start, R15 options.
+// Input: SI source, DI next output byte, DX original content start, R12 *Parser.
 TEXT runs_string_continue<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOVQ $1, R11
 	XORL R8, R8
@@ -968,7 +966,7 @@ runs_string_resume:
 	MOVBLZX (SI), CX
 	CMPB CL, $92
 	JE   runs_string_escape
-	TESTQ $32, R15
+	TESTB $32, Parser_options(R12)
 	JNZ  runs_string_move
 	MOVBLZX 1(SI), AX
 	CMPB AL, $92
@@ -988,7 +986,7 @@ runs_string_move:
 	VPMOVMSKB Y4, R9
 	VPCMPEQB Y14, Y0, Y4
 	VPMOVMSKB Y4, R10
-	TESTQ $32, R15
+	TESTB $32, Parser_options(R12)
 	JZ   runs_string_move_events
 	VPMAXUB Y11, Y0, Y4
 	VPCMPEQB Y11, Y4, Y4
@@ -1015,7 +1013,7 @@ runs_string_move_sse:
 	MOVOU 0(SI), X0
 	MOVO X0, X4; PCMPEQB X13, X4; PMOVMSKB X4, R9
 	MOVO X0, X4; PCMPEQB X14, X4; PMOVMSKB X4, R10
-	TESTQ $32, R15
+	TESTB $32, Parser_options(R12)
 	JZ   runs_string_move_sse_events
 	MOVO X0, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, R8
 runs_string_move_sse_events:

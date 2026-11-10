@@ -3,13 +3,12 @@ package optdec
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type ptrStrDecoder struct {
-	typ   *rt.GoType
+	typ   reflect.Type
 	deref decFunc
 }
 
@@ -31,7 +30,7 @@ func (d *ptrStrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 	}
 
 	if *(*unsafe.Pointer)(vp) == nil {
-		*(*unsafe.Pointer)(vp) = rt.Mallocgc(d.typ.Size, d.typ, true)
+		*(*unsafe.Pointer)(vp) = reflect.New(d.typ).UnsafePointer()
 	}
 
 	return d.deref.FromDom(*(*unsafe.Pointer)(vp), node, ctx)

@@ -20,8 +20,6 @@ import (
 	"sort"
 	"sync"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/caching"
 )
 
 type nodeChunk [_DEFAULT_NODE_CAP]Node
@@ -201,7 +199,7 @@ func (self *linkedNodes) FromSlice(con []Node) {
 type pairChunk [_DEFAULT_NODE_CAP]Pair
 
 type linkedPairs struct {
-	index   map[uint64]int
+	index   map[string]int
 	head    pairChunk
 	tail    []*pairChunk
 	tailBuf [2]*pairChunk
@@ -221,19 +219,19 @@ func (self *linkedPairs) allocMutex() *sync.RWMutex {
 
 func (self *linkedPairs) BuildIndex() {
 	if self.index == nil {
-		self.index = make(map[uint64]int, self.size)
+		self.index = make(map[string]int, self.size)
 	}
 	n := self.size
 	if n <= _DEFAULT_NODE_CAP {
 		for i := 0; i < n; i++ {
 			p := &self.head[i]
-			self.index[caching.StrHash(p.Key)] = i
+			self.index[p.Key] = i
 		}
 		return
 	}
 	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
 		p := &self.head[i]
-		self.index[caching.StrHash(p.Key)] = i
+		self.index[p.Key] = i
 	}
 	idx := _DEFAULT_NODE_CAP
 	for _, chunk := range self.tail {
@@ -243,7 +241,7 @@ func (self *linkedPairs) BuildIndex() {
 		}
 		for j := 0; j < limit; j++ {
 			p := &chunk[j]
-			self.index[caching.StrHash(p.Key)] = idx + j
+			self.index[p.Key] = idx + j
 		}
 		idx += limit
 		if idx >= n {
@@ -311,14 +309,14 @@ func (self *linkedPairs) Pop() {
 func (self *linkedPairs) Unset(i int) {
 	if self.index != nil {
 		p := self.At(i)
-		delete(self.index, caching.StrHash(p.Key))
+		delete(self.index, p.Key)
 	}
 	self.set(i, Pair{})
 }
 
 func (self *linkedPairs) Set(i int, v Pair) {
 	if self.index != nil {
-		self.index[caching.StrHash(v.Key)] = i
+		self.index[v.Key] = i
 	}
 	self.set(i, v)
 }
@@ -372,13 +370,13 @@ func (self *linkedPairs) growTailLength(l int) {
 func (self *linkedPairs) Get(key string) (*Pair, int) {
 	if self.index != nil {
 		// fast-path
-		i, ok := self.index[caching.StrHash(key)]
+		i, ok := self.index[key]
 		if ok {
 			n := self.At(i)
 			if n.Key == key {
 				return n, i
 			}
-			// hash conflicts
+			// fallback
 			goto linear_search
 		} else {
 			return nil, -1
@@ -473,7 +471,7 @@ func (self *linkedPairs) copyPairs(to []Pair, from []Pair, l int) {
 	copy(to, from)
 	if self.index != nil {
 		for i := 0; i < l; i++ {
-			self.index[caching.StrHash(from[i].Key)] = i
+			self.index[from[i].Key] = i
 		}
 	}
 }
@@ -513,8 +511,8 @@ func (self *linkedPairs) Less(i, j int) bool {
 func (self *linkedPairs) Swap(i, j int) {
 	a, b := self.At(i), self.At(j)
 	if self.index != nil {
-		self.index[caching.StrHash(a.Key)] = j
-		self.index[caching.StrHash(b.Key)] = i
+		self.index[a.Key] = j
+		self.index[b.Key] = i
 	}
 	*a, *b = *b, *a
 }

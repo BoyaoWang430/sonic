@@ -57,8 +57,6 @@ func Valid(data []byte) (ok bool, start int) {
 	return true, ret
 }
 
-var typeByte = rt.UnpackEface(byte(0)).Type
-
 const (
 	quoteLSB64  = 0x0101010101010101
 	quoteMSB64  = 0x8080808080808080
@@ -124,14 +122,15 @@ func tryQuoteSmall(sp unsafe.Pointer, nb int, dp unsafe.Pointer) bool {
 }
 
 // QuoteWithPaddedKey appends a 32-byte-padded struct key (len <= 32) followed by '"' + escaped(val) + '"' to buf.
-func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
-	nk := len(key)
+func QuoteWithPaddedKey(buf []byte, keyPtr *byte, nk int, val string) []byte {
 	nb := len(val)
 	if cap(buf)-len(buf) >= 34+nb && nk <= 32 {
-		b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-		dp := unsafe.Add(b.Ptr, b.Len)
+		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+		bLen := len(buf)
+		bCap := cap(buf)
+		dp := unsafe.Add(basePtr, bLen)
 		dk := (*[4]uint64)(dp)
-		sk := (*[4]uint64)((*rt.GoString)(unsafe.Pointer(&key)).Ptr)
+		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
 		dk[0], dk[1] = sk[0], sk[1]
 		if nk > 16 {
 			dk[2], dk[3] = sk[2], sk[3]
@@ -139,11 +138,10 @@ func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
 		dp = unsafe.Add(dp, nk)
 		if nb == 0 {
 			*(*[2]byte)(dp) = [2]byte{'"', '"'}
-			b.Len += nk + 2
-			return buf
+			return buf[:bLen+nk+2]
 		}
 		*(*byte)(dp) = '"'
-		sp := (*rt.GoString)(unsafe.Pointer(&val)).Ptr
+		sp := unsafe.Pointer(unsafe.StringData(val))
 		dp = unsafe.Add(dp, 1)
 		if nb <= 32 {
 			if nb >= 8 {
@@ -154,8 +152,7 @@ func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
 						*(*uint64)(dp) = w0
 						*(*uint64)(unsafe.Add(dp, nb-8)) = w1
 						*(*byte)(unsafe.Add(dp, nb)) = '"'
-						b.Len += nk + nb + 2
-						return buf
+						return buf[:bLen+nk+nb+2]
 					}
 				} else {
 					w0 := *(*uint64)(sp)
@@ -168,8 +165,7 @@ func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
 						*(*uint64)(unsafe.Add(dp, nb-16)) = w2
 						*(*uint64)(unsafe.Add(dp, nb-8)) = w3
 						*(*byte)(unsafe.Add(dp, nb)) = '"'
-						b.Len += nk + nb + 2
-						return buf
+						return buf[:bLen+nk+nb+2]
 					}
 				}
 			} else if nb >= 4 {
@@ -180,8 +176,7 @@ func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
 					*(*uint32)(dp) = u0
 					*(*uint32)(unsafe.Add(dp, nb-4)) = u1
 					*(*byte)(unsafe.Add(dp, nb)) = '"'
-					b.Len += nk + nb + 2
-					return buf
+					return buf[:bLen+nk+nb+2]
 				}
 			} else {
 				b0 := *(*byte)(sp)
@@ -194,30 +189,33 @@ func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
 					*(*byte)(unsafe.Add(dp, nb>>1)) = b1
 					*(*byte)(unsafe.Add(dp, nb-1)) = b2
 					*(*byte)(unsafe.Add(dp, nb)) = '"'
-					b.Len += nk + nb + 2
-					return buf
+					return buf[:bLen+nk+nb+2]
 				}
 			}
 		}
-		b.Len += nk + 1
-		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, 0)
-		b.Len += dn
+		bLen += nk + 1
+		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+		bLen += dn
+		buf = buf[:bLen]
 		if ret >= 0 {
-			if b.Len < b.Cap {
-				*(*byte)(unsafe.Add(b.Ptr, b.Len)) = '"'
-				b.Len++
-				return buf
+			if bLen < bCap {
+				*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
+				return buf[:bLen+1]
 			}
 			return append(buf, '"')
 		}
 		for {
-			*b = rt.GrowSlice(typeByte, *b, b.Cap*2)
+			buf = rt.GuardSlice2(buf, cap(buf))
+			basePtr = unsafe.Pointer(unsafe.SliceData(buf))
+			bLen = len(buf)
+			bCap = cap(buf)
 			ret = ^ret
 			nb -= ret
 			sp = unsafe.Add(sp, ret)
-			dp = unsafe.Add(b.Ptr, b.Len)
-			ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, 0)
-			b.Len += dn
+			dp = unsafe.Add(basePtr, bLen)
+			ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+			bLen += dn
+			buf = buf[:bLen]
 			if ret >= 0 {
 				break
 			}
@@ -225,7 +223,9 @@ func QuoteWithPaddedKey(buf []byte, key string, val string) []byte {
 		runtime.KeepAlive(val)
 		return append(buf, '"')
 	}
-	buf = append(buf, key...)
+	if nk > 0 {
+		buf = append(buf, unsafe.Slice(keyPtr, nk)...)
+	}
 	return Quote(buf, val, false)
 }
 
@@ -235,40 +235,44 @@ func Quote(buf []byte, val string, double bool) []byte {
 		if cap(buf)-len(buf) < nb+2 {
 			buf = rt.GuardSlice2(buf, nb+2)
 		}
-		b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-		dp := unsafe.Add(b.Ptr, b.Len)
+		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+		bLen := len(buf)
+		bCap := cap(buf)
+		dp := unsafe.Add(basePtr, bLen)
 		*(*byte)(dp) = '"'
 		if nb == 0 {
 			*(*byte)(unsafe.Add(dp, 1)) = '"'
-			b.Len += 2
-			return buf
+			return buf[:bLen+2]
 		}
-		sp := rt.IndexChar(val, 0)
+		sp := unsafe.Pointer(unsafe.StringData(val))
 		dp = unsafe.Add(dp, 1)
 		if nb <= 32 && tryQuoteSmall(sp, nb, dp) {
 			*(*byte)(unsafe.Add(dp, nb)) = '"'
-			b.Len += nb + 2
-			return buf
+			return buf[:bLen+nb+2]
 		}
-		b.Len++
-		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, 0)
-		b.Len += dn
+		bLen++
+		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+		bLen += dn
+		buf = buf[:bLen]
 		if ret >= 0 {
-			if b.Len < b.Cap {
-				*(*byte)(unsafe.Add(b.Ptr, b.Len)) = '"'
-				b.Len++
-				return buf
+			if bLen < bCap {
+				*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
+				return buf[:bLen+1]
 			}
 			return append(buf, '"')
 		}
 		for {
-			*b = rt.GrowSlice(typeByte, *b, b.Cap*2)
+			buf = rt.GuardSlice2(buf, cap(buf))
+			basePtr = unsafe.Pointer(unsafe.SliceData(buf))
+			bLen = len(buf)
+			bCap = cap(buf)
 			ret = ^ret
 			nb -= ret
 			sp = unsafe.Add(sp, ret)
-			dp = unsafe.Add(b.Ptr, b.Len)
-			ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, 0)
-			b.Len += dn
+			dp = unsafe.Add(basePtr, bLen)
+			ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+			bLen += dn
+			buf = buf[:bLen]
 			if ret >= 0 {
 				break
 			}
@@ -281,18 +285,20 @@ func Quote(buf []byte, val string, double bool) []byte {
 		return append(buf, `"\"\""`...)
 	}
 	buf = append(buf, `"\"`...)
-	sp := rt.IndexChar(val, 0)
+	sp := unsafe.Pointer(unsafe.StringData(val))
 	buf = rt.GuardSlice2(buf, nb+1)
-	b := (*rt.GoSlice)(unsafe.Pointer(&buf))
 
 	for nb > 0 {
-		dp := unsafe.Add(b.Ptr, b.Len)
-		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, types.F_DOUBLE_UNQUOTE)
-		b.Len += dn
+		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+		bLen := len(buf)
+		bCap := cap(buf)
+		dp := unsafe.Add(basePtr, bLen)
+		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, types.F_DOUBLE_UNQUOTE)
+		buf = buf[:bLen+dn]
 		if ret >= 0 {
 			break
 		}
-		*b = rt.GrowSlice(typeByte, *b, b.Cap*2)
+		buf = rt.GuardSlice2(buf, cap(buf))
 		ret = ^ret
 		nb -= ret
 		if nb > 0 {
@@ -311,44 +317,48 @@ func QuoteKey(buf []byte, val string) []byte {
 	if cap(buf)-len(buf) < nb+3 {
 		buf = rt.GuardSlice2(buf, nb+3)
 	}
-	b := (*rt.GoSlice)(unsafe.Pointer(&buf))
-	dp := unsafe.Add(b.Ptr, b.Len)
+	basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+	bLen := len(buf)
+	bCap := cap(buf)
+	dp := unsafe.Add(basePtr, bLen)
 	*(*byte)(dp) = '"'
 	if nb == 0 {
 		*(*byte)(unsafe.Add(dp, 1)) = '"'
 		*(*byte)(unsafe.Add(dp, 2)) = ':'
-		b.Len += 3
-		return buf
+		return buf[:bLen+3]
 	}
-	sp := rt.IndexChar(val, 0)
+	sp := unsafe.Pointer(unsafe.StringData(val))
 	dp = unsafe.Add(dp, 1)
 	if nb <= 32 && tryQuoteSmall(sp, nb, dp) {
 		*(*byte)(unsafe.Add(dp, nb)) = '"'
 		*(*byte)(unsafe.Add(dp, nb+1)) = ':'
-		b.Len += nb + 3
-		return buf
+		return buf[:bLen+nb+3]
 	}
-	b.Len++
-	ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, 0)
-	b.Len += dn
+	bLen++
+	ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+	bLen += dn
+	buf = buf[:bLen]
 	if ret >= 0 {
-		if b.Len+2 <= b.Cap {
-			dp = unsafe.Add(b.Ptr, b.Len)
+		if bLen+2 <= bCap {
+			dp = unsafe.Add(basePtr, bLen)
 			*(*byte)(dp) = '"'
 			*(*byte)(unsafe.Add(dp, 1)) = ':'
-			b.Len += 2
-			return buf
+			return buf[:bLen+2]
 		}
 		return append(buf, '"', ':')
 	}
 	for {
-		*b = rt.GrowSlice(typeByte, *b, b.Cap*2)
+		buf = rt.GuardSlice2(buf, cap(buf))
+		basePtr = unsafe.Pointer(unsafe.SliceData(buf))
+		bLen = len(buf)
+		bCap = cap(buf)
 		ret = ^ret
 		nb -= ret
 		sp = unsafe.Add(sp, ret)
-		dp = unsafe.Add(b.Ptr, b.Len)
-		ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), b.Cap-b.Len, 0)
-		b.Len += dn
+		dp = unsafe.Add(basePtr, bLen)
+		ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+		bLen += dn
+		buf = buf[:bLen]
 		if ret >= 0 {
 			break
 		}
@@ -359,33 +369,37 @@ func QuoteKey(buf []byte, val string) []byte {
 
 func HtmlEscape(dst []byte, src []byte) []byte {
 	var sidx int
+	n := len(src)
 
 	dst = append(dst, src[:0]...) // avoid check nil dst
-	sbuf := (*rt.GoSlice)(unsafe.Pointer(&src))
-	dbuf := (*rt.GoSlice)(unsafe.Pointer(&dst))
-
-	/* grow dst if it is shorter */
-	if cap(dst)-len(dst) < len(src) {
-		cap := len(src)*3/2 + types.BufPaddingSize
-		*dbuf = rt.GrowSlice(typeByte, *dbuf, cap)
+	if n == 0 {
+		return dst
 	}
 
-	for sidx < sbuf.Len {
-		sp := rt.Add(sbuf.Ptr, uintptr(sidx))
-		dp := rt.Add(dbuf.Ptr, uintptr(dbuf.Len))
+	/* grow dst if it is shorter */
+	if cap(dst)-len(dst) < n {
+		need := n*3/2 + types.BufPaddingSize
+		dst = rt.GuardSlice2(dst, need)
+	}
+	sp0 := unsafe.Pointer(unsafe.SliceData(src))
 
-		sn := sbuf.Len - sidx
-		dn := dbuf.Cap - dbuf.Len
+	for sidx < n {
+		sp := unsafe.Add(sp0, sidx)
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(dst)), len(dst))
+
+		sn := n - sidx
+		dn := cap(dst) - len(dst)
 		nb := native.HTMLEscape(sp, sn, dp, &dn)
 
 		/* check for errors */
-		if dbuf.Len += dn; nb >= 0 {
+		dst = dst[:len(dst)+dn]
+		if nb >= 0 {
 			break
 		}
 
 		/* not enough space, grow the slice and try again */
 		sidx += ^nb
-		*dbuf = rt.GrowSlice(typeByte, *dbuf, dbuf.Cap*2)
+		dst = rt.GuardSlice2(dst, cap(dst))
 	}
 	return dst
 }

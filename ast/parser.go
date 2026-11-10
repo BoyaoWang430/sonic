@@ -322,7 +322,7 @@ func (self *Parser) decodeString(iv int64, ep int) (Node, types.ParsingError) {
 	if err != 0 {
 		return Node{}, err
 	} else {
-		return newBytes(rt.Str2Mem(out)), 0
+		return NewString(out), 0
 	}
 }
 

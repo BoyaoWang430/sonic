@@ -23,7 +23,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"unicode/utf8"
-	_ "unsafe"
+	"unsafe"
 
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -37,8 +37,6 @@ func Valid(data []byte) (ok bool, start int) {
 	ok = json.Valid(data)
 	return ok, 0
 }
-
-var typeByte = rt.UnpackEface(byte(0)).Type
 
 func Quote(e []byte, s string, double bool) []byte {
 	if len(s) == 0 {
@@ -152,7 +150,7 @@ func QuoteKey(e []byte, s string) []byte {
 	return append(e, ':')
 }
 
-func QuoteWithPaddedKey(e []byte, key string, val string) []byte {
-	e = append(e, key...)
+func QuoteWithPaddedKey(e []byte, keyPtr *byte, keyLen int, val string) []byte {
+	e = append(e, unsafe.Slice(keyPtr, keyLen)...)
 	return Quote(e, val, false)
 }

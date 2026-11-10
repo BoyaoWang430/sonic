@@ -24,7 +24,6 @@ import (
 
 	"github.com/bytedance/sonic/internal/encoder/ir"
 	"github.com/bytedance/sonic/internal/encoder/vars"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 )
@@ -43,14 +42,10 @@ func TestReflectDirect(t *testing.T) {
 	var a A
 	var b = &a
 	println("b:", unsafe.Pointer(b))
-	v := rt.UnpackEface(a)
 	vv := reflect.ValueOf(a)
-	_ = vv
-	println("v:", v.Type.KindFlags, v.Value)
-	pv := rt.UnpackEface(&a)
+	println("v:", vv.Kind().String())
 	pvv := reflect.ValueOf(&a)
-	_ = pvv
-	println("pv:", pv.Type.KindFlags, pv.Value)
+	println("pv:", pvv.Kind().String(), pvv.UnsafePointer())
 }
 
 func TestPretouchTypeVM(t *testing.T) {

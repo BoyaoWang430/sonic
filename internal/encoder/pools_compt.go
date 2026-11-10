@@ -1,6 +1,3 @@
-//go:build !amd64 || !go1.16 || go1.28
-// +build !amd64 !go1.16 go1.28
-
 /*
  * Copyright 2021 ByteDance Inc.
  *

@@ -1,13 +1,12 @@
 package optdec
 
 import (
-	"math"
 	"fmt"
+	"math"
 	"reflect"
 
 	caching "github.com/bytedance/sonic/internal/optcaching"
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -117,7 +116,7 @@ func (c *compiler) compileFieldStringOption(vt reflect.Type) decFunc {
 		return c.compileIntStringOption(vt)
 	case reflect.Ptr:
 		return &ptrStrDecoder{
-			typ:   rt.UnpackType(vt.Elem()),
+			typ:   vt.Elem(),
 			deref: c.compileFieldStringOption(vt.Elem()),
 		}
 	default:
@@ -137,7 +136,7 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 		return dec
 	}
 	if c.depth > 1 && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth {
-		if val := programCache.Get(rt.UnpackType(vt)); val != nil {
+		if val := programCache.Get(vt); val != nil {
 			if sd, ok := val.(*structDecoder); ok {
 				c.compiled[vt] = sd
 				return sd
@@ -198,8 +197,8 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 		fields:      entries,
 		fieldDecs:   decs,
 		wideOffsets: wideOffsets,
-		structName: vt.Name(),
-		typ:        vt,
-		goType:     rt.UnpackType(vt),
+		structName:  vt.Name(),
+		typ:         vt,
+		goType:      vt,
 	}
 }

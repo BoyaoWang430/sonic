@@ -24,7 +24,6 @@ GLOBL ·ss_ctrl_vec<>(SB), RODATA|NOPTR, $32
 TEXT ·scanStringStrict(SB), NOSPLIT, $0-48
 	MOVQ src+0(FP), SI
 	MOVQ size+8(FP), DX
-	XORQ R15, R15         // block offset
 	MOVQ $-1, R12         // first escape (-1 if none)
 	TESTQ DX, DX
 	JZ   ss_eof
@@ -56,7 +55,6 @@ ss_scan:
 	JNZ  ss_event
 
 	ADDQ $32, SI
-	ADDQ $32, R15
 	SUBQ $32, DX
 	JZ   ss_eof
 	CMPQ DX, $16
@@ -91,7 +89,8 @@ ss_event:
 
 	CMPQ R12, $0
 	JGE  ss_escape_seen
-	LEAQ (R15)(BX*1), R12
+	LEAQ (SI)(BX*1), R12
+	SUBQ src+0(FP), R12
 ss_escape_seen:
 	MOVQ DX, R13
 	SUBQ BX, R13
@@ -154,7 +153,6 @@ ss_crossing_escape:
 
 ss_advance:
 	ADDQ R9, SI
-	ADDQ R9, R15
 	SUBQ R9, DX
 	JZ   ss_eof
 	CMPQ DX, $32
@@ -196,7 +194,8 @@ ss_found:
 	JE   ss_found_ret
 	VZEROUPPER
 ss_found_ret:
-	LEAQ 1(R15)(BX*1), AX
+	LEAQ 1(SI)(BX*1), AX
+	SUBQ src+0(FP), AX
 	MOVQ AX, end+16(FP)
 	MOVQ R12, escape+24(FP)
 	MOVQ $-1, errorPos+32(FP)
@@ -204,7 +203,8 @@ ss_found_ret:
 	RET
 
 ss_invalid:
-	LEAQ (R15)(BX*1), AX
+	LEAQ (SI)(BX*1), AX
+	SUBQ src+0(FP), AX
 	MOVQ $2, CX
 	JMP  ss_failure
 
@@ -230,7 +230,6 @@ ss_failure_ret:
 TEXT ·scanStringStrictBlock(SB), NOSPLIT, $0-64
 	MOVQ src+0(FP), SI
 	MOVQ size+8(FP), DX
-	XORQ R15, R15         // block offset
 	MOVQ $-1, R12         // first escape (-1 if none)
 	TESTQ DX, DX
 	JZ   ssb_eof
@@ -262,7 +261,6 @@ ssb_scan:
 	JNZ  ssb_pack_event32
 
 	ADDQ $32, SI
-	ADDQ $32, R15
 	SUBQ $32, DX
 	JZ   ssb_eof
 	CMPQ DX, $16
@@ -302,7 +300,8 @@ ssb_event:
 
 	CMPQ R12, $0
 	JGE  ssb_escape_seen
-	LEAQ (R15)(BX*1), R12
+	LEAQ (SI)(BX*1), R12
+	SUBQ src+0(FP), R12
 ssb_escape_seen:
 	MOVQ DX, R13
 	SUBQ BX, R13
@@ -365,7 +364,6 @@ ssb_crossing_escape:
 
 ssb_advance:
 	ADDQ R9, SI
-	ADDQ R9, R15
 	SUBQ R9, DX
 	JZ   ssb_eof
 	CMPQ DX, $32
@@ -416,7 +414,8 @@ ssb_found_ret:
 	SHRQ CL, R8
 	MOVQ R8, tailEvents+48(FP)
 	MOVQ R9, tailWidth+56(FP)
-	LEAQ 1(R15)(BX*1), AX
+	LEAQ 1(SI)(BX*1), AX
+	SUBQ src+0(FP), AX
 	MOVQ AX, end+16(FP)
 	MOVQ R12, escape+24(FP)
 	MOVQ $-1, errorPos+32(FP)
@@ -424,7 +423,8 @@ ssb_found_ret:
 	RET
 
 ssb_invalid:
-	LEAQ (R15)(BX*1), AX
+	LEAQ (SI)(BX*1), AX
+	SUBQ src+0(FP), AX
 	MOVQ $2, CX
 	JMP  ssb_failure
 

@@ -54,6 +54,11 @@ func FreeStreamSession(s *StreamSession) {
 		return
 	}
 	s.Reset()
+	s.lastPtrType = nil
+	s.lastElemType = nil
+	s.lastDec = nil
+	s.lastIsNamed = false
+	s.lastIsEface = false
 	streamSessionPool.Put(s)
 }
 
@@ -62,21 +67,26 @@ func FreeStreamSession(s *StreamSession) {
 // multi-chunk value are never rescanned on refill, and raw input coordinates
 // remain decoupled from unescaped string scratch (p.unesc).
 type StreamSession struct {
-	p           *Parser
-	ctx         Context
-	unesc       []byte
-	cur         int
-	nodeLen     int
-	tokStart    int
-	strScanOff  int
-	strFirstEsc int
-	utf8Checked int
-	phase       uint8
-	active      bool
-	utf8Invalid bool
-	useNumber   bool
-	validateStr bool
-	trav        streamTraversalBlock
+	p            *Parser
+	ctx          Context
+	unesc        []byte
+	lastPtrType  reflect.Type
+	lastElemType reflect.Type
+	lastDec      decFunc
+	cur          int
+	nodeLen      int
+	tokStart     int
+	strScanOff   int
+	strFirstEsc  int
+	utf8Checked  int
+	phase        uint8
+	active       bool
+	utf8Invalid  bool
+	useNumber    bool
+	validateStr  bool
+	lastIsNamed  bool
+	lastIsEface  bool
+	trav         streamTraversalBlock
 }
 
 type streamTraversalBlock struct {
@@ -197,19 +207,14 @@ func (s *StreamSession) growNodes() {
 		nextCap = 64
 	}
 	retainInPool := uintptr(nextCap) <= maxPooledNodesCap
-	offset := uintptr(s.nodeLen) * unsafe.Sizeof(node{})
-	slice := rt.GoSlice{
-		Ptr: rt.Mallocgc(uintptr(nextCap)*nodeType.Size, nodeType, false),
-		Len: nextCap,
-		Cap: nextCap,
-	}
-	if offset > 0 {
-		rt.Memmove(unsafe.Pointer(slice.Ptr), unsafe.Pointer(&p.nodes[0]), offset)
+	grown := make([]node, nextCap)
+	if s.nodeLen > 0 {
+		copy(grown[:s.nodeLen], p.nodes[:s.nodeLen])
 	}
 	if !retainInPool && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
 		p.backup = p.nodes
 	}
-	p.nodes = *(*[]node)(unsafe.Pointer(&slice))
+	p.nodes = grown
 }
 
 func (s *StreamSession) emitNode(typ, val uint64) int {
@@ -851,31 +856,48 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 // caller's stream buffer (starting at *scanp), calling refill when more chunk
 // bytes are required from io.Reader.
 func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **StreamSession, refillArg unsafe.Pointer, refill func(arg unsafe.Pointer, compactTo int) (eof bool, readErr error)) error {
-	vv := rt.UnpackEface(val)
-	vp := vv.Value
-	if vv.Type == nil {
+	if val == nil {
 		return &json.InvalidUnmarshalError{}
 	}
-	if vp == nil || vv.Type.Kind() != reflect.Ptr {
-		return &json.InvalidUnmarshalError{Type: vv.Type.Pack()}
-	}
-	etp := rt.PtrElem(vv.Type)
-	if vv.Type.IsNamed() {
-		newp := vp
-		etp = vv.Type
-		vp = unsafe.Pointer(&newp)
-	}
-	dec, err := findOrCompile(etp)
-	if err != nil {
-		return err
-	}
-
 	sess := *sessPtr
 	if sess == nil {
 		sess = getStreamSession()
 		*sessPtr = sess
 	}
-	isEface := etp == rt.AnyType || etp == rt.MapEfaceType || etp == rt.SliceEfaceType
+
+	var etp reflect.Type
+	var vp unsafe.Pointer
+	var dec decFunc
+	var isEface bool
+
+	rv := reflect.ValueOf(val)
+	vt := rv.Type()
+	if vt == sess.lastPtrType && !sess.lastIsNamed {
+		if rv.IsNil() {
+			return &json.InvalidUnmarshalError{Type: vt}
+		}
+		etp = sess.lastElemType
+		vp = rv.UnsafePointer()
+		dec = sess.lastDec
+		isEface = sess.lastIsEface
+	} else {
+		var err error
+		etp, vp, err = unpackRootValue(val)
+		if err != nil {
+			return err
+		}
+		dec, err = findOrCompile(etp)
+		if err != nil {
+			return err
+		}
+		isEface = etp == anyType || etp == mapEfaceType || etp == sliceEfaceType
+		sess.lastPtrType = vt
+		sess.lastElemType = etp
+		sess.lastDec = dec
+		sess.lastIsNamed = vt.Name() != ""
+		sess.lastIsEface = isEface
+	}
+
 	// Force OptionCopyString because StreamDecoder recycles/slides *buf across calls.
 	matOpts := f | (1 << _F_copy_string)
 	sess.Begin(matOpts, isEface)
@@ -906,18 +928,13 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 			p.options = matOpts
 			sess.ctx.Parser = p
 			if canUseFastMap(matOpts, etp) {
-				sess.ctx.efacePool = newEfacePool(&p.nbuf.stat, (matOpts&(1<<_F_use_number)) != 0)
-				if len(sess.ctx.Stack.stack) <= int(p.nbuf.stat.max_depth)+1 {
-					sess.ctx.Stack = newStack(int(p.nbuf.stat.max_depth))
-				} else {
-					sess.ctx.Stack.index = 0
-				}
+				sess.ctx.initSliceArena()
 			} else {
-				sess.ctx.efacePool = nil
+				sess.ctx.sliceArena = nil
 			}
 			merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
 			sess.ctx.Parser = nil
-			sess.ctx.efacePool = nil
+			sess.ctx.sliceArena = nil
 			p.Json = ""
 			p.unesc = nil
 			sess.active = false

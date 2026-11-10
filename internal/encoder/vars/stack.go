@@ -34,9 +34,11 @@ type State struct {
 }
 
 type Stack struct {
-	sp     uintptr
-	sb     [MaxStack]State
-	ValPtr unsafe.Pointer
+	sp       int
+	ptrSp    int
+	sb       [MaxStack]State
+	ptrSlots [64]unsafe.Pointer
+	ValPtr   unsafe.Pointer
 }
 
 var (
@@ -68,39 +70,62 @@ func NewBytes() *[]byte {
 func NewStack() *Stack {
 	ret := stackPool.Get().(*Stack)
 	ret.sp = 0
+	ret.ptrSp = 0
 	return ret
 }
 
 func ResetStack(p *Stack) {
 	p.ValPtr = nil
-	rt.MemclrNoHeapPointers(unsafe.Pointer(p), unsafe.Offsetof(Stack{}.ValPtr))
+	for i := 0; i < p.ptrSp; i++ {
+		p.ptrSlots[i] = nil
+	}
+	p.ptrSp = 0
+	for i := 0; i < p.sp; i++ {
+		p.sb[i] = State{}
+	}
+	p.sp = 0
+}
+
+func (s *Stack) PushPtr(ptr unsafe.Pointer) (unsafe.Pointer, int) {
+	if s.ptrSp < len(s.ptrSlots) {
+		idx := s.ptrSp
+		s.ptrSp = idx + 1
+		s.ptrSlots[idx] = ptr
+		return unsafe.Pointer(&s.ptrSlots[idx]), idx
+	}
+	box := new(unsafe.Pointer)
+	*box = ptr
+	return unsafe.Pointer(box), -1
+}
+
+func (s *Stack) PopPtr(idx int) {
+	if idx >= 0 {
+		s.ptrSlots[idx] = nil
+		s.ptrSp = idx
+	}
 }
 
 func (s *Stack) Top() *State {
-	return (*State)(rt.Add(unsafe.Pointer(&s.sb[0]), s.sp))
+	return &s.sb[s.sp]
 }
 
 func (s *Stack) Cur() *State {
-	return (*State)(rt.Add(unsafe.Pointer(&s.sb[0]), s.sp-uintptr(StateSize)))
+	return &s.sb[s.sp-1]
 }
 
-const _MaxStackSP = uintptr(MaxStack * StateSize)
-
 func (s *Stack) Push(v State) bool {
-	if uintptr(s.sp) >= _MaxStackSP {
+	if s.sp >= MaxStack {
 		return false
 	}
-	st := s.Top()
-	*st = v
-	s.sp += uintptr(StateSize)
+	s.sb[s.sp] = v
+	s.sp++
 	return true
 }
 
 func (s *Stack) Pop() State {
-	s.sp -= uintptr(StateSize)
-	st := s.Top()
-	ret := *st
-	*st = State{}
+	s.sp--
+	ret := s.sb[s.sp]
+	s.sb[s.sp] = State{}
 	return ret
 }
 
@@ -135,6 +160,7 @@ func FreeBytes(p *[]byte) {
 
 func FreeStack(p *Stack) {
 	p.sp = 0
+	p.ptrSp = 0
 	p.ValPtr = nil
 	stackPool.Put(p)
 }

@@ -17,10 +17,10 @@
 package vars
 
 import (
+	"reflect"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/caching"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type Encoder func(
@@ -37,7 +37,7 @@ func cacheFor(pv bool) *caching.ProgramCache {
 	return programCache
 }
 
-func FindOrCompile(vt *rt.GoType, pv bool, compiler func(*rt.GoType, ...interface{}) (interface{}, error)) (interface{}, error) {
+func FindOrCompile(vt reflect.Type, pv bool, compiler func(reflect.Type, ...interface{}) (interface{}, error)) (interface{}, error) {
 	pc := cacheFor(pv)
 	if val := pc.Get(vt); val != nil {
 		return val, nil
@@ -48,11 +48,11 @@ func FindOrCompile(vt *rt.GoType, pv bool, compiler func(*rt.GoType, ...interfac
 	}
 }
 
-func GetProgram(vt *rt.GoType, pv bool) interface{} {
+func GetProgram(vt reflect.Type, pv bool) interface{} {
 	return cacheFor(pv).Get(vt)
 }
 
-func ComputeProgram(vt *rt.GoType, compute func(*rt.GoType, ...interface{}) (interface{}, error), pv bool) (interface{}, error) {
+func ComputeProgram(vt reflect.Type, compute func(reflect.Type, ...interface{}) (interface{}, error), pv bool) (interface{}, error) {
 	return cacheFor(pv).Compute(vt, compute, pv)
 }
 

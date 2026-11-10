@@ -42,22 +42,6 @@ func EncodeNil(rb *[]byte) error {
 	return nil
 }
 
-// func Make_EncodeTypedPointer(computor func(*rt.GoType, ...interface{}) (interface{}, error)) func(*[]byte, *rt.GoType, *unsafe.Pointer, *vars.Stack, uint64) error {
-// 	return func(buf *[]byte, vt *rt.GoType, vp *unsafe.Pointer, sb *vars.Stack, fv uint64) error {
-// 		if vt == nil {
-// 			return EncodeNil(buf)
-// 		} else if fn, err := vars.FindOrCompile(vt, (fv&(1<<BitPointerValue)) != 0, computor); err != nil {
-// 			return err
-// 		} else if vt.Indirect() {
-// 			err := fn(buf, *vp, sb, fv)
-// 			return err
-// 		} else {
-// 			err := fn(buf, unsafe.Pointer(vp), sb, fv)
-// 			return err
-// 		}
-// 	}
-// }
-
 // JSONAppender is an opt-in interface for custom types that can append their
 // JSON representation directly into the destination buffer's spare capacity.
 //
@@ -106,13 +90,9 @@ func EncodeJSONAppender(buf *[]byte, val JSONAppender, opt uint64) error {
 			return vars.Error_marshaler(ret, s)
 		}
 	}
-	if sanitize == 0 {
-		bs := (*rt.GoSlice)(unsafe.Pointer(&b))
-		rs := (*rt.GoSlice)(unsafe.Pointer(&ret))
-		if rs.Ptr == unsafe.Add(bs.Ptr, origLen) && origLen+rs.Len <= bs.Cap {
-			*buf = b[:origLen+rs.Len]
-			return nil
-		}
+	if sanitize == 0 && cap(b) >= origLen+len(ret) && cap(b) > 0 && unsafe.Pointer(unsafe.SliceData(ret)) == unsafe.Add(unsafe.Pointer(unsafe.SliceData(b)), origLen) {
+		*buf = b[:origLen+len(ret)]
+		return nil
 	}
 	*buf = alg.AppendSanitizedBytes(b[:origLen], ret, sanitize)
 	return nil

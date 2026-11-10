@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"testing"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 // Matched diagnostic fixture shared with the retained C and Go baselines.
@@ -37,7 +35,7 @@ func armAnalysisParseStages[T any](b *testing.B, src string, eface bool) {
 	if err := json.Unmarshal([]byte(src), &want); err != nil {
 		b.Fatal(err)
 	}
-	typ := rt.UnpackType(reflect.TypeOf((*T)(nil)).Elem())
+	typ := reflect.TypeOf((*T)(nil)).Elem()
 	dec, err := findOrCompile(typ)
 	if err != nil {
 		b.Fatal(err)

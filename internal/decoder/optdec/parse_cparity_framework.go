@@ -114,16 +114,12 @@ func (p *Parser) growNodeTape() {
 		nextCap = remCap
 	}
 	retainInPool := uintptr(nextCap) <= maxPooledNodesCap
-	slice := rt.GoSlice{
-		Ptr: rt.Mallocgc(uintptr(nextCap)*nodeType.Size, nodeType, false),
-		Len: nextCap,
-		Cap: nextCap,
-	}
-	rt.Memmove(unsafe.Pointer(slice.Ptr), unsafe.Pointer(&p.nodes[0]), offset)
+	grown := make([]node, nextCap)
+	copy(grown[:curLen], p.nodes[:curLen])
 	if !retainInPool && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
 		p.backup = p.nodes
 	}
-	p.nodes = *(*[]node)(unsafe.Pointer(&slice))
+	p.nodes = grown
 	p.nbuf.nstart = uintptr(unsafe.Pointer(rt.SliceData(p.nodes)))
 	p.nbuf.nend = p.nbuf.nstart + uintptr(cap(p.nodes))*unsafe.Sizeof(node{})
 	p.nbuf.ncur = p.nbuf.nstart + offset

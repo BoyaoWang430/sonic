@@ -1,10 +1,8 @@
 package optdec
 
 import (
-	"reflect"
-	"unsafe"
-
 	"sync"
+	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
@@ -209,8 +207,6 @@ func (p *Parser) strRefEscaped(off int, val uint64) string {
 func (p *Parser) strEscaped(off int, val uint64) string {
 	return string(p.bytesEscaped(off, val))
 }
-
-var nodeType = rt.UnpackType(reflect.TypeOf(node{}))
 
 //go:inline
 func calMaxNodeCap(jsonSize int) int {

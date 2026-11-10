@@ -10,7 +10,6 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native"
-	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/ast"
 	sonicutf8 "github.com/bytedance/sonic/utf8"
@@ -247,7 +246,6 @@ func BenchmarkARMNativeKernels(b *testing.B) {
 	}
 }
 
-// Keep this fixture compatible with Go 1.20 and with the older baseline module.
 func armNativeStringData(s string) unsafe.Pointer {
-	return (*rt.GoString)(unsafe.Pointer(&s)).Ptr
+	return unsafe.Pointer(unsafe.StringData(s))
 }

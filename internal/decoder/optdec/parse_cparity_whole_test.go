@@ -8,15 +8,13 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 // Mix numeric cold returns with escaped keys, nested containers, and every
 // small tape capacity. Resumption must retain the parent/count state through
 // both assembly returns and a subsequent allocation/move of the tape.
 func TestCParityWholeColdResumeGrowth(t *testing.T) {
-	dec, err := findOrCompile(rt.UnpackType(reflect.TypeOf((*interface{})(nil)).Elem()))
+	dec, err := findOrCompile(reflect.TypeOf((*interface{})(nil)).Elem())
 	if err != nil {
 		t.Fatal(err)
 	}

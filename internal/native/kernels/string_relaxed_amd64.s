@@ -18,8 +18,7 @@ GLOBL ·sr_slash_vec<>(SB), RODATA|NOPTR, $32
 TEXT ·scanStringRelaxed(SB), NOSPLIT, $0-48
 	MOVQ src+0(FP), SI
 	MOVQ size+8(FP), DX
-	MOVQ DX, R11          // R11 = original size
-	XORQ R15, R15         // consumed offset
+	XORQ R11, R11         // consumed offset
 	MOVQ $-1, R12         // escape pos (-1 if none)
 	XORQ R13, R13         // carry (0 or 1)
 	TESTQ DX, DX
@@ -176,7 +175,7 @@ sr_classify_slash_avx:
 	CMPQ BX, CX
 	JAE  sr_quote_avx
 sr_set_escape_avx:
-	LEAQ (R15)(BX*1), R12
+	LEAQ (R11)(BX*1), R12
 
 sr_quote_avx:
 	TESTQ DI, DI
@@ -188,7 +187,7 @@ sr_quote_avx:
 	ANDQ $1, R13
 
 sr_next_block_avx:
-	ADDQ R9, R15
+	ADDQ R9, R11
 	SUBQ R9, DX
 	JNZ  sr_block
 
@@ -209,7 +208,7 @@ sr_found_avx:
 	VZEROUPPER
 sr_found_AfterVzero:
 	BSFQ DI, BX
-	ADDQ R15, BX
+	ADDQ R11, BX
 	INCQ BX
 	MOVQ BX, end+16(FP)
 	MOVQ R12, escape+24(FP)
@@ -312,7 +311,7 @@ sr_eof_short:
 TEXT ·scanStringRelaxedBlock(SB), NOSPLIT, $0-64
 	MOVQ src+0(FP), SI
 	MOVQ size+8(FP), DX
-	XORQ R15, R15         // consumed offset
+	XORQ R11, R11         // consumed offset
 	MOVQ $-1, R12         // escape pos (-1 if none)
 	XORQ R13, R13         // carry (0 or 1)
 	TESTQ DX, DX
@@ -469,7 +468,7 @@ srb_classify_slash_avx:
 	CMPQ BX, CX
 	JAE  srb_quote_avx
 srb_set_escape_avx:
-	LEAQ (R15)(BX*1), R12
+	LEAQ (R11)(BX*1), R12
 
 srb_quote_avx:
 	TESTQ DI, DI
@@ -481,7 +480,7 @@ srb_quote_avx:
 	ANDQ $1, R13
 
 srb_next_block_avx:
-	ADDQ R9, R15
+	ADDQ R9, R11
 	SUBQ R9, DX
 	JNZ  srb_block
 
@@ -512,7 +511,7 @@ srb_found_AfterVzero:
 	SUBQ CX, R9
 	MOVQ AX, tailEvents+48(FP)
 	MOVQ R9, tailWidth+56(FP)
-	ADDQ R15, BX
+	ADDQ R11, BX
 	INCQ BX
 	MOVQ BX, end+16(FP)
 	MOVQ R12, escape+24(FP)

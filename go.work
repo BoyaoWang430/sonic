@@ -1,4 +1,4 @@
-go 1.18
+go 1.20
 
 use (
 	.
@@ -7,5 +7,4 @@ use (
 	./fuzz
 	./generic_test
 	./issue_test
-	./loader
 )

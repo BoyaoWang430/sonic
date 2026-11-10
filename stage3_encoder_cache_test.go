@@ -20,7 +20,6 @@ import (
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	encvars "github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -490,8 +489,7 @@ func TestT03BatchPretouchDeduplicationAndFailurePolicy(t *testing.T) {
 		t.Fatalf("PretouchMany failed: %v", err)
 	}
 	for i := 0; i < 32; i++ {
-		gvt := rt.UnpackType(types32[i])
-		if encvars.GetProgram(gvt, false) == nil {
+		if encvars.GetProgram(types32[i], false) == nil {
 			t.Fatalf("expected type %d in encoder cache after PretouchMany", i)
 		}
 	}
@@ -518,10 +516,10 @@ func TestT03BatchPretouchDeduplicationAndFailurePolicy(t *testing.T) {
 	if err := encoder.PretouchMany([]reflect.Type{types32[0], reflect.TypeOf(badParent{})}, option.WithCompileRecursiveDepth(2)); err == nil {
 		t.Fatal("expected error for unsupported nested map key in PretouchMany")
 	}
-	if encvars.GetProgram(rt.UnpackType(types32[1]), false) == nil {
+	if encvars.GetProgram(types32[1], false) == nil {
 		t.Fatal("expected pre-existing warm cache entry to remain intact")
 	}
-	if encvars.GetProgram(rt.UnpackType(types32[0]), false) != nil {
+	if encvars.GetProgram(types32[0], false) != nil {
 		t.Fatal("expected failed batch not to partially mutate cache snapshot")
 	}
 }
@@ -566,32 +564,34 @@ func TestStage3_T04_KeyBlobAndSlabContracts(t *testing.T) {
 
 	// Verify all fields' PaddedCommaKey and PaddedStructBeginKey share a single contiguous KeyBlob
 	// with >=32 bytes of readable memory from the start of every key.
-	firstPtr := uintptr((*rt.GoString)(unsafe.Pointer(&fms[0].PaddedCommaKey)).Ptr)
+	blob := fms[0].KeyBlob
+	firstPtr := uintptr(unsafe.Pointer(unsafe.SliceData(blob)))
 	lastField := fms[len(fms)-1]
-	lastEnd := uintptr((*rt.GoString)(unsafe.Pointer(&lastField.PaddedCommaKey)).Ptr) + uintptr(len(lastField.PaddedCommaKey))
+	lastEnd := firstPtr + uintptr(lastField.KeyOffset+lastField.CommaKeyLen)
 	for i, fm := range fms {
-		ptr := uintptr((*rt.GoString)(unsafe.Pointer(&fm.PaddedCommaKey)).Ptr)
-		if ptr < firstPtr || ptr >= lastEnd {
-			t.Fatalf("field %d PaddedCommaKey pointer out of contiguous KeyBlob range", i)
+		if unsafe.SliceData(fm.KeyBlob) != unsafe.SliceData(blob) {
+			t.Fatalf("field %d KeyBlob does not share backing slice", i)
 		}
-		// Safely read 32 bytes from fm.PaddedCommaKey's backing pointer (validates trailing 32B zero pad).
-		raw32 := unsafe.Slice((*byte)((*rt.GoString)(unsafe.Pointer(&fm.PaddedCommaKey)).Ptr), 32)
+		ptr := uintptr(unsafe.Pointer(&fm.KeyBlob[fm.KeyOffset]))
+		if ptr < firstPtr || ptr >= lastEnd {
+			t.Fatalf("field %d KeyOffset pointer out of contiguous KeyBlob range", i)
+		}
+		raw32 := fm.KeyBlob[fm.KeyOffset : fm.KeyOffset+32]
 		if !bytes.HasPrefix(raw32, []byte(fm.PaddedCommaKey)) {
 			t.Fatalf("field %d 32B read prefix mismatch", i)
 		}
 		if fm.Name == "nested" {
-			if fm.PaddedStructBeginKey != `,"nested":{` {
+			if fm.PaddedStructBeginKey != `,"nested":{` || !fm.HasStructBegin {
 				t.Fatalf("unexpected PaddedStructBeginKey: %q", fm.PaddedStructBeginKey)
 			}
-			sbPtr := uintptr((*rt.GoString)(unsafe.Pointer(&fm.PaddedStructBeginKey)).Ptr)
+			sbPtr := uintptr(unsafe.Pointer(unsafe.StringData(fm.PaddedStructBeginKey)))
 			if sbPtr != ptr {
-				t.Fatalf("expected PaddedStructBeginKey to share prefix with PaddedCommaKey in tight KeyBlob")
+				t.Fatalf("expected PaddedStructBeginKey to share prefix with KeyBlob in tight KeyBlob")
 			}
 		}
 	}
 	// Verify trailing 32 bytes after the last key are all zero.
-	lastKeyEndPtr := (*byte)(unsafe.Add((*rt.GoString)(unsafe.Pointer(&lastField.PaddedCommaKey)).Ptr, len(lastField.PaddedCommaKey)))
-	trailingZeros := unsafe.Slice(lastKeyEndPtr, 32)
+	trailingZeros := blob[lastField.KeyOffset+lastField.CommaKeyLen : lastField.KeyOffset+lastField.CommaKeyLen+32]
 	for i, b := range trailingZeros {
 		if b != 0 {
 			t.Fatalf("expected trailing zero at byte %d after KeyBlob, got %d", i, b)

@@ -22,14 +22,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 func TestPcacheSingleflightDedup(t *testing.T) {
 	pc := CreateProgramCache()
 	type sample struct{ A int }
-	vt := rt.UnpackType(reflect.TypeOf(sample{}))
+	vt := reflect.TypeOf(sample{})
 
 	var calls int32
 	enter := make(chan struct{})
@@ -43,7 +41,7 @@ func TestPcacheSingleflightDedup(t *testing.T) {
 		idx := i
 		go func() {
 			defer wg.Done()
-			val, err := pc.Compute(vt, func(*rt.GoType, ...interface{}) (interface{}, error) {
+			val, err := pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
 				if atomic.AddInt32(&calls, 1) == 1 {
 					close(enter)
 				}
@@ -78,15 +76,15 @@ func TestPcacheDistinctTypesParallel(t *testing.T) {
 	pc := CreateProgramCache()
 	type typeA struct{ A int }
 	type typeB struct{ B string }
-	vtA := rt.UnpackType(reflect.TypeOf(typeA{}))
-	vtB := rt.UnpackType(reflect.TypeOf(typeB{}))
+	vtA := reflect.TypeOf(typeA{})
+	vtB := reflect.TypeOf(typeB{})
 
 	enteredA := make(chan struct{})
 	enteredB := make(chan struct{})
 	done := make(chan error, 2)
 
 	go func() {
-		_, err := pc.Compute(vtA, func(*rt.GoType, ...interface{}) (interface{}, error) {
+		_, err := pc.Compute(vtA, func(reflect.Type, ...interface{}) (interface{}, error) {
 			close(enteredA)
 			<-enteredB
 			return "progA", nil
@@ -95,7 +93,7 @@ func TestPcacheDistinctTypesParallel(t *testing.T) {
 	}()
 
 	go func() {
-		_, err := pc.Compute(vtB, func(*rt.GoType, ...interface{}) (interface{}, error) {
+		_, err := pc.Compute(vtB, func(reflect.Type, ...interface{}) (interface{}, error) {
 			close(enteredB)
 			<-enteredA
 			return "progB", nil
@@ -121,7 +119,7 @@ func TestPcacheDistinctTypesParallel(t *testing.T) {
 func TestPcachePanicAndResetSafety(t *testing.T) {
 	pc := CreateProgramCache()
 	type panicType struct{ X int }
-	vt := rt.UnpackType(reflect.TypeOf(panicType{}))
+	vt := reflect.TypeOf(panicType{})
 
 	func() {
 		defer func() {
@@ -129,13 +127,13 @@ func TestPcachePanicAndResetSafety(t *testing.T) {
 				t.Fatal("expected panic")
 			}
 		}()
-		_, _ = pc.Compute(vt, func(*rt.GoType, ...interface{}) (interface{}, error) {
+		_, _ = pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
 			panic("boom")
 		})
 	}()
 
 	// Subsequent Compute on the same type must succeed without hanging.
-	val, err := pc.Compute(vt, func(*rt.GoType, ...interface{}) (interface{}, error) {
+	val, err := pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
 		return "recovered", nil
 	})
 	if err != nil || val != "recovered" {
@@ -144,12 +142,12 @@ func TestPcachePanicAndResetSafety(t *testing.T) {
 
 	// Reset while an old Compute is in-flight must isolate epochs cleanly.
 	type resetType struct{ Y int }
-	vtR := rt.UnpackType(reflect.TypeOf(resetType{}))
+	vtR := reflect.TypeOf(resetType{})
 	inOld := make(chan struct{})
 	releaseOld := make(chan struct{})
 	oldDone := make(chan interface{}, 1)
 	go func() {
-		v, _ := pc.Compute(vtR, func(*rt.GoType, ...interface{}) (interface{}, error) {
+		v, _ := pc.Compute(vtR, func(reflect.Type, ...interface{}) (interface{}, error) {
 			close(inOld)
 			<-releaseOld
 			return "stale", nil
@@ -159,7 +157,7 @@ func TestPcachePanicAndResetSafety(t *testing.T) {
 	<-inOld
 	pc.Reset()
 
-	fresh, err := pc.Compute(vtR, func(*rt.GoType, ...interface{}) (interface{}, error) {
+	fresh, err := pc.Compute(vtR, func(reflect.Type, ...interface{}) (interface{}, error) {
 		return "fresh", nil
 	})
 	if err != nil || fresh != "fresh" {
@@ -183,9 +181,10 @@ func TestPcacheRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var k = map[string]interface{}{}
+		vt := reflect.TypeOf(k)
 		<-start
 		for i := 0; i < 100; i++ {
-			_, _ = pc.Compute(rt.UnpackEface(k).Type, func(*rt.GoType, ...interface{}) (interface{}, error) {
+			_, _ = pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
 				return map[string]interface{}{}, nil
 			})
 		}
@@ -194,9 +193,10 @@ func TestPcacheRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var k = map[string]interface{}{}
+		vt := reflect.TypeOf(k)
 		<-start
 		for i := 0; i < 100; i++ {
-			pc.Get(rt.UnpackEface(k).Type)
+			pc.Get(vt)
 		}
 	}()
 
