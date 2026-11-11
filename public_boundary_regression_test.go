@@ -1894,3 +1894,166 @@ func TestDecoderRepeatedDecodeAfterEOFAndPos(t *testing.T) {
 		}
 	}
 }
+
+type denseNestedLeaf struct {
+	Name  string  `json:"name"`
+	Score float64 `json:"score"`
+	OK    bool    `json:"ok"`
+}
+
+type denseAllSlicesStruct struct {
+	ID      int               `json:"id"`
+	Title   string            `json:"title"`
+	Nested  denseNestedLeaf   `json:"nested"`
+	Raw     []byte            `json:"raw"`
+	Bools   []bool            `json:"bools"`
+	F64s    []float64         `json:"f64s"`
+	F32s    []float32         `json:"f32s"`
+	I32s    []int32           `json:"i32s"`
+	Uints   []uint            `json:"uints"`
+	U64s    []uint64          `json:"u64s"`
+	U32s    []uint32          `json:"u32s"`
+	Items   []denseNestedLeaf `json:"items"`
+	Summary string            `json:"summary"`
+}
+
+type omitemptyAllSlicesStruct struct {
+	Raw   []byte            `json:"raw,omitempty"`
+	Bools []bool            `json:"bools,omitempty"`
+	F64s  []float64         `json:"f64s,omitempty"`
+	F32s  []float32         `json:"f32s,omitempty"`
+	I32s  []int32           `json:"i32s,omitempty"`
+	Uints []uint            `json:"uints,omitempty"`
+	U64s  []uint64          `json:"u64s,omitempty"`
+	U32s  []uint32          `json:"u32s,omitempty"`
+	Items []denseNestedLeaf `json:"items,omitempty"`
+	Tail  int               `json:"tail"`
+}
+
+func TestScalarSliceSpecsAndDensePureStructs(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+	}{
+		{
+			name: "dense_populated",
+			val: denseAllSlicesStruct{
+				ID:     42,
+				Title:  "hello <world> & friends\u2028line",
+				Nested: denseNestedLeaf{Name: "leaf<&>", Score: 3.5, OK: true},
+				Raw:    []byte{0xff, 0x00, 0x3e, 0xfb, 0xef, '<', '&', '>'},
+				Bools:  []bool{true, false, true},
+				F64s:   []float64{0, -1.25, 1e10, 3.141592653589793},
+				F32s:   []float32{0, -2.5, 42.125},
+				I32s:   []int32{math.MinInt32, -1, 0, 7, math.MaxInt32},
+				Uints:  []uint{0, 1, 999999},
+				U64s:   []uint64{0, 1, math.MaxUint64},
+				U32s:   []uint32{0, 1, math.MaxUint32},
+				Items: []denseNestedLeaf{
+					{Name: "a<b>", Score: 1.25, OK: false},
+					{Name: "c&d", Score: 2.5, OK: true},
+				},
+				Summary: "done",
+			},
+		},
+		{
+			name: "dense_all_nil_slices",
+			val:  denseAllSlicesStruct{ID: 1, Title: "nil"},
+		},
+		{
+			name: "dense_all_empty_slices",
+			val: denseAllSlicesStruct{
+				ID:    2,
+				Title: "empty",
+				Raw:   []byte{},
+				Bools: []bool{},
+				F64s:  []float64{},
+				F32s:  []float32{},
+				I32s:  []int32{},
+				Uints: []uint{},
+				U64s:  []uint64{},
+				U32s:  []uint32{},
+				Items: []denseNestedLeaf{},
+			},
+		},
+		{
+			name: "dense_root_slice",
+			val: []denseAllSlicesStruct{
+				{ID: 1, Title: "first <1>", Bools: []bool{true}, F64s: []float64{1.5}, Raw: []byte("abc")},
+				{ID: 2, Title: "second & 2", I32s: []int32{-5, 8}, U32s: []uint32{9}, Items: []denseNestedLeaf{{Name: "x", Score: 4, OK: true}}},
+			},
+		},
+		{
+			name: "omitempty_nil_and_empty",
+			val:  omitemptyAllSlicesStruct{Raw: []byte{}, F64s: []float64{}, Tail: 7},
+		},
+		{
+			name: "omitempty_populated",
+			val: omitemptyAllSlicesStruct{
+				Raw:   []byte("xyz"),
+				Bools: []bool{false},
+				F64s:  []float64{2.5},
+				F32s:  []float32{1.5},
+				I32s:  []int32{-9},
+				Uints: []uint{8},
+				U64s:  []uint64{10},
+				U32s:  []uint32{11},
+				Items: []denseNestedLeaf{{Name: "item", Score: 9, OK: true}},
+				Tail:  99,
+			},
+		},
+	}
+
+	noNullCfg := Config{NoNullSliceOrMap: true, EscapeHTML: true, ValidateString: true}.Froze()
+	noNullFastCfg := Config{NoNullSliceOrMap: true}.Froze()
+
+	for _, tc := range cases {
+		wantStd, err := json.Marshal(tc.val)
+		if err != nil {
+			t.Fatalf("%s json.Marshal failed: %v", tc.name, err)
+		}
+		gotStd, err := ConfigStd.Marshal(tc.val)
+		if err != nil {
+			t.Fatalf("%s ConfigStd.Marshal failed: %v", tc.name, err)
+		}
+		if !bytes.Equal(gotStd, wantStd) {
+			t.Fatalf("%s ConfigStd mismatch:\ngot:  %s\nwant: %s", tc.name, gotStd, wantStd)
+		}
+
+		for _, cfgItem := range []struct {
+			label string
+			api   API
+		}{
+			{"ConfigDefault", ConfigDefault},
+			{"ConfigFastest", ConfigFastest},
+			{"NoNullStd", noNullCfg},
+			{"NoNullFast", noNullFastCfg},
+		} {
+			got, err := cfgItem.api.Marshal(tc.val)
+			if err != nil {
+				t.Fatalf("%s %s.Marshal failed: %v", tc.name, cfgItem.label, err)
+			}
+			if !json.Valid(got) {
+				t.Fatalf("%s %s produced invalid JSON: %s", tc.name, cfgItem.label, got)
+			}
+			if (cfgItem.label == "NoNullStd" || cfgItem.label == "NoNullFast") && bytes.Contains(got, []byte(":null")) {
+				t.Fatalf("%s %s unexpectedly emitted null slice: %s", tc.name, cfgItem.label, got)
+			}
+		}
+	}
+
+	// NaN / Inf error checks on dense and omitempty float slices.
+	for _, bad := range []any{
+		denseAllSlicesStruct{F64s: []float64{1.0, math.NaN()}},
+		denseAllSlicesStruct{F32s: []float32{float32(math.Inf(1))}},
+		omitemptyAllSlicesStruct{F64s: []float64{math.Inf(-1)}},
+		omitemptyAllSlicesStruct{F32s: []float32{float32(math.NaN())}},
+	} {
+		if _, err := ConfigStd.Marshal(bad); err == nil {
+			t.Fatalf("expected error on NaN/Inf slice in ConfigStd for %#v", bad)
+		}
+		if _, err := ConfigFastest.Marshal(bad); err == nil {
+			t.Fatalf("expected error on NaN/Inf slice in ConfigFastest for %#v", bad)
+		}
+	}
+}

@@ -728,16 +728,36 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 				return ir.StructFieldSpec{}, false
 			}
 			switch ft {
+			case vars.ByteSliceType:
+				kind = ir.OP_bin
 			case vars.AnySliceType:
 				kind = ir.OP_slice_eface
+			case vars.BoolSliceType:
+				kind = ir.OP_slice_bool
+			case vars.Float64SliceType:
+				kind = ir.OP_f64_slice
+			case vars.Float32SliceType:
+				kind = ir.OP_f32_slice
 			case vars.IntSliceType:
 				if ir.OP_int() == ir.OP_i64 {
 					kind = ir.OP_slice_i64
 				} else {
-					return ir.StructFieldSpec{}, false
+					kind = ir.OP_slice_i32
 				}
 			case vars.Int64SliceType:
 				kind = ir.OP_slice_i64
+			case vars.Int32SliceType:
+				kind = ir.OP_slice_i32
+			case vars.UintSliceType:
+				if ir.OP_uint() == ir.OP_u64 {
+					kind = ir.OP_slice_u64
+				} else {
+					kind = ir.OP_slice_u32
+				}
+			case vars.Uint64SliceType:
+				kind = ir.OP_slice_u64
+			case vars.Uint32SliceType:
+				kind = ir.OP_slice_u32
 			case vars.StringSliceType:
 				kind = ir.OP_slice_str
 			default:
@@ -746,11 +766,14 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 					if !ok {
 						return ir.StructFieldSpec{}, false
 					}
+					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
 					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
-						KeyPtr:    &fv.KeyBlob[fv.KeyOffset],
-						SliceType: ft,
-						ElemSize:  et.Size(),
-						Specs:     elemSpecs,
+						KeyPtr:     &fv.KeyBlob[fv.KeyOffset],
+						SliceType:  ft,
+						ElemSize:   et.Size(),
+						Specs:      elemSpecs,
+						DenseSpecs: denseSpecs,
+						IsDense:    isDense,
 					})
 					kind = ir.OP_slice_struct
 				} else {

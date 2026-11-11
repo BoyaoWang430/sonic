@@ -574,6 +574,16 @@ func isEmptySlice(p unsafe.Pointer, vt reflect.Type) bool {
 		return len(*(*[]float64)(p)) == 0
 	case vars.Float32SliceType:
 		return len(*(*[]float32)(p)) == 0
+	case vars.BoolSliceType:
+		return len(*(*[]bool)(p)) == 0
+	case vars.Int32SliceType:
+		return len(*(*[]int32)(p)) == 0
+	case vars.UintSliceType:
+		return len(*(*[]uint)(p)) == 0
+	case vars.Uint64SliceType:
+		return len(*(*[]uint64)(p)) == 0
+	case vars.Uint32SliceType:
+		return len(*(*[]uint32)(p)) == 0
 	case vars.AnySliceType:
 		return len(*(*[]any)(p)) == 0
 	default:

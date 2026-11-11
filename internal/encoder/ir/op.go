@@ -84,6 +84,10 @@ const (
 	OP_struct_end
 	OP_slice_eface
 	OP_slice_i64
+	OP_slice_i32
+	OP_slice_u64
+	OP_slice_u32
+	OP_slice_bool
 	OP_slice_str
 	OP_slice_struct
 	OP_unsupported
@@ -167,6 +171,10 @@ var _OpNames = [256]string{
 	OP_struct_end:       "struct_end",
 	OP_slice_eface:      "slice_eface",
 	OP_slice_i64:        "slice_i64",
+	OP_slice_i32:        "slice_i32",
+	OP_slice_u64:        "slice_u64",
+	OP_slice_u32:        "slice_u32",
+	OP_slice_bool:       "slice_bool",
 	OP_slice_str:        "slice_str",
 	OP_slice_struct:     "slice_struct",
 	OP_unsupported:      "unsupported",
@@ -303,10 +311,50 @@ var (
 )
 
 type StructSliceSpec struct {
-	KeyPtr    *byte
-	SliceType reflect.Type
-	ElemSize  uintptr
-	Specs     []StructFieldSpec
+	KeyPtr     *byte
+	SliceType  reflect.Type
+	ElemSize   uintptr
+	Specs      []StructFieldSpec
+	DenseSpecs []StructFieldSpec
+	IsDense    bool
+}
+
+// BuildDenseSpecs returns a copy of specs with leading-comma skips statically resolved
+// when every spec in specs is unconditional and non-pointer (Flags == 0).
+func BuildDenseSpecs(specs []StructFieldSpec) ([]StructFieldSpec, bool) {
+	if len(specs) == 0 {
+		return nil, true
+	}
+	for i := range specs {
+		if specs[i].Flags != 0 {
+			return nil, false
+		}
+	}
+	out := make([]StructFieldSpec, len(specs))
+	copy(out, specs)
+	for i := range out {
+		s := &out[i]
+		if s.Kind == OP_struct_end {
+			continue
+		}
+		if s.Kind == OP_slice_struct {
+			orig := (*StructSliceSpec)(s.Ptr)
+			if s.NoCommaSkip != 0 {
+				cp := *orig
+				cp.KeyPtr = (*byte)(unsafe.Add(unsafe.Pointer(orig.KeyPtr), s.NoCommaSkip))
+				s.Ptr = unsafe.Pointer(&cp)
+				s.KeyLen -= s.NoCommaSkip
+				s.NoCommaSkip = 0
+			}
+			continue
+		}
+		if s.NoCommaSkip != 0 {
+			s.Ptr = unsafe.Add(s.Ptr, s.NoCommaSkip)
+			s.KeyLen -= s.NoCommaSkip
+			s.NoCommaSkip = 0
+		}
+	}
+	return out, true
 }
 
 // FirstKey returns the key pointer and length without its leading comma when NoCommaSkip == 1.

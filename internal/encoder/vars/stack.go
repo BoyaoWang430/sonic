@@ -236,6 +236,18 @@ func (s *Stack) Push(v State) bool {
 	return true
 }
 
+func (s *Stack) EnterDepth(n int) bool {
+	if s.sp+n > MaxStack {
+		return false
+	}
+	s.sp += n
+	return true
+}
+
+func (s *Stack) LeaveDepth(n int) {
+	s.sp -= n
+}
+
 func (s *Stack) Pop() State {
 	s.sp--
 	ret := s.sb[s.sp]
