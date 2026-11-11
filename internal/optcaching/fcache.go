@@ -38,10 +38,16 @@ type foldedCache struct {
 }
 
 type FieldCache struct {
-	exact     []fieldCacheEntry
-	mask      uint32
-	numFields uint32
-	foldedPtr atomic.Pointer[foldedCache]
+	exact      []fieldCacheEntry
+	mask       uint32
+	numFields  uint32
+	lenMask    uint64
+	foldFirst0 uint64
+	foldFirst1 uint64
+	foldLast0  uint64
+	foldLast1  uint64
+	allASCII   bool
+	foldedPtr  atomic.Pointer[foldedCache]
 }
 
 //go:nosplit
@@ -92,17 +98,54 @@ func foldASCII8(w uint64) uint64 {
 }
 
 func isPureASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
+	l := len(s)
+	p := unsafe.Pointer(unsafe.StringData(s))
+	off := 0
+	for off+8 <= l {
+		if *(*uint64)(unsafe.Add(p, off))&0x8080808080808080 != 0 {
 			return false
 		}
+		off += 8
+	}
+	for off < l {
+		if *(*uint8)(unsafe.Add(p, off)) >= 0x80 {
+			return false
+		}
+		off++
 	}
 	return true
 }
 
+//go:nosplit
+func equalMiddle(a, b string, n uint32) bool {
+	if n <= 8 {
+		return true
+	}
+	pa := unsafe.Pointer(unsafe.StringData(a))
+	pb := unsafe.Pointer(unsafe.StringData(b))
+	if n <= 12 {
+		return *(*uint32)(unsafe.Add(pa, 4)) == *(*uint32)(unsafe.Add(pb, 4))
+	}
+	if n <= 16 {
+		return *(*uint64)(unsafe.Add(pa, 4)) == *(*uint64)(unsafe.Add(pb, 4))
+	}
+	if n <= 24 {
+		return *(*uint64)(unsafe.Add(pa, 4)) == *(*uint64)(unsafe.Add(pb, 4)) &&
+			*(*uint64)(unsafe.Add(pa, uintptr(n)-12)) == *(*uint64)(unsafe.Add(pb, uintptr(n)-12))
+	}
+	return a == b
+}
+
+func foldASCIIByte(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
 func NewFieldCache(fields []resolver.FieldMeta) *FieldCache {
 	if len(fields) == 0 {
-		return &FieldCache{}
+		return &FieldCache{allASCII: true}
 	}
 	cap := uint32(8)
 	for cap < uint32(len(fields))*4 {
@@ -112,10 +155,33 @@ func NewFieldCache(fields []resolver.FieldMeta) *FieldCache {
 	f := &FieldCache{
 		exact:     make([]fieldCacheEntry, cap),
 		mask:      mask,
-		numFields: uint32(len(fields)),
+		numFields: uint32(fieldsLen(fields)),
+		allASCII:  true,
 	}
 	for i, field := range fields {
 		name := field.Name
+		l := len(name)
+		bit := uint(l)
+		if bit > 63 {
+			bit = 63
+		}
+		f.lenMask |= uint64(1) << bit
+		if !isPureASCII(name) {
+			f.allASCII = false
+		} else if l > 0 {
+			fb := foldASCIIByte(name[0])
+			if fb < 64 {
+				f.foldFirst0 |= uint64(1) << fb
+			} else {
+				f.foldFirst1 |= uint64(1) << (fb - 64)
+			}
+			lb := foldASCIIByte(name[l-1])
+			if lb < 64 {
+				f.foldLast0 |= uint64(1) << lb
+			} else {
+				f.foldLast1 |= uint64(1) << (lb - 64)
+			}
+		}
 		n, lo, hi := strSig(name)
 		idx := hashSig(n, lo, hi) & mask
 		for {
@@ -134,6 +200,10 @@ func NewFieldCache(fields []resolver.FieldMeta) *FieldCache {
 		}
 	}
 	return f
+}
+
+func fieldsLen(fields []resolver.FieldMeta) int {
+	return len(fields)
 }
 
 //go:noinline
@@ -185,30 +255,109 @@ func (f *FieldCache) initFolded() *foldedCache {
 	return fc
 }
 
-func (f *FieldCache) Get(name string, caseSensitive bool) int {
-	if len(f.exact) == 0 {
+func (f *FieldCache) GetInsensitive(name string) int {
+	exact := f.exact
+	if len(exact) == 0 {
 		return -1
 	}
 	n, lo, hi := strSig(name)
-	mask := f.mask
+	mask := uint32(len(exact) - 1)
 	idx := hashSig(n, lo, hi) & mask
 	for {
-		e := &f.exact[idx]
+		e := &exact[idx]
 		if e.idxPlus1 == 0 {
 			break
 		}
-		if e.n == n && e.lo == lo && e.hi == hi && (n <= 8 || e.name == name) {
+		if e.n == n && e.lo == lo && e.hi == hi && equalMiddle(name, e.name, n) {
 			return int(e.idxPlus1) - 1
 		}
 		idx = (idx + 1) & mask
 	}
-	if !caseSensitive {
-		return f.getCaseInsensitive(name, n, lo, hi)
+	bit := uint(n)
+	if bit > 63 {
+		bit = 63
 	}
-	return -1
+	if (f.lenMask & (uint64(1) << bit)) == 0 {
+		if f.allASCII && (lo|hi)&0x80808080 == 0 && (n <= 8 || isPureASCII(name)) {
+			return -1
+		}
+	}
+	return f.getCaseInsensitive(name, n, lo, hi)
+}
+
+func (f *FieldCache) Get(name string, caseSensitive bool) int {
+	exact := f.exact
+	if len(exact) == 0 {
+		return -1
+	}
+	n, lo, hi := strSig(name)
+	mask := uint32(len(exact) - 1)
+	idx := hashSig(n, lo, hi) & mask
+	for {
+		e := &exact[idx]
+		if e.idxPlus1 == 0 {
+			break
+		}
+		if e.n == n && e.lo == lo && e.hi == hi && equalMiddle(name, e.name, n) {
+			return int(e.idxPlus1) - 1
+		}
+		idx = (idx + 1) & mask
+	}
+	if caseSensitive {
+		return -1
+	}
+	bit := uint(n)
+	if bit > 63 {
+		bit = 63
+	}
+	if (f.lenMask & (uint64(1) << bit)) == 0 {
+		if f.allASCII && (lo|hi)&0x80808080 == 0 && (n <= 8 || isPureASCII(name)) {
+			return -1
+		}
+	}
+	return f.getCaseInsensitive(name, n, lo, hi)
+}
+
+func (f *FieldCache) asciiFoldCandidate(name string, n, lo, hi uint32) bool {
+	if n == 0 {
+		return (f.lenMask & 1) != 0
+	}
+	bit := uint(n)
+	if bit > 63 {
+		bit = 63
+	}
+	if (f.lenMask & (uint64(1) << bit)) == 0 {
+		return false
+	}
+	fb := foldASCIIByte(name[0])
+	if fb < 64 {
+		if (f.foldFirst0 & (uint64(1) << fb)) == 0 {
+			return false
+		}
+	} else {
+		if (f.foldFirst1 & (uint64(1) << (fb - 64))) == 0 {
+			return false
+		}
+	}
+	lb := foldASCIIByte(name[n-1])
+	if lb < 64 {
+		if (f.foldLast0 & (uint64(1) << lb)) == 0 {
+			return false
+		}
+	} else {
+		if (f.foldLast1 & (uint64(1) << (lb - 64))) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
+	if f.allASCII && (lo|hi)&0x80808080 == 0 && !f.asciiFoldCandidate(name, n, lo, hi) {
+		if n <= 8 || isPureASCII(name) {
+			return -1
+		}
+	}
 	fc := f.foldedPtr.Load()
 	if fc == nil {
 		fc = f.initFolded()

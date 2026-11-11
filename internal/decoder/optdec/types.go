@@ -62,6 +62,16 @@ var (
 	sliceF64Type            = reflect.TypeOf([]float64(nil))
 	sliceBoolType           = reflect.TypeOf([]bool(nil))
 	sliceStringType         = reflect.TypeOf([]string(nil))
+	ptrBoolType             = reflect.TypeOf((*bool)(nil))
+	ptrIntType              = reflect.TypeOf((*int)(nil))
+	ptrInt32Type            = reflect.TypeOf((*int32)(nil))
+	ptrInt64Type            = reflect.TypeOf((*int64)(nil))
+	ptrUintType             = reflect.TypeOf((*uint)(nil))
+	ptrUint32Type           = reflect.TypeOf((*uint32)(nil))
+	ptrUint64Type           = reflect.TypeOf((*uint64)(nil))
+	ptrFloat32Type          = reflect.TypeOf((*float32)(nil))
+	ptrFloat64Type          = reflect.TypeOf((*float64)(nil))
+	ptrStringType           = reflect.TypeOf((*string)(nil))
 )
 
 var (

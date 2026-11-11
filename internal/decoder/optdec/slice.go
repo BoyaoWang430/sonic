@@ -52,6 +52,34 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 
 	var gerr error
 	if sd := d.structDec; sd != nil {
+		p := ctx.Parser
+		opts := p.options
+		if sd.fast && opts&fastStructExcludeMask == 0 {
+			jsonStr := p.Json
+			copyStr := opts&(1<<_F_copy_string) != 0
+			for i := 0; i < size; i++ {
+				elem := unsafe.Add(elems, uintptr(i)*elemSize)
+				vptr := next
+				vtyp := uint8(vptr.typ)
+				if vtyp == KObject {
+					next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
+					if uint32(vptr.val) != 0 {
+						err := sd.fromObjFast(elem, vptr, p, jsonStr, copyStr, ctx)
+						if gerr == nil && err != nil {
+							gerr = err
+						}
+					}
+					continue
+				}
+				val := NewNode(vptr)
+				err := sd.FromDom(elem, val, ctx)
+				if gerr == nil && err != nil {
+					gerr = err
+				}
+				next = val.Next()
+			}
+			return gerr
+		}
 		for i := 0; i < size; i++ {
 			val := NewNode(next)
 			elem := unsafe.Add(elems, uintptr(i)*elemSize)

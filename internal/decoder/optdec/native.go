@@ -125,6 +125,15 @@ type Parser struct {
 	strSlabOff    int
 	strSlabNext   int
 	ctx           Context
+
+	// Per-decode typed pointer slabs for optional *Scalar / *string struct fields.
+	// Placed after ctx so assembly-referenced Parser offsets remain unchanged.
+	scalarSlab     []uint64
+	scalarSlabOff  int
+	scalarSlabNext int
+	strPtrSlab     []string
+	strPtrSlabOff  int
+	strPtrSlabNext int
 }
 
 // only when parse non-empty object/array are needed.
@@ -185,7 +194,88 @@ const (
 	initStrSlabCap = 512
 	maxStrSlabCap  = 4096
 	maxArenaStrLen = 1024
+	maxPtrSlabCap  = 64
 )
+
+func (p *Parser) resetSlabs() {
+	p.strSlab = nil
+	p.strSlabOff = 0
+	p.strSlabNext = 0
+	p.scalarSlab = nil
+	p.scalarSlabOff = 0
+	p.scalarSlabNext = 0
+	p.strPtrSlab = nil
+	p.strPtrSlabOff = 0
+	p.strPtrSlabNext = 0
+}
+
+func (p *Parser) allocScalarPtr(hint int) unsafe.Pointer {
+	off := p.scalarSlabOff
+	if off < len(p.scalarSlab) {
+		p.scalarSlabOff = off + 1
+		return unsafe.Pointer(&p.scalarSlab[off])
+	}
+	return p.allocScalarPtrSlow(hint)
+}
+
+//go:noinline
+func (p *Parser) allocScalarPtrSlow(hint int) unsafe.Pointer {
+	n := p.scalarSlabNext
+	if n == 0 {
+		if hint >= 1 && hint <= 16 {
+			n = hint
+		} else if hint > 16 {
+			n = 16
+		} else {
+			n = 4
+		}
+	}
+	next := n * 4
+	if next < 8 {
+		next = 8
+	} else if next > maxPtrSlabCap {
+		next = maxPtrSlabCap
+	}
+	p.scalarSlabNext = next
+	slab := make([]uint64, n)
+	p.scalarSlab = slab
+	p.scalarSlabOff = 1
+	return unsafe.Pointer(&slab[0])
+}
+
+func (p *Parser) allocStrPtr(hint int) *string {
+	off := p.strPtrSlabOff
+	if off < len(p.strPtrSlab) {
+		p.strPtrSlabOff = off + 1
+		return &p.strPtrSlab[off]
+	}
+	return p.allocStrPtrSlow(hint)
+}
+
+//go:noinline
+func (p *Parser) allocStrPtrSlow(hint int) *string {
+	n := p.strPtrSlabNext
+	if n == 0 {
+		if hint >= 1 && hint <= 16 {
+			n = hint
+		} else if hint > 16 {
+			n = 16
+		} else {
+			n = 4
+		}
+	}
+	next := n * 4
+	if next < 8 {
+		next = 8
+	} else if next > maxPtrSlabCap {
+		next = maxPtrSlabCap
+	}
+	p.strPtrSlabNext = next
+	slab := make([]string, n)
+	p.strPtrSlab = slab
+	p.strPtrSlabOff = 1
+	return &slab[0]
+}
 
 // strCommon returns an unescaped JSON string token, copying if copyStr is true.
 func (p *Parser) strCommon(off, length int, copyStr bool) string {
@@ -340,9 +430,7 @@ func (p *Parser) reset() {
 	p.isEface = false
 	p.sessionPadded = nil
 	p.unesc = nil
-	p.strSlab = nil
-	p.strSlabOff = 0
-	p.strSlabNext = 0
+	p.resetSlabs()
 	p.ctx = Context{}
 }
 

@@ -161,6 +161,8 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 	entries := make([]fieldEntry, len(fv))
 	decs := make([]decFunc, len(fv))
 	var wideOffsets []uintptr
+	var ptrScalarCount int
+	var ptrStrCount int
 
 	for i, f := range fv {
 		var dec decFunc
@@ -188,17 +190,39 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 			}
 			wideOffsets = append(wideOffsets, f.Path[0].Size)
 		} else {
-			entries[i] = newFieldEntry(f.Name, f.Path[0].Size, dec)
+			fe := newFieldEntry(f.Name, f.Path[0].Size, f.Type, dec)
+			entries[i] = fe
+			switch fe.kind {
+			case fieldKindPtrString:
+				ptrStrCount++
+			case fieldKindPtrI64, fieldKindPtrInt, fieldKindPtrI32,
+				fieldKindPtrU64, fieldKindPtrUint, fieldKindPtrU32,
+				fieldKindPtrBool, fieldKindPtrF64, fieldKindPtrF32:
+				ptrScalarCount++
+			case fieldKindStruct, fieldKindPtrStruct:
+				sd := (*structDecoder)(fe.subDec)
+				ptrScalarCount += int(sd.ptrScalarHint)
+				ptrStrCount += int(sd.ptrStrHint)
+			}
 		}
 		decs[i] = dec
 	}
+	if ptrScalarCount > 16 {
+		ptrScalarCount = 16
+	}
+	if ptrStrCount > 16 {
+		ptrStrCount = 16
+	}
 	return &structDecoder{
-		fieldMap:    caching.NewFieldCache(fv),
-		fields:      entries,
-		fieldDecs:   decs,
-		wideOffsets: wideOffsets,
-		structName:  vt.Name(),
-		typ:         vt,
-		goType:      vt,
+		fieldMap:      caching.NewFieldCache(fv),
+		fields:        entries,
+		fieldDecs:     decs,
+		wideOffsets:   wideOffsets,
+		structName:    vt.Name(),
+		typ:           vt,
+		goType:        vt,
+		fast:          len(wideOffsets) == 0,
+		ptrScalarHint: uint8(ptrScalarCount),
+		ptrStrHint:    uint8(ptrStrCount),
 	}
 }

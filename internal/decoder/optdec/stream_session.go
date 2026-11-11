@@ -161,9 +161,7 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 		s.unesc = s.unesc[:0]
 	}
 	p.nbuf = nodeBuf{parent: -1}
-	p.strSlab = nil
-	p.strSlabOff = 0
-	p.strSlabNext = 0
+	p.resetSlabs()
 	p.Utf8Inv = false
 	p.isEface = isEface
 	s.cur = 0
@@ -193,9 +191,7 @@ func (s *StreamSession) Reset() {
 		}
 		s.p.Json = ""
 		s.p.unesc = nil
-		s.p.strSlab = nil
-		s.p.strSlabOff = 0
-		s.p.strSlabNext = 0
+		s.p.resetSlabs()
 		s.p.nbuf = nodeBuf{parent: -1}
 	}
 	if cap(s.unesc) > maxRetainedStreamUnescCap {
@@ -944,9 +940,7 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 			sess.ctx.sliceArena = nil
 			p.Json = ""
 			p.unesc = nil
-			p.strSlab = nil
-			p.strSlabOff = 0
-			p.strSlabNext = 0
+			p.resetSlabs()
 			sess.active = false
 			if p.backup != nil {
 				p.nodes = p.backup
