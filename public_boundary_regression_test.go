@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/internal/encoder/vars"
+	"github.com/bytedance/sonic/option"
 )
 
 type customStringIntMap map[string]int
@@ -683,5 +685,117 @@ func TestSortedStringAnyMapNestedAndErrorCleanup(t *testing.T) {
 	got2, err := ConfigStd.Marshal(outer)
 	if err != nil || !bytes.Equal(got2, want) {
 		t.Fatalf("post-error ConfigStd.Marshal mismatch: err=%v", err)
+	}
+}
+
+type namedStringSlice []string
+type namedIntSlice []int
+type namedInt64Slice []int64
+type namedAnySlice []any
+type namedByteSlice []byte
+type namedFloat64Slice []float64
+type namedZeroStructSlice []struct{}
+
+type namedSliceHolder struct {
+	SS   namedStringSlice     `json:"ss"`
+	SSO  namedStringSlice     `json:"sso,omitempty"`
+	IS   namedIntSlice        `json:"is"`
+	ISO  namedIntSlice        `json:"iso,omitempty"`
+	I64S namedInt64Slice      `json:"i64s"`
+	AS   namedAnySlice        `json:"as"`
+	BS   namedByteSlice       `json:"bs"`
+	BSO  namedByteSlice       `json:"bso,omitempty"`
+	FS   namedFloat64Slice    `json:"fs"`
+	FSO  namedFloat64Slice    `json:"fso,omitempty"`
+	ZS   namedZeroStructSlice `json:"zs"`
+}
+
+type rootPtrOmitNullDemo struct {
+	S string `json:"s,omitempty"`
+	P *int   `json:"p,omitempty"`
+}
+
+func TestNamedSliceExactTypesAndRootEncCache(t *testing.T) {
+	samples := []namedSliceHolder{
+		{},
+		{
+			SS:   namedStringSlice{},
+			SSO:  namedStringSlice{},
+			IS:   namedIntSlice{},
+			ISO:  namedIntSlice{},
+			I64S: namedInt64Slice{},
+			AS:   namedAnySlice{},
+			BS:   namedByteSlice{},
+			BSO:  namedByteSlice{},
+			FS:   namedFloat64Slice{},
+			FSO:  namedFloat64Slice{},
+			ZS:   namedZeroStructSlice{},
+		},
+		{
+			SS:   namedStringSlice{"a", "b<c"},
+			SSO:  namedStringSlice{"x"},
+			IS:   namedIntSlice{1, 2, 3},
+			ISO:  namedIntSlice{9},
+			I64S: namedInt64Slice{-5, 0, 7},
+			AS:   namedAnySlice{"ok", 12, true, nil},
+			BS:   namedByteSlice("hello"),
+			BSO:  namedByteSlice("world"),
+			FS:   namedFloat64Slice{1.5, 2.5},
+			FSO:  namedFloat64Slice{3.25},
+			ZS:   make(namedZeroStructSlice, 2),
+		},
+	}
+
+	for idx, h := range samples {
+		for _, val := range []any{h, &h} {
+			want, err := json.Marshal(val)
+			if err != nil {
+				t.Fatalf("case %d json.Marshal failed: %v", idx, err)
+			}
+			got, err := ConfigStd.Marshal(val)
+			if err != nil {
+				t.Fatalf("case %d ConfigStd.Marshal failed: %v", idx, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("case %d (%T) mismatch:\ngot:  %s\nwant: %s", idx, val, got, want)
+			}
+		}
+	}
+
+	// Nil root struct pointer must encode as "null".
+	var nilPtr *namedSliceHolder
+	if got, err := Marshal(nilPtr); err != nil || string(got) != "null" {
+		t.Fatalf("Marshal(nilPtr) = %s, err=%v; want null", got, err)
+	}
+
+	if APIKind != UseSonicJSON {
+		return
+	}
+
+	// Verify NoNullSliceOrMap on nil named slices inside struct and at top-level.
+	cfgNoNull := Config{NoNullSliceOrMap: true}.Froze()
+	if got, err := cfgNoNull.Marshal(namedStringSlice(nil)); err != nil || string(got) != "[]" {
+		t.Fatalf("NoNullSliceOrMap Marshal(namedStringSlice(nil)) = %s, err=%v; want []", got, err)
+	}
+	if got, err := cfgNoNull.Marshal(namedByteSlice(nil)); err != nil || string(got) != "[]" {
+		t.Fatalf("NoNullSliceOrMap Marshal(namedByteSlice(nil)) = %s, err=%v; want []", got, err)
+	}
+	if got, err := cfgNoNull.Marshal(namedFloat64Slice(nil)); err != nil || string(got) != "[]" {
+		t.Fatalf("NoNullSliceOrMap Marshal(namedFloat64Slice(nil)) = %s, err=%v; want []", got, err)
+	}
+
+	// Verify rootEncCache honors Pretouch(*T, WithCompileEncOnlyOmitNull(true)) and ResetProgramCache().
+	vars.ResetProgramCache()
+	defer vars.ResetProgramCache()
+	if err := Pretouch(reflect.TypeOf((*rootPtrOmitNullDemo)(nil)), option.WithCompileEncOnlyOmitNull(true)); err != nil {
+		t.Fatalf("Pretouch(*rootPtrOmitNullDemo) failed: %v", err)
+	}
+	demo := &rootPtrOmitNullDemo{S: "", P: nil}
+	got, err := Marshal(demo)
+	if err != nil {
+		t.Fatalf("Marshal(demo) failed: %v", err)
+	}
+	if string(got) != `{"s":""}` {
+		t.Fatalf("rootEncCache did not honor Pretouch EncOnlyOmitNull: got %s, want {\"s\":\"\"}", got)
 	}
 }

@@ -25,6 +25,12 @@ import (
 var (
 	ByteType                 = reflect.TypeOf(byte(0))
 	ByteSliceType            = reflect.TypeOf([]byte(nil))
+	Float32SliceType         = reflect.TypeOf([]float32(nil))
+	Float64SliceType         = reflect.TypeOf([]float64(nil))
+	StringSliceType          = reflect.TypeOf([]string(nil))
+	IntSliceType             = reflect.TypeOf([]int(nil))
+	Int64SliceType           = reflect.TypeOf([]int64(nil))
+	AnySliceType             = reflect.TypeOf([]any(nil))
 	EmptyInterfaceType       = reflect.TypeOf((*any)(nil)).Elem()
 	StringAnyMapType         = reflect.TypeOf(map[string]any(nil))
 	JsonNumberType           = reflect.TypeOf(json.Number(""))

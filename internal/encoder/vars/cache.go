@@ -59,3 +59,11 @@ func ComputeProgram(vt reflect.Type, compute func(reflect.Type, ...interface{}) 
 func PutPrograms(items []caching.ProgramBatchItem, pv bool) {
 	cacheFor(pv).PutMany(items)
 }
+
+func GetRootPlan(vt reflect.Type) interface{} {
+	return rootEncCache.Get(vt)
+}
+
+func ComputeRootPlan(vt reflect.Type, compute func(reflect.Type, ...interface{}) (interface{}, error)) (interface{}, error) {
+	return rootEncCache.Compute(vt, compute)
+}

@@ -50,6 +50,12 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 
 var valueBoxPools sync.Map // map[reflect.Type]*sync.Pool
 
+type rootEncPlan struct {
+	prog        *ir.Program
+	boxPool     *sync.Pool
+	isDirectPtr bool
+}
+
 func getValueBoxPool(vt reflect.Type) *sync.Pool {
 	if p, ok := valueBoxPools.Load(vt); ok {
 		return p.(*sync.Pool)
@@ -61,6 +67,36 @@ func getValueBoxPool(vt reflect.Type) *sync.Pool {
 	}
 	actual, _ := valueBoxPools.LoadOrStore(vt, pool)
 	return actual.(*sync.Pool)
+}
+
+func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
+	pp, err := vars.FindOrCompile(vt, false, compiler)
+	if err != nil {
+		return nil, err
+	}
+	prog := pp.(*ir.Program)
+	switch vt.Kind() {
+	case reflect.Ptr, reflect.UnsafePointer:
+		n := len(*prog)
+		isDirectPtr := vt.Kind() == reflect.Ptr &&
+			n >= 6 &&
+			(*prog)[0].Op() == ir.OP_is_nil &&
+			(*prog)[0].Vr() == nil &&
+			(*prog)[1].Op() == ir.OP_save &&
+			(*prog)[2].Op() == ir.OP_deref &&
+			(*prog)[n-3].Op() == ir.OP_drop &&
+			(*prog)[n-2].Op() == ir.OP_goto &&
+			(*prog)[n-1].Op() == ir.OP_null
+		return &rootEncPlan{
+			prog:        prog,
+			isDirectPtr: isDirectPtr,
+		}, nil
+	default:
+		return &rootEncPlan{
+			prog:    prog,
+			boxPool: getValueBoxPool(vt),
+		}, nil
+	}
 }
 
 // EncodeValue encodes an arbitrary Go interface{} value using only public reflection and typed pointers.
@@ -247,6 +283,82 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 		*buf = out
 		sb.Drop()
 		return nil
+	case []string:
+		if v == nil {
+			if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
+				*buf = append(*buf, '[', ']')
+			} else {
+				*buf = append(*buf, 'n', 'u', 'l', 'l')
+			}
+			return nil
+		}
+		if len(v) == 0 {
+			*buf = append(*buf, '[', ']')
+			return nil
+		}
+		if !sb.Save(0, 0, nil, nil) {
+			return vars.ERR_too_deep
+		}
+		sanitize := fv & alg.SanitizeMask
+		*buf = append(*buf, '[')
+		*buf = alg.QuoteFlags(*buf, v[0], false, sanitize)
+		for i := 1; i < len(v); i++ {
+			*buf = append(*buf, ',')
+			*buf = alg.QuoteFlags(*buf, v[i], false, sanitize)
+		}
+		sb.Drop()
+		*buf = append(*buf, ']')
+		return nil
+	case []int:
+		if v == nil {
+			if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
+				*buf = append(*buf, '[', ']')
+			} else {
+				*buf = append(*buf, 'n', 'u', 'l', 'l')
+			}
+			return nil
+		}
+		if len(v) == 0 {
+			*buf = append(*buf, '[', ']')
+			return nil
+		}
+		if !sb.Save(0, 0, nil, nil) {
+			return vars.ERR_too_deep
+		}
+		*buf = append(*buf, '[')
+		*buf = alg.I64toa(*buf, int64(v[0]))
+		for i := 1; i < len(v); i++ {
+			*buf = append(*buf, ',')
+			*buf = alg.I64toa(*buf, int64(v[i]))
+		}
+		sb.Drop()
+		*buf = append(*buf, ']')
+		return nil
+	case []int64:
+		if v == nil {
+			if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
+				*buf = append(*buf, '[', ']')
+			} else {
+				*buf = append(*buf, 'n', 'u', 'l', 'l')
+			}
+			return nil
+		}
+		if len(v) == 0 {
+			*buf = append(*buf, '[', ']')
+			return nil
+		}
+		if !sb.Save(0, 0, nil, nil) {
+			return vars.ERR_too_deep
+		}
+		*buf = append(*buf, '[')
+		*buf = alg.I64toa(*buf, v[0])
+		for i := 1; i < len(v); i++ {
+			*buf = append(*buf, ',')
+			*buf = alg.I64toa(*buf, v[i])
+		}
+		sb.Drop()
+		*buf = append(*buf, ']')
+		return nil
 	}
 
 	rv := reflect.ValueOf(val)
@@ -257,20 +369,42 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	// pointer types will re-enable pv=true inside compilePtrBody after OP_deref.
 	fv &^= (1 << alg.BitPointerValue)
 	vt := rv.Type()
-	switch rv.Kind() {
-	case reflect.Ptr, reflect.UnsafePointer:
-		slot, idx := sb.PushPtr(rv.UnsafePointer())
-		err := EncodeValuePointer(buf, vt, slot, sb, fv)
+	var plan *rootEncPlan
+	if cached := vars.GetRootPlan(vt); cached != nil {
+		plan = cached.(*rootEncPlan)
+	} else {
+		computed, err := vars.ComputeRootPlan(vt, buildRootEncPlan)
+		if err != nil {
+			return err
+		}
+		plan = computed.(*rootEncPlan)
+	}
+	if plan.boxPool == nil {
+		ptr := rv.UnsafePointer()
+		if plan.isDirectPtr {
+			if ptr == nil {
+				*buf = append(*buf, 'n', 'u', 'l', 'l')
+				return nil
+			}
+			if !sb.Save(0, 0, nil, nil) {
+				return vars.ERR_too_deep
+			}
+			if err := ExecuteRange(buf, ptr, sb, fv, plan.prog, 3, len(*plan.prog)-3); err != nil {
+				return err
+			}
+			sb.Drop()
+			return nil
+		}
+		slot, idx := sb.PushPtr(ptr)
+		err := Execute(buf, slot, sb, fv, plan.prog)
 		sb.PopPtr(idx)
 		return err
-	default:
-		pool := getValueBoxPool(vt)
-		box := pool.Get().(reflect.Value)
-		elem := box.Elem()
-		elem.Set(rv)
-		err := EncodeValuePointer(buf, vt, box.UnsafePointer(), sb, fv)
-		elem.SetZero()
-		pool.Put(box)
-		return err
 	}
+	box := plan.boxPool.Get().(reflect.Value)
+	elem := box.Elem()
+	elem.Set(rv)
+	err := Execute(buf, box.UnsafePointer(), sb, fv, plan.prog)
+	elem.SetZero()
+	plan.boxPool.Put(box)
+	return err
 }

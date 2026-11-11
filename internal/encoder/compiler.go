@@ -301,7 +301,7 @@ func (self *Compiler) compileOps(p *ir.Program, sp int, vt reflect.Type) {
 	case reflect.Ptr:
 		self.compilePtr(p, sp, vt.Elem())
 	case reflect.Slice:
-		self.compileSlice(p, sp, vt.Elem())
+		self.compileSlice(p, sp, vt)
 	case reflect.Struct:
 		self.compileStruct(p, sp, vt)
 	default:
@@ -456,42 +456,38 @@ func (self *Compiler) compileMapBodyUtextPtr(p *ir.Program, vk reflect.Type) {
 	p.Pin(j)
 }
 
-func (self *Compiler) compileSlice(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_empty_arr, reflect.SliceOf(vt), self.compileSliceBody)
-}
-
-func (self *Compiler) compileSliceBody(p *ir.Program, sp int, vt reflect.Type) {
-	if vars.IsSimpleByte(vt) {
-		p.Add(ir.OP_bin)
-	} else {
-		self.compileSliceArray(p, sp, vt)
-	}
-}
-
-func (self *Compiler) compileSliceArray(p *ir.Program, sp int, vt reflect.Type) {
-	if self.compileFloatSlice(p, sp, vt) {
+func (self *Compiler) compileSlice(p *ir.Program, sp int, st reflect.Type) {
+	elem := st.Elem()
+	if vars.IsSimpleByte(elem) {
+		if st == vars.ByteSliceType {
+			p.Add(ir.OP_bin)
+		} else {
+			self.compileNil(p, sp, st, ir.OP_empty_arr, st, func(p *ir.Program, _ int, st reflect.Type) {
+				p.Rtt(ir.OP_bin, st)
+			})
+		}
 		return
 	}
-	st := reflect.SliceOf(vt)
+	if self.compileFloatSlice(p, sp, st) {
+		return
+	}
+	self.compileSliceArray(p, sp, st)
+}
+
+func (self *Compiler) compileSliceArray(p *ir.Program, sp int, st reflect.Type) {
+	elem := st.Elem()
 	p.Tag(sp)
-	p.Int(ir.OP_byte, '[')
-	e := p.PC()
-	p.Rtt(ir.OP_is_nil_p1, st)
-	p.Add(ir.OP_save)
-	p.Rtt(ir.OP_slice_len, st)
-	i := p.PC()
-	p.Rtt(ir.OP_slice_next, vt)
-	self.compileOne(p, sp+1, vt, true)
-	j := p.PC()
-	p.Rtt(ir.OP_slice_next, vt)
-	p.Int(ir.OP_byte, ',')
-	self.compileOne(p, sp+1, vt, true)
-	p.Int(ir.OP_goto, j)
-	p.Pin(i)
-	p.Pin(j)
+	done := p.PC()
+	p.Rtt(ir.OP_slice_begin, st)
+	self.compileOne(p, sp+1, elem, true)
+	loop := p.PC()
+	p.Rtt(ir.OP_slice_next, elem)
+	self.compileOne(p, sp+1, elem, true)
+	p.Int(ir.OP_goto, loop)
+	p.Pin(loop)
 	p.Add(ir.OP_drop)
-	p.Pin(e)
 	p.Int(ir.OP_byte, ']')
+	p.Pin(done)
 }
 
 func (self *Compiler) compileArray(p *ir.Program, sp int, vt reflect.Type, nb int) {
@@ -662,27 +658,19 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 			if self.tab[et] || self.isCustomMarshaler(et, true) {
 				return ir.StructFieldSpec{}, false
 			}
-			switch et.Kind() {
-			case reflect.Interface:
-				if et.NumMethod() == 0 {
-					kind = ir.OP_slice_eface
-				} else {
-					return ir.StructFieldSpec{}, false
-				}
-			case reflect.Int:
+			switch ft {
+			case vars.AnySliceType:
+				kind = ir.OP_slice_eface
+			case vars.IntSliceType:
 				if ir.OP_int() == ir.OP_i64 {
 					kind = ir.OP_slice_i64
 				} else {
 					return ir.StructFieldSpec{}, false
 				}
-			case reflect.Int64:
+			case vars.Int64SliceType:
 				kind = ir.OP_slice_i64
-			case reflect.String:
-				if et != vars.JsonNumberType {
-					kind = ir.OP_slice_str
-				} else {
-					return ir.StructFieldSpec{}, false
-				}
+			case vars.StringSliceType:
+				kind = ir.OP_slice_str
 			default:
 				return ir.StructFieldSpec{}, false
 			}

@@ -62,11 +62,13 @@ var (
 	bufferPool     = sync.Pool{}
 	programCache   = caching.CreateProgramCache()
 	programCachePV = caching.CreateProgramCache()
+	rootEncCache   = caching.CreateProgramCache()
 )
 
 func ResetProgramCache() {
 	programCache.Reset()
 	programCachePV.Reset()
+	rootEncCache.Reset()
 }
 
 func NewBytes() *[]byte {

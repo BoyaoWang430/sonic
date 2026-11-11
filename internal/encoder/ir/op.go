@@ -91,7 +91,7 @@ const (
 	OP_goto
 	OP_map_check_key
 	OP_map_write_key
-	OP_slice_len
+	OP_slice_begin
 	OP_slice_next
 	OP_cond_testc
 	OP_is_nil
@@ -151,7 +151,7 @@ var _OpNames = [256]string{
 	OP_map_write_key:    "map_write_key",
 	OP_map_value_next:   "map_value_next",
 	OP_map_string_any:   "map_string_any",
-	OP_slice_len:        "slice_len",
+	OP_slice_begin:      "slice_begin",
 	OP_slice_next:       "slice_next",
 	OP_marshal:          "marshal",
 	OP_marshal_p:        "marshal_p",
@@ -436,7 +436,7 @@ func (self Instr) Disassemble() string {
 		return fmt.Sprintf("%-18sL_%d", self.Op(), self.Vi())
 	case OP_is_zero:
 		return fmt.Sprintf("%-18s%s, L_%d", self.Op(), self.VField().Type.String(), self.Vi())
-	case OP_slice_next:
+	case OP_slice_begin, OP_slice_next:
 		return fmt.Sprintf("%-18sL_%d, %s", self.Op(), self.Vi(), self.Vt())
 	case OP_marshal,
 		OP_marshal_p,
