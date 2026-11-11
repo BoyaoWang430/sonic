@@ -642,3 +642,46 @@ func TestEfaceSmallUintStaticTableSemantics(t *testing.T) {
 		}
 	}
 }
+
+func TestSortedStringAnyMapNestedAndErrorCleanup(t *testing.T) {
+	// Build nested map[string]any forcing KVBuf/KVOrder reallocation mid-recursion (outer 12 keys -> inner 120 keys).
+	inner := make(map[string]any, 120)
+	for i := 0; i < 120; i++ {
+		inner[fmt.Sprintf("profile_field_%03d", 119-i)] = i
+	}
+	outer := map[string]any{
+		"z_last":  "end",
+		"a_first": map[string]any{"only_one": true},
+		"m_empty": map[string]any{},
+		"b_two":   map[string]any{"b": 2, "a": 1},
+		"k_inner": inner,
+	}
+	for i := 0; i < 10; i++ {
+		outer[fmt.Sprintf("p_prefix_%02d", 9-i)] = []any{i, fmt.Sprintf("v%d", i)}
+	}
+
+	want, err := json.Marshal(outer)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	got, err := ConfigStd.Marshal(outer)
+	if err != nil {
+		t.Fatalf("ConfigStd.Marshal failed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ConfigStd.Marshal sorted map mismatch:\ngot:  %s\nwant: %s", got, want)
+	}
+
+	// Verify mid-iteration error inside nested sorted map cleanly unwinds without corrupting subsequent calls.
+	bad := map[string]any{
+		"a": map[string]any{"k1": "ok", "k2": math.NaN()},
+		"b": "after",
+	}
+	if _, err := ConfigStd.Marshal(bad); err == nil {
+		t.Fatalf("expected error for NaN inside sorted map[string]any")
+	}
+	got2, err := ConfigStd.Marshal(outer)
+	if err != nil || !bytes.Equal(got2, want) {
+		t.Fatalf("post-error ConfigStd.Marshal mismatch: err=%v", err)
+	}
+}

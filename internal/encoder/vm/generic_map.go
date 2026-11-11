@@ -12,24 +12,60 @@ import (
 func encodeStringAnyMap(b *[]byte, m map[string]any, s *vars.Stack, flags uint64) error {
 	sanitize := flags & alg.SanitizeMask
 	if flags&(1<<alg.BitSortMapKeys) != 0 {
-		it, err := alg.IteratorStartStringAnySorted(m)
-		if err != nil {
-			return err
+		n := len(m)
+		if n == 0 {
+			return nil
 		}
-		first := true
-		for it.It.K != nil {
-			if !first {
+		if n == 1 {
+			first := true
+			for key, value := range m {
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, key, sanitize)
+				if err := encodeAnyValue(b, value, s, flags); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+
+		baseKV, baseOrd := s.ReserveMapKV(n)
+		kvSlice := s.KVBuf[baseKV : baseKV+n]
+		ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+		count := 0
+		for k, v := range m {
+			if count < len(kvSlice) {
+				kvSlice[count] = vars.MapKVEntry{K: k, V: v}
+				ordSlice[count] = count
+			} else {
+				s.GrowMapKVOne(k, v, count)
+				kvSlice = s.KVBuf[baseKV:]
+				ordSlice = s.KVOrder[baseOrd:]
+			}
+			count++
+		}
+		if count == 0 {
+			s.ReleaseMapKV(baseKV, n, baseOrd)
+			return nil
+		}
+		if count < n {
+			kvSlice, ordSlice = s.TrimMapKV(baseKV, baseOrd, count)
+		}
+		alg.SortMapKVOrder(ordSlice, kvSlice)
+		for idx := 0; idx < count; idx++ {
+			if idx > 0 {
 				*b = append(*b, ',')
 			}
-			first = false
-			*b = alg.QuoteKeyFlags(*b, *(*string)(it.It.K), sanitize)
-			if err := encodeAnyValue(b, *(*any)(it.It.V), s, flags); err != nil {
-				alg.IteratorStop(it)
+			entry := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]]
+			*b = alg.QuoteKeyFlags(*b, entry.K, sanitize)
+			if err := encodeAnyValue(b, entry.V, s, flags); err != nil {
+				s.ReleaseMapKV(baseKV, count, baseOrd)
 				return err
 			}
-			alg.IteratorNext(it)
 		}
-		alg.IteratorStop(it)
+		s.ReleaseMapKV(baseKV, count, baseOrd)
 		return nil
 	}
 	first := true

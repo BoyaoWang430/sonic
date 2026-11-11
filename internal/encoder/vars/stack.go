@@ -33,12 +33,23 @@ type State struct {
 	q unsafe.Pointer
 }
 
+type MapKVEntry struct {
+	K string
+	V any
+}
+
+const maxPooledMapKV = 4096
+
 type Stack struct {
-	sp       int
-	ptrSp    int
-	sb       [MaxStack]State
-	ptrSlots [64]unsafe.Pointer
-	ValPtr   unsafe.Pointer
+	sp        int
+	ptrSp     int
+	kvSp      int
+	kvOrderSp int
+	sb        [MaxStack]State
+	ptrSlots  [64]unsafe.Pointer
+	KVBuf     []MapKVEntry
+	KVOrder   []int
+	ValPtr    unsafe.Pointer
 }
 
 var (
@@ -71,6 +82,8 @@ func NewStack() *Stack {
 	ret := stackPool.Get().(*Stack)
 	ret.sp = 0
 	ret.ptrSp = 0
+	ret.kvSp = 0
+	ret.kvOrderSp = 0
 	return ret
 }
 
@@ -80,10 +93,95 @@ func ResetStack(p *Stack) {
 		p.ptrSlots[i] = nil
 	}
 	p.ptrSp = 0
+	if p.kvSp > 0 {
+		for i := 0; i < p.kvSp; i++ {
+			p.KVBuf[i] = MapKVEntry{}
+		}
+		p.KVBuf = p.KVBuf[:0]
+		p.kvSp = 0
+	}
+	if p.kvOrderSp > 0 {
+		p.KVOrder = p.KVOrder[:0]
+		p.kvOrderSp = 0
+	}
+	if cap(p.KVBuf) > maxPooledMapKV {
+		p.KVBuf = nil
+	}
+	if cap(p.KVOrder) > maxPooledMapKV {
+		p.KVOrder = nil
+	}
 	for i := 0; i < p.sp; i++ {
 		p.sb[i] = State{}
 	}
 	p.sp = 0
+}
+
+func (s *Stack) ReserveMapKV(n int) (baseKV int, baseOrd int) {
+	baseKV = s.kvSp
+	endKV := baseKV + n
+	if cap(s.KVBuf) < endKV {
+		newCap := cap(s.KVBuf) * 2
+		if newCap < 64 {
+			newCap = 64
+		}
+		if newCap < endKV {
+			newCap = endKV
+		}
+		next := make([]MapKVEntry, endKV, newCap)
+		copy(next, s.KVBuf[:baseKV])
+		s.KVBuf = next
+	} else {
+		s.KVBuf = s.KVBuf[:endKV]
+	}
+	s.kvSp = endKV
+
+	baseOrd = s.kvOrderSp
+	endOrd := baseOrd + n
+	if cap(s.KVOrder) < endOrd {
+		newCap := cap(s.KVOrder) * 2
+		if newCap < 64 {
+			newCap = 64
+		}
+		if newCap < endOrd {
+			newCap = endOrd
+		}
+		next := make([]int, endOrd, newCap)
+		copy(next, s.KVOrder[:baseOrd])
+		s.KVOrder = next
+	} else {
+		s.KVOrder = s.KVOrder[:endOrd]
+	}
+	s.kvOrderSp = endOrd
+	return baseKV, baseOrd
+}
+
+func (s *Stack) GrowMapKVOne(k string, v any, localIdx int) {
+	s.KVBuf = append(s.KVBuf, MapKVEntry{K: k, V: v})
+	s.kvSp = len(s.KVBuf)
+	s.KVOrder = append(s.KVOrder, localIdx)
+	s.kvOrderSp = len(s.KVOrder)
+}
+
+func (s *Stack) TrimMapKV(baseKV int, baseOrd int, count int) ([]MapKVEntry, []int) {
+	for j := baseKV + count; j < s.kvSp; j++ {
+		s.KVBuf[j] = MapKVEntry{}
+	}
+	s.kvSp = baseKV + count
+	s.KVBuf = s.KVBuf[:s.kvSp]
+	s.kvOrderSp = baseOrd + count
+	s.KVOrder = s.KVOrder[:s.kvOrderSp]
+	return s.KVBuf[baseKV:s.kvSp], s.KVOrder[baseOrd:s.kvOrderSp]
+}
+
+func (s *Stack) ReleaseMapKV(baseKV int, count int, baseOrd int) {
+	clearSlice := s.KVBuf[baseKV : baseKV+count]
+	for i := range clearSlice {
+		clearSlice[i] = MapKVEntry{}
+	}
+	s.KVBuf = s.KVBuf[:baseKV]
+	s.kvSp = baseKV
+	s.KVOrder = s.KVOrder[:baseOrd]
+	s.kvOrderSp = baseOrd
 }
 
 func (s *Stack) PushPtr(ptr unsafe.Pointer) (unsafe.Pointer, int) {
