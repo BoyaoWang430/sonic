@@ -209,14 +209,38 @@ func TestBoundedContainerCloseYield(t *testing.T) {
 }
 
 func TestSingleLongStringOnDemandTape(t *testing.T) {
-	// A 128 KiB single JSON string needs only 1 Tape node and must NOT pre-allocate 1 MiB of nodes.
-	longStr := `"` + strings.Repeat("x", 128<<10) + `"`
+	// A 256 KiB single JSON string needs only 1 Tape node and must NOT pre-allocate estNodes.
+	longStr := `"` + strings.Repeat("x", 256<<10) + `"`
 	p := newParser(longStr, 0, 0)
+	initCap := cap(p.nodes)
+	p.presizeNodesOne()
 	if code := p.parse(); code != 0 {
 		t.Fatalf("long string parse failed: %v", code)
 	}
-	if uintptr(cap(p.nodes)) > maxPooledNodesCap {
-		t.Fatalf("long single string over-allocated node tape: cap=%d > %d", cap(p.nodes), maxPooledNodesCap)
+	if cap(p.nodes) != initCap || uintptr(cap(p.nodes)) > maxPooledNodesCap {
+		t.Fatalf("long single string over-allocated node tape: cap=%d initCap=%d max=%d", cap(p.nodes), initCap, maxPooledNodesCap)
 	}
 	p.free()
+
+	// Also verify on a fresh unpooled Parser that cap(p.nodes) stays at defaultNodesCap (4096).
+	fresh := parsePool.New().(*Parser)
+	fresh.Json = longStr
+	fresh.padded = append(fresh.padded[:0], longStr...)
+	fresh.padded = append(fresh.padded, padding...)
+	fresh.end = len(longStr)
+	fresh.nbuf.init(fresh.nodes)
+	fresh.presizeNodesOne()
+	if code := fresh.parse(); code != 0 {
+		t.Fatalf("fresh long string parse failed: %v", code)
+	}
+	if uintptr(cap(fresh.nodes)) != defaultNodesCap {
+		t.Fatalf("fresh long single string grew node tape: cap=%d want=%d", cap(fresh.nodes), defaultNodesCap)
+	}
+
+	if !looksLikeJSONLPrefix(`{"a":1}` + "\n" + `{"a":2}`) {
+		t.Fatalf("expected looksLikeJSONLPrefix=true on NDJSON")
+	}
+	if looksLikeJSONLPrefix("{\n  \"items\": [\n    {\"a\": 1},\n    {\"a\": 2}\n  ]\n}") {
+		t.Fatalf("expected looksLikeJSONLPrefix=false on pretty-printed single JSON document")
+	}
 }

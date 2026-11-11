@@ -36,8 +36,90 @@ func quoteSafeHTMLBits64(w uint64) uint64 {
 	return w | (w - saniSp64) | (aq - saniLSB64) | (lg - saniLSB64) | (bs - saniLSB64)
 }
 
+func quoteSafeHTMLNoValBits64(w uint64) uint64 {
+	ctrl := (w - saniSp64) & ^w
+	aq := (w &^ saniAmpQuot64) ^ saniQuot64
+	lg := (w &^ saniLtGt64) ^ saniLt64
+	bs := w ^ saniBsl64
+	e2 := w ^ saniE264
+	return ctrl | ((aq - saniLSB64) & ^aq) | ((lg - saniLSB64) & ^lg) | ((bs - saniLSB64) & ^bs) | ((e2 - saniLSB64) & ^e2)
+}
+
 func isSafeHTMLASCIIByte(b byte) bool {
 	return b >= 0x20 && b < 0x80 && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&'
+}
+
+func isSafeHTMLNoValByte(b byte) bool {
+	return b >= 0x20 && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&' && b != 0xe2
+}
+
+func copySafeHTMLNoValPrefix(sp unsafe.Pointer, nb int, dp unsafe.Pointer) int {
+	if nb >= 16 {
+		off := 0
+		for off+16 <= nb {
+			w0 := *(*uint64)(unsafe.Add(sp, off))
+			w1 := *(*uint64)(unsafe.Add(sp, off+8))
+			if ((quoteSafeHTMLNoValBits64(w0) | quoteSafeHTMLNoValBits64(w1)) & saniMSB64) != 0 {
+				if (quoteSafeHTMLNoValBits64(w0) & saniMSB64) == 0 {
+					*(*uint64)(unsafe.Add(dp, off)) = w0
+					return off + 8
+				}
+				return off
+			}
+			*(*uint64)(unsafe.Add(dp, off)) = w0
+			*(*uint64)(unsafe.Add(dp, off+8)) = w1
+			off += 16
+		}
+		if off == nb {
+			return nb
+		}
+		w0 := *(*uint64)(unsafe.Add(sp, nb-16))
+		w1 := *(*uint64)(unsafe.Add(sp, nb-8))
+		if ((quoteSafeHTMLNoValBits64(w0) | quoteSafeHTMLNoValBits64(w1)) & saniMSB64) == 0 {
+			*(*uint64)(unsafe.Add(dp, nb-16)) = w0
+			*(*uint64)(unsafe.Add(dp, nb-8)) = w1
+			return nb
+		}
+		return off
+	}
+	if nb >= 8 {
+		w0 := *(*uint64)(sp)
+		w1 := *(*uint64)(unsafe.Add(sp, nb-8))
+		if ((quoteSafeHTMLNoValBits64(w0) | quoteSafeHTMLNoValBits64(w1)) & saniMSB64) == 0 {
+			*(*uint64)(dp) = w0
+			*(*uint64)(unsafe.Add(dp, nb-8)) = w1
+			return nb
+		}
+		return 0
+	}
+	if nb >= 4 {
+		u0 := *(*uint32)(sp)
+		u1 := *(*uint32)(unsafe.Add(sp, nb-4))
+		w := uint64(u0) | (uint64(u1) << 32)
+		if (quoteSafeHTMLNoValBits64(w) & saniMSB64) == 0 {
+			*(*uint32)(dp) = u0
+			*(*uint32)(unsafe.Add(dp, nb-4)) = u1
+			return nb
+		}
+		return 0
+	}
+	b0 := *(*byte)(sp)
+	b1 := *(*byte)(unsafe.Add(sp, nb>>1))
+	b2 := *(*byte)(unsafe.Add(sp, nb-1))
+	if isSafeHTMLNoValByte(b0) && isSafeHTMLNoValByte(b1) && isSafeHTMLNoValByte(b2) {
+		*(*byte)(dp) = b0
+		*(*byte)(unsafe.Add(dp, nb>>1)) = b1
+		*(*byte)(unsafe.Add(dp, nb-1)) = b2
+		return nb
+	}
+	return 0
+}
+
+func copySafeHTMLPrefix(sp unsafe.Pointer, nb int, dp unsafe.Pointer, sanitize uint64) int {
+	if sanitize&(1<<BitValidateString) == 0 {
+		return copySafeHTMLNoValPrefix(sp, nb, dp)
+	}
+	return copySafeHTMLASCIIPrefix(sp, nb, dp)
 }
 
 // copySafeHTMLASCIIPrefix copies as many 8/16-byte safe ASCII chunks as possible and returns
@@ -123,14 +205,26 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 			bPtr = unsafe.Pointer(unsafe.SliceData(buf))
 			bCap = cap(buf)
 		}
-		for i+8 <= nb && bCap-bLen >= 16 {
-			w := *(*uint64)(unsafe.Add(sp, i))
-			if (quoteSafeHTMLBits64(w) & saniMSB64) != 0 {
-				break
+		if validateUTF8 {
+			for i+8 <= nb && bCap-bLen >= 16 {
+				w := *(*uint64)(unsafe.Add(sp, i))
+				if (quoteSafeHTMLBits64(w) & saniMSB64) != 0 {
+					break
+				}
+				*(*uint64)(unsafe.Add(bPtr, bLen)) = w
+				bLen += 8
+				i += 8
 			}
-			*(*uint64)(unsafe.Add(bPtr, bLen)) = w
-			bLen += 8
-			i += 8
+		} else {
+			for i+8 <= nb && bCap-bLen >= 16 {
+				w := *(*uint64)(unsafe.Add(sp, i))
+				if (quoteSafeHTMLNoValBits64(w) & saniMSB64) != 0 {
+					break
+				}
+				*(*uint64)(unsafe.Add(bPtr, bLen)) = w
+				bLen += 8
+				i += 8
+			}
 		}
 		if i >= nb {
 			break
@@ -167,6 +261,22 @@ func appendQuoteSanitizedTail(buf []byte, val string, sanitize uint64, suffix by
 				*(*byte)(unsafe.Add(dp, 5)) = hexDigits[c&0x0f]
 				bLen += 6
 			}
+			i++
+			continue
+		}
+		if !validateUTF8 {
+			if escapeHTML && c == 0xe2 && i+2 < nb && *(*byte)(unsafe.Add(sp, i+1)) == 0x80 {
+				b2 := *(*byte)(unsafe.Add(sp, i+2))
+				if (b2 &^ 1) == 0xa8 {
+					*(*[5]byte)(dp) = [5]byte{'\\', 'u', '2', '0', '2'}
+					*(*byte)(unsafe.Add(dp, 5)) = hexDigits[b2&0x0f]
+					bLen += 6
+					i += 3
+					continue
+				}
+			}
+			*(*byte)(dp) = c
+			bLen++
 			i++
 			continue
 		}
@@ -1132,7 +1242,7 @@ func QuoteWithPaddedKeyFlags(buf []byte, keyPtr *byte, keyLen int, val string, s
 			return buf[:len(buf)+keyLen+2]
 		}
 		sp := unsafe.Pointer(unsafe.StringData(val))
-		copied := copySafeHTMLASCIIPrefix(sp, nb, unsafe.Add(dp, 1))
+		copied := copySafeHTMLPrefix(sp, nb, unsafe.Add(dp, 1), sanitize)
 		if copied == nb {
 			*(*byte)(unsafe.Add(dp, nb+1)) = '"'
 			return buf[:len(buf)+keyLen+nb+2]
@@ -1164,7 +1274,7 @@ func QuoteFlags(buf []byte, val string, double bool, sanitize uint64) []byte {
 			return buf[:len(buf)+2]
 		}
 		sp := unsafe.Pointer(unsafe.StringData(val))
-		copied := copySafeHTMLASCIIPrefix(sp, nb, unsafe.Add(dp, 1))
+		copied := copySafeHTMLPrefix(sp, nb, unsafe.Add(dp, 1), sanitize)
 		if copied == nb {
 			*(*byte)(unsafe.Add(dp, nb+1)) = '"'
 			return buf[:len(buf)+nb+2]
@@ -1193,7 +1303,7 @@ func QuoteKeyFlags(buf []byte, val string, sanitize uint64) []byte {
 		return buf[:len(buf)+3]
 	}
 	sp := unsafe.Pointer(unsafe.StringData(val))
-	copied := copySafeHTMLASCIIPrefix(sp, nb, unsafe.Add(dp, 1))
+	copied := copySafeHTMLPrefix(sp, nb, unsafe.Add(dp, 1), sanitize)
 	if copied == nb {
 		*(*byte)(unsafe.Add(dp, nb+1)) = '"'
 		*(*byte)(unsafe.Add(dp, nb+2)) = ':'

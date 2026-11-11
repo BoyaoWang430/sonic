@@ -1,6 +1,7 @@
 package optdec
 
 import (
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -153,8 +154,8 @@ type jsonStat struct {
 var (
 	defaultJsonPaddedCap   uintptr = 64 << 10                          // 64 KB initial pool buffer
 	defaultNodesCap        uintptr = (64 << 10) / unsafe.Sizeof(node{}) // 4096 nodes (64 KB) initial pool buffer
-	maxPooledJsonPaddedCap uintptr = 1 << 20                           // 1 MB max pooled padded buffer
-	maxPooledNodesCap      uintptr = (64 << 10) / unsafe.Sizeof(node{}) // 4096 nodes (64 KB) max pooled node buffer
+	maxPooledJsonPaddedCap uintptr = 1 << 20                            // 1 MB max pooled padded buffer
+	maxPooledNodesCap      uintptr = (1 << 20) / unsafe.Sizeof(node{})  // 65536 nodes (1 MB) max pooled node buffer
 )
 
 var parsePool sync.Pool = sync.Pool{
@@ -405,8 +406,62 @@ func calMaxNodeCap(jsonSize int) int {
 	return jsonSize/2 + 2
 }
 
+func firstContainerStart(s string) int {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c > ' ' {
+			if c == '{' || c == '[' {
+				return i
+			}
+			return -1
+		}
+		if c != ' ' && c != '\n' && c != '\r' && c != '\t' {
+			return -1
+		}
+	}
+	return -1
+}
+
+// looksLikeJSONLPrefix checks up to the first 4 KiB for a newline-delimited
+// root boundary (`}\n{`, `}\n[`, `]\n[`, `]\n{`), avoiding whole-stream node
+// pre-sizing on multi-document JSONL streams passed to NewDecoder.
+func looksLikeJSONLPrefix(s string) bool {
+	limit := len(s)
+	if limit > 4096 {
+		limit = 4096
+	}
+	sub := s[:limit]
+	off := 0
+	for off < limit {
+		rel := strings.IndexByte(sub[off:], '\n')
+		if rel < 0 {
+			return false
+		}
+		i := off + rel
+		p := i - 1
+		for p >= 0 && (sub[p] == ' ' || sub[p] == '\r' || sub[p] == '\t') {
+			p--
+		}
+		if p >= 0 && (sub[p] == '}' || sub[p] == ']') {
+			q := i + 1
+			for q < limit && (sub[q] == ' ' || sub[q] == '\r' || sub[q] == '\t' || sub[q] == '\n') {
+				q++
+			}
+			if q < limit && (sub[q] == '{' || sub[q] == '[') {
+				return true
+			}
+		}
+		off = i + 1
+	}
+	return false
+}
+
 func (p *Parser) presizeNodesOne() {
-	estNodes := len(p.Json)/11 + 1024
+	start := firstContainerStart(p.Json)
+	if start < 0 {
+		return
+	}
+	estNodes := (len(p.Json)-start)/11 + 1024
 	if estNodes <= cap(p.nodes) {
 		return
 	}

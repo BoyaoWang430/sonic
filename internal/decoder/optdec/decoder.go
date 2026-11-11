@@ -227,6 +227,9 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 
 	/* parse into document */
 	p := newParserFromSession(*s, origPos, uint64(f), sess)
+	if origPos == 0 && sess == nil && len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) && !looksLikeJSONLPrefix(p.Json) {
+		p.presizeNodesOne()
+	}
 	defer p.free()
 
 	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, proj)
