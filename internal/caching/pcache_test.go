@@ -17,6 +17,7 @@
 package caching
 
 import (
+	"fmt"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -203,4 +204,131 @@ func TestPcacheRace(t *testing.T) {
 	start <- struct{}{}
 	start <- struct{}{}
 	wg.Wait()
+}
+
+var (
+	coldBenchTypesOnce sync.Once
+	coldBenchTypes300  []reflect.Type
+)
+
+func getColdBenchTypes300() []reflect.Type {
+	coldBenchTypesOnce.Do(func() {
+		coldBenchTypes300 = make([]reflect.Type, 300)
+		for i := range coldBenchTypes300 {
+			coldBenchTypes300[i] = reflect.StructOf([]reflect.StructField{
+				{
+					Name: fmt.Sprintf("F_%d", i),
+					Type: reflect.TypeOf(int64(0)),
+				},
+			})
+		}
+	})
+	return coldBenchTypes300
+}
+
+func TestPcacheStagedCompactionAndVisibility(t *testing.T) {
+	types := getColdBenchTypes300()
+	pc := CreateProgramCache()
+
+	// Sequential cold start across 300 types + immediate Get verification.
+	for i, vt := range types {
+		want := i + 1
+		got, err := pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
+			return want, nil
+		})
+		if err != nil || got != want {
+			t.Fatalf("Compute(%d) = (%v, %v), want (%v, nil)", i, got, err, want)
+		}
+		if cached := pc.Get(vt); cached != want {
+			t.Fatalf("immediate Get(%d) = %v, want %v", i, cached, want)
+		}
+	}
+
+	//Repeated reads on trailing staged entries must promote cleanly without losing any entry.
+	for round := 0; round < 200; round++ {
+		vt := types[len(types)-1]
+		if cached := pc.Get(vt); cached != len(types) {
+			t.Fatalf("round %d trailing Get = %v, want %v", round, cached, len(types))
+		}
+	}
+	for i, vt := range types {
+		if cached := pc.Get(vt); cached != i+1 {
+			t.Fatalf("post-promotion Get(%d) = %v, want %v", i, cached, i+1)
+		}
+	}
+
+	// Concurrent Compute + concurrent Get + Reset stress test.
+	pc.Reset()
+	for i, vt := range types {
+		if cached := pc.Get(vt); cached != nil {
+			t.Fatalf("after Reset Get(%d) = %v, want nil", i, cached)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for step := 0; step < len(types); step++ {
+				idx := (step + worker*37) % len(types)
+				vt := types[idx]
+				want := idx + 1000
+				if step%3 == 0 {
+					if v := pc.Get(vt); v != nil && v != want {
+						t.Errorf("concurrent Get(%d) = %v, want %v", idx, v, want)
+					}
+				}
+				got, err := pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
+					return want, nil
+				})
+				if err != nil || got != want {
+					t.Errorf("concurrent Compute(%d) = (%v, %v), want (%v, nil)", idx, got, err, want)
+				}
+				if v := pc.Get(vt); v != want {
+					t.Errorf("post-Compute concurrent Get(%d) = %v, want %v", idx, v, want)
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+}
+
+func BenchmarkPcacheColdStart300(b *testing.B) {
+	types := getColdBenchTypes300()
+	pc := CreateProgramCache()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pc.Reset()
+		for k, vt := range types {
+			val := k + 1
+			_, _ = pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
+				return val, nil
+			})
+		}
+	}
+}
+
+func BenchmarkPcacheWarmGet(b *testing.B) {
+	types := getColdBenchTypes300()
+	pc := CreateProgramCache()
+	for k, vt := range types {
+		val := k + 1
+		_, _ = pc.Compute(vt, func(reflect.Type, ...interface{}) (interface{}, error) {
+			return val, nil
+		})
+	}
+	// Warm up any trailing staged items so steady-state read path is measured.
+	for i := 0; i < 256; i++ {
+		_ = pc.Get(types[len(types)-1])
+	}
+	vt := types[123]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if pc.Get(vt) == nil {
+			b.Fatal("unexpected nil")
+		}
+	}
 }
