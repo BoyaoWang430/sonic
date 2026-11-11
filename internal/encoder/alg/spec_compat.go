@@ -154,3 +154,17 @@ func QuoteWithPaddedKey(e []byte, keyPtr *byte, keyLen int, val string) []byte {
 	e = append(e, unsafe.Slice(keyPtr, keyLen)...)
 	return Quote(e, val, false)
 }
+
+func AppendPaddedKeyI64(e []byte, keyPtr *byte, keyLen int, v int64) []byte {
+	if keyLen > 0 {
+		e = append(e, unsafe.Slice(keyPtr, keyLen)...)
+	}
+	return I64toa(e, v)
+}
+
+func AppendPaddedKeyU64(e []byte, keyPtr *byte, keyLen int, v uint64) []byte {
+	if keyLen > 0 {
+		e = append(e, unsafe.Slice(keyPtr, keyLen)...)
+	}
+	return U64toa(e, v)
+}

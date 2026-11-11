@@ -552,6 +552,132 @@ func I64toa(buf []byte, v int64) []byte {
 	return i64toaNeg(buf, uint64(-v))
 }
 
+func appendPaddedKeyI64Slow(buf []byte, keyPtr *byte, nk int, v int64) []byte {
+	if nk > 0 {
+		buf = append(buf, unsafe.Slice(keyPtr, nk)...)
+	}
+	return I64toa(buf, v)
+}
+
+func appendPaddedKeyU64Slow(buf []byte, keyPtr *byte, nk int, u uint64) []byte {
+	if nk > 0 {
+		buf = append(buf, unsafe.Slice(keyPtr, nk)...)
+	}
+	return U64toa(buf, u)
+}
+
+// AppendPaddedKeyI64 appends a 32-byte-padded struct key (len <= 32) followed by decimal v to buf.
+func AppendPaddedKeyI64(buf []byte, keyPtr *byte, nk int, v int64) []byte {
+	if cap(buf)-len(buf) >= 52 && uint(nk) <= 32 {
+		bLen := len(buf)
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), bLen)
+		dk := (*[4]uint64)(dp)
+		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
+		dk[0], dk[1] = sk[0], sk[1]
+		if nk > 16 {
+			dk[2], dk[3] = sk[2], sk[3]
+		}
+		pos := bLen + nk
+		vp := unsafe.Add(dp, nk)
+		if v >= 0 {
+			u := uint64(v)
+			if u < 10 {
+				*(*byte)(vp) = byte('0' + u)
+				return buf[:pos+1]
+			}
+			if u < 100 {
+				i := u * 2
+				*(*byte)(vp) = digits100[i]
+				*(*byte)(unsafe.Add(vp, 1)) = digits100[i+1]
+				return buf[:pos+2]
+			}
+			if u < 10000 {
+				x := uint32(u)
+				hi, lo := (x/100)*2, (x%100)*2
+				if x < 1000 {
+					*(*byte)(vp) = digits100[hi+1]
+					*(*byte)(unsafe.Add(vp, 1)) = digits100[lo]
+					*(*byte)(unsafe.Add(vp, 2)) = digits100[lo+1]
+					return buf[:pos+3]
+				}
+				*(*byte)(vp) = digits100[hi]
+				*(*byte)(unsafe.Add(vp, 1)) = digits100[hi+1]
+				*(*byte)(unsafe.Add(vp, 2)) = digits100[lo]
+				*(*byte)(unsafe.Add(vp, 3)) = digits100[lo+1]
+				return buf[:pos+4]
+			}
+			nd := numDigitsU64(u)
+			out := buf[:pos+nd]
+			formatDigitsU64(out[pos:pos+nd], u)
+			return out
+		}
+		u := uint64(-v)
+		*(*byte)(vp) = '-'
+		vp1 := unsafe.Add(vp, 1)
+		if u < 10 {
+			*(*byte)(vp1) = byte('0' + u)
+			return buf[:pos+2]
+		}
+		if u < 100 {
+			i := u * 2
+			*(*byte)(vp1) = digits100[i]
+			*(*byte)(unsafe.Add(vp1, 1)) = digits100[i+1]
+			return buf[:pos+3]
+		}
+		nd := numDigitsU64(u)
+		out := buf[:pos+1+nd]
+		formatDigitsU64(out[pos+1:pos+1+nd], u)
+		return out
+	}
+	return appendPaddedKeyI64Slow(buf, keyPtr, nk, v)
+}
+
+// AppendPaddedKeyU64 appends a 32-byte-padded struct key (len <= 32) followed by decimal u to buf.
+func AppendPaddedKeyU64(buf []byte, keyPtr *byte, nk int, u uint64) []byte {
+	if cap(buf)-len(buf) >= 52 && uint(nk) <= 32 {
+		bLen := len(buf)
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), bLen)
+		dk := (*[4]uint64)(dp)
+		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
+		dk[0], dk[1] = sk[0], sk[1]
+		if nk > 16 {
+			dk[2], dk[3] = sk[2], sk[3]
+		}
+		pos := bLen + nk
+		vp := unsafe.Add(dp, nk)
+		if u < 10 {
+			*(*byte)(vp) = byte('0' + u)
+			return buf[:pos+1]
+		}
+		if u < 100 {
+			i := u * 2
+			*(*byte)(vp) = digits100[i]
+			*(*byte)(unsafe.Add(vp, 1)) = digits100[i+1]
+			return buf[:pos+2]
+		}
+		if u < 10000 {
+			x := uint32(u)
+			hi, lo := (x/100)*2, (x%100)*2
+			if x < 1000 {
+				*(*byte)(vp) = digits100[hi+1]
+				*(*byte)(unsafe.Add(vp, 1)) = digits100[lo]
+				*(*byte)(unsafe.Add(vp, 2)) = digits100[lo+1]
+				return buf[:pos+3]
+			}
+			*(*byte)(vp) = digits100[hi]
+			*(*byte)(unsafe.Add(vp, 1)) = digits100[hi+1]
+			*(*byte)(unsafe.Add(vp, 2)) = digits100[lo]
+			*(*byte)(unsafe.Add(vp, 3)) = digits100[lo+1]
+			return buf[:pos+4]
+		}
+		nd := numDigitsU64(u)
+		out := buf[:pos+nd]
+		formatDigitsU64(out[pos:pos+nd], u)
+		return out
+	}
+	return appendPaddedKeyU64Slow(buf, keyPtr, nk, u)
+}
+
 func U64toa(buf []byte, v uint64) []byte {
 	if v < 10 {
 		return append(buf, byte('0'+v))

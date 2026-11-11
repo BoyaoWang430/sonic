@@ -69,6 +69,19 @@ func encodeStringAnyMap(b *[]byte, m map[string]any, s *vars.Stack, flags uint64
 		return nil
 	}
 	first := true
+	if sanitize == 0 {
+		for key, value := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKey(*b, key)
+			if err := encodeAnyValue(b, value, s, flags); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for key, value := range m {
 		if !first {
 			*b = append(*b, ',')
@@ -88,7 +101,11 @@ func encodeAnyValue(b *[]byte, val any, s *vars.Stack, flags uint64) error {
 		*b = append(*b, 'n', 'u', 'l', 'l')
 		return nil
 	case string:
-		*b = alg.QuoteFlags(*b, v, false, flags&alg.SanitizeMask)
+		if sanitize := flags & alg.SanitizeMask; sanitize == 0 {
+			*b = alg.Quote(*b, v, false)
+		} else {
+			*b = alg.QuoteFlags(*b, v, false, sanitize)
+		}
 		return nil
 	case float64:
 		if math.IsNaN(v) || math.IsInf(v, 0) {

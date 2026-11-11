@@ -21,6 +21,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/vars"
@@ -85,6 +87,7 @@ const (
 	OP_slice_eface
 	OP_slice_i64
 	OP_slice_str
+	OP_slice_struct
 	OP_unsupported
 
 	// TheFollowing belongs to Branch Op Basic Block
@@ -167,6 +170,7 @@ var _OpNames = [256]string{
 	OP_slice_eface:      "slice_eface",
 	OP_slice_i64:        "slice_i64",
 	OP_slice_str:        "slice_str",
+	OP_slice_struct:     "slice_struct",
 	OP_unsupported:      "unsupported",
 }
 
@@ -287,10 +291,42 @@ const (
 type StructFieldSpec struct {
 	KeyPtr      *byte
 	Offset      uintptr
+	Aux         uint32
 	KeyLen      uint8
 	NoCommaSkip uint8
 	Kind        Op
 	Flags       uint8
+}
+
+type StructSliceSpec struct {
+	SliceType reflect.Type
+	ElemSize  uintptr
+	Specs     []StructFieldSpec
+}
+
+var (
+	sliceSpecsMu  sync.Mutex
+	sliceSpecsPtr atomic.Pointer[[]StructSliceSpec]
+)
+
+func RegisterStructSliceSpec(spec StructSliceSpec) uint32 {
+	sliceSpecsMu.Lock()
+	defer sliceSpecsMu.Unlock()
+	var old []StructSliceSpec
+	if p := sliceSpecsPtr.Load(); p != nil {
+		old = *p
+	}
+	idx := uint32(len(old))
+	next := make([]StructSliceSpec, idx+1)
+	copy(next, old)
+	next[idx] = spec
+	sliceSpecsPtr.Store(&next)
+	return idx
+}
+
+func GetStructSliceSpec(idx uint32) *StructSliceSpec {
+	s := *sliceSpecsPtr.Load()
+	return &s[idx]
 }
 
 // FirstKey returns the key pointer and length without its leading comma when NoCommaSkip == 1.

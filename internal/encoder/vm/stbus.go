@@ -51,9 +51,36 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 var valueBoxPools sync.Map // map[reflect.Type]*sync.Pool
 
 type rootEncPlan struct {
-	prog        *ir.Program
-	boxPool     *sync.Pool
-	isDirectPtr bool
+	prog         *ir.Program
+	boxPool      *sync.Pool
+	pureSpecs    []ir.StructFieldSpec
+	isDirectPtr  bool
+	hasPureSpecs bool
+}
+
+func extractPureStructSpecs(prog *ir.Program, start, end int) ([]ir.StructFieldSpec, bool) {
+	if start < 0 || end > len(*prog) || start > end {
+		return nil, false
+	}
+	s := (*prog)[start:end]
+	if len(s) == 6 &&
+		s[0].Op() == ir.OP_byte && s[0].Byte() == '{' &&
+		s[1].Op() == ir.OP_save &&
+		s[2].Op() == ir.OP_cond_set &&
+		s[3].Op() == ir.OP_struct_fields &&
+		s[4].Op() == ir.OP_drop &&
+		s[5].Op() == ir.OP_byte && s[5].Byte() == '}' {
+		return s[3].VFields(), true
+	}
+	if len(s) == 5 &&
+		s[0].Op() == ir.OP_byte && s[0].Byte() == '{' &&
+		s[1].Op() == ir.OP_save &&
+		s[2].Op() == ir.OP_cond_set &&
+		s[3].Op() == ir.OP_drop &&
+		s[4].Op() == ir.OP_byte && s[4].Byte() == '}' {
+		return nil, true
+	}
+	return nil, false
 }
 
 func getValueBoxPool(vt reflect.Type) *sync.Pool {
@@ -87,14 +114,24 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			(*prog)[n-3].Op() == ir.OP_drop &&
 			(*prog)[n-2].Op() == ir.OP_goto &&
 			(*prog)[n-1].Op() == ir.OP_null
+		var pureSpecs []ir.StructFieldSpec
+		var hasPureSpecs bool
+		if isDirectPtr {
+			pureSpecs, hasPureSpecs = extractPureStructSpecs(prog, 3, n-3)
+		}
 		return &rootEncPlan{
-			prog:        prog,
-			isDirectPtr: isDirectPtr,
+			prog:         prog,
+			pureSpecs:    pureSpecs,
+			isDirectPtr:  isDirectPtr,
+			hasPureSpecs: hasPureSpecs,
 		}, nil
 	default:
+		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
 		return &rootEncPlan{
-			prog:    prog,
-			boxPool: getValueBoxPool(vt),
+			prog:         prog,
+			boxPool:      getValueBoxPool(vt),
+			pureSpecs:    pureSpecs,
+			hasPureSpecs: hasPureSpecs,
 		}, nil
 	}
 }
@@ -386,6 +423,9 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 				*buf = append(*buf, 'n', 'u', 'l', 'l')
 				return nil
 			}
+			if plan.hasPureSpecs {
+				return encodePureStructRoot(buf, ptr, plan.pureSpecs, sb, fv)
+			}
 			if !sb.Save(0, 0, nil, nil) {
 				return vars.ERR_too_deep
 			}
@@ -403,7 +443,12 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	box := plan.boxPool.Get().(reflect.Value)
 	elem := box.Elem()
 	elem.Set(rv)
-	err := Execute(buf, box.UnsafePointer(), sb, fv, plan.prog)
+	var err error
+	if plan.hasPureSpecs {
+		err = encodePureStructRoot(buf, box.UnsafePointer(), plan.pureSpecs, sb, fv)
+	} else {
+		err = Execute(buf, box.UnsafePointer(), sb, fv, plan.prog)
+	}
 	elem.SetZero()
 	plan.boxPool.Put(box)
 	return err

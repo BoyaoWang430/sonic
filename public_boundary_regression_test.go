@@ -799,3 +799,155 @@ func TestNamedSliceExactTypesAndRootEncCache(t *testing.T) {
 		t.Fatalf("rootEncCache did not honor Pretouch EncOnlyOmitNull: got %s, want {\"s\":\"\"}", got)
 	}
 }
+
+type pureLeafSpecItem struct {
+	Opt string `json:"opt,omitempty"`
+	ID  int64  `json:"id"`
+}
+
+type pureNestedMeta struct {
+	Code string `json:"code,omitempty"`
+	Flag bool   `json:"flag"`
+}
+
+type pureChildSpecItem struct {
+	Title string             `json:"title,omitempty"`
+	Meta  pureNestedMeta     `json:"meta"`
+	Leafs []pureLeafSpecItem `json:"leafs"`
+	Empty []pureLeafSpecItem `json:"empty,omitempty"`
+	Score float64            `json:"score,omitempty"`
+}
+
+type namedPureChildSlice []pureChildSpecItem
+
+type ptrMarshalerLeaf struct {
+	N int
+}
+
+func (m *ptrMarshalerLeaf) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"ptr:%d"`, m.N)), nil
+}
+
+type sliceElemWithPtrMarshaler struct {
+	Name string           `json:"name"`
+	Leaf ptrMarshalerLeaf `json:"leaf"`
+}
+
+type customMarshalerStructSlice []pureLeafSpecItem
+
+func (s *customMarshalerStructSlice) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"custom_len:%d"`, len(*s))), nil
+}
+
+type pureStructSliceRoot struct {
+	FirstOmit []pureChildSpecItem         `json:"first_omit,omitempty"`
+	Named     namedPureChildSlice         `json:"named"`
+	ZeroItems []struct{}                  `json:"zero_items"`
+	AddrItems []sliceElemWithPtrMarshaler `json:"addr_items"`
+	CustomPtr customMarshalerStructSlice  `json:"custom_ptr"`
+	I64       int64                       `json:"i64"`
+	I32       int32                       `json:"medium_int32_field_key"`
+	I16       int16                       `json:"i16"`
+	I8        int8                        `json:"i8"`
+	U64       uint64                      `json:"u64"`
+	U32       uint32                      `json:"medium_uint32_field_key"`
+	U16       uint16                      `json:"u16"`
+	U8        uint8                       `json:"u8"`
+}
+
+func TestPureStructSliceSpecAndFusedIntKeys(t *testing.T) {
+	samples := []pureStructSliceRoot{
+		{},
+		{
+			FirstOmit: []pureChildSpecItem{},
+			Named:     namedPureChildSlice{},
+			ZeroItems: make([]struct{}, 3),
+			I64:       math.MinInt64,
+			I32:       math.MinInt32,
+			I16:       -999,
+			I8:        -9,
+			U64:       math.MaxUint64,
+			U32:       math.MaxUint32,
+			U16:       9999,
+			U8:        99,
+		},
+		{
+			FirstOmit: []pureChildSpecItem{
+				{
+					Meta:  pureNestedMeta{Flag: false},
+					Leafs: []pureLeafSpecItem{{ID: 0}, {Opt: "a<b&c", ID: 42}},
+				},
+				{
+					Title: "second \"item\"",
+					Meta:  pureNestedMeta{Code: "X", Flag: true},
+					Leafs: nil,
+					Empty: []pureLeafSpecItem{{Opt: "keep", ID: -10000}},
+					Score: 1.5,
+				},
+			},
+			Named: namedPureChildSlice{
+				{Title: "named", Meta: pureNestedMeta{Code: "Y", Flag: true}, Leafs: []pureLeafSpecItem{}},
+			},
+			ZeroItems: []struct{}{},
+			AddrItems: []sliceElemWithPtrMarshaler{
+				{Name: "elem0", Leaf: ptrMarshalerLeaf{N: 7}},
+				{Name: "elem1", Leaf: ptrMarshalerLeaf{N: 8}},
+			},
+			CustomPtr: customMarshalerStructSlice{{ID: 1}, {ID: 2}},
+			I64:       math.MaxInt64,
+			I32:       123456,
+			I16:       99,
+			I8:        0,
+			U64:       10000,
+			U32:       999,
+			U16:       9,
+			U8:        0,
+		},
+	}
+
+	for idx, s := range samples {
+		// Test both value root (pv=false, yet slice elements remain addressable!) and pointer root (pv=true).
+		for _, val := range []any{s, &s} {
+			wantStd, err := json.Marshal(val)
+			if err != nil {
+				t.Fatalf("sample %d (%T) json.Marshal failed: %v", idx, val, err)
+			}
+			gotStd, err := ConfigStd.Marshal(val)
+			if err != nil {
+				t.Fatalf("sample %d (%T) ConfigStd.Marshal failed: %v", idx, val, err)
+			}
+			if !bytes.Equal(gotStd, wantStd) {
+				t.Fatalf("sample %d (%T) ConfigStd mismatch:\ngot:  %s\nwant: %s", idx, val, gotStd, wantStd)
+			}
+
+			gotDef, err := ConfigDefault.Marshal(val)
+			if err != nil {
+				t.Fatalf("sample %d (%T) ConfigDefault.Marshal failed: %v", idx, val, err)
+			}
+			var roundTrip map[string]any
+			if err := json.Unmarshal(gotDef, &roundTrip); err != nil {
+				t.Fatalf("sample %d (%T) ConfigDefault invalid JSON: %v\n%s", idx, val, err, gotDef)
+			}
+		}
+	}
+
+	if APIKind != UseSonicJSON {
+		return
+	}
+
+	// Verify NoNullSliceOrMap and EncodeNullForInfOrNan inside OP_slice_struct.
+	cfgNoNull := Config{NoNullSliceOrMap: true, EncodeNullForInfOrNan: true}.Froze()
+	nanSample := pureStructSliceRoot{
+		FirstOmit: []pureChildSpecItem{{Title: "nan", Score: math.NaN()}},
+	}
+	if _, err := ConfigDefault.Marshal(&nanSample); err == nil {
+		t.Fatalf("expected error on NaN inside OP_slice_struct under ConfigDefault")
+	}
+	gotNoNull, err := cfgNoNull.Marshal(&nanSample)
+	if err != nil {
+		t.Fatalf("cfgNoNull.Marshal(&nanSample) failed: %v", err)
+	}
+	if !bytes.Contains(gotNoNull, []byte(`"leafs":[]`)) || !bytes.Contains(gotNoNull, []byte(`"score":null`)) {
+		t.Fatalf("unexpected NoNullSliceOrMap / EncodeNullForInfOrNan output: %s", gotNoNull)
+	}
+}

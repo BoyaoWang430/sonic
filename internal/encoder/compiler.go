@@ -564,7 +564,73 @@ func specNoCommaSkip(hasGuaranteedField bool) uint8 {
 	return 1
 }
 
-func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffset uintptr, hasGuaranteedField bool) (ir.StructFieldSpec, bool) {
+func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]ir.StructFieldSpec, bool) {
+	maxDepth := self.opts.MaxInlineDepth
+	if self.useVM && maxDepth == option.DefaultMaxInlineDepth {
+		maxDepth = 16
+	}
+	if !self.useVM || depth >= maxDepth || self.tab[vt] || self.isCustomMarshaler(vt, true) {
+		return nil, false
+	}
+	savedPV := self.pv
+	self.pv = true
+	self.tab[vt] = true
+	defer func() {
+		self.pv = savedPV
+		delete(self.tab, vt)
+	}()
+
+	var specs []ir.StructFieldSpec
+	var build func(curType reflect.Type, baseOffset uintptr, curDepth int) bool
+	build = func(curType reflect.Type, baseOffset uintptr, curDepth int) bool {
+		fvs := resolver.ResolveStruct(curType)
+		hasGuaranteedField := false
+		for i, fv := range fvs {
+			if fv.Type.Kind() == reflect.Array {
+				if fv.Type.Len() == 0 && (fv.Opts&resolver.F_omitempty) != 0 {
+					continue
+				}
+				return false
+			}
+			if childOffset, ok := self.tryFlattenNestedStruct(&fvs[i], baseOffset, curDepth); ok {
+				specs = append(specs, ir.StructFieldSpec{
+					KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
+					KeyLen:      uint8(fv.CommaKeyLen + 1),
+					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
+					Kind:        ir.OP_struct_begin,
+				})
+				self.tab[fv.Type] = true
+				okChild := build(fv.Type, childOffset, curDepth+1)
+				delete(self.tab, fv.Type)
+				if !okChild {
+					return false
+				}
+				specs = append(specs, ir.StructFieldSpec{
+					Kind: ir.OP_struct_end,
+				})
+				hasGuaranteedField = true
+				continue
+			}
+			spec, ok := self.tryCompileStructFieldSpec(&fvs[i], baseOffset, hasGuaranteedField, curDepth)
+			if !ok {
+				return false
+			}
+			specs = append(specs, spec)
+			if spec.Flags&(ir.SpecFlagOmitEmpty|ir.SpecFlagOmitNil) == 0 {
+				hasGuaranteedField = true
+			}
+		}
+		return true
+	}
+	if !build(vt, 0, depth) {
+		return nil, false
+	}
+	cp := make([]ir.StructFieldSpec, len(specs))
+	copy(cp, specs)
+	return cp, true
+}
+
+func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffset uintptr, hasGuaranteedField bool, depth int) (ir.StructFieldSpec, bool) {
 	if !self.useVM || fv.KeyNeedsSanitize || fv.CommaKeyLen > 32 || len(fv.KeyBlob) == 0 {
 		return ir.StructFieldSpec{}, false
 	}
@@ -602,6 +668,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 		}
 	}
 	var kind ir.Op
+	var specAux uint32
 	if (fv.Opts & resolver.F_stringize) != 0 {
 		if ft != vars.JsonNumberType && ft.Kind() == reflect.String {
 			kind = ir.OP_quote
@@ -672,7 +739,20 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 			case vars.StringSliceType:
 				kind = ir.OP_slice_str
 			default:
-				return ir.StructFieldSpec{}, false
+				if et.Kind() == reflect.Struct {
+					elemSpecs, ok := self.tryCompilePureStructSpecs(et, depth+1)
+					if !ok {
+						return ir.StructFieldSpec{}, false
+					}
+					specAux = ir.RegisterStructSliceSpec(ir.StructSliceSpec{
+						SliceType: ft,
+						ElemSize:  et.Size(),
+						Specs:     elemSpecs,
+					})
+					kind = ir.OP_slice_struct
+				} else {
+					return ir.StructFieldSpec{}, false
+				}
 			}
 		default:
 			return ir.StructFieldSpec{}, false
@@ -690,6 +770,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 	return ir.StructFieldSpec{
 		KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
 		Offset:      offset,
+		Aux:         specAux,
 		KeyLen:      uint8(fv.CommaKeyLen),
 		NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 		Kind:        kind,
@@ -769,7 +850,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 				continue
 			}
 
-			if spec, ok := self.tryCompileStructFieldSpec(&fvs[i], baseOffset, hasGuaranteedField); ok {
+			if spec, ok := self.tryCompileStructFieldSpec(&fvs[i], baseOffset, hasGuaranteedField, depth); ok {
 				specs = append(specs, spec)
 				hasPreviousField = true
 				if spec.Flags&(ir.SpecFlagOmitEmpty|ir.SpecFlagOmitNil) == 0 {
