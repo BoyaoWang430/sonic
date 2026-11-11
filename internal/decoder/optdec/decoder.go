@@ -40,77 +40,78 @@ const (
 type rootPtrInfo struct {
 	etp     reflect.Type
 	dec     decFunc
+	proj    *projPlan
 	isNamed bool
 }
 
 var (
-	rootPtrCache     = caching.CreateProgramCache()
-	efaceRootDec     = &efaceDecoder{}
-	mapEfaceRootDec  = &mapEfaceDecoder{}
+	rootPtrCache      = caching.CreateProgramCache()
+	efaceRootDec      = &efaceDecoder{}
+	mapEfaceRootDec   = &mapEfaceDecoder{}
 	sliceEfaceRootDec = &sliceEfaceDecoder{}
-	mapStringRootDec = &mapStringDecoder{}
-	stringRootDec    = &stringDecoder{}
-	intRootDec       = (&compiler{}).compileInt(intType)
-	int64RootDec     = &i64Decoder{}
-	float64RootDec   = &f64Decoder{}
-	boolRootDec      = &boolDecoder{}
+	mapStringRootDec  = &mapStringDecoder{}
+	stringRootDec     = &stringDecoder{}
+	intRootDec        = (&compiler{}).compileInt(intType)
+	int64RootDec      = &i64Decoder{}
+	float64RootDec    = &f64Decoder{}
+	boolRootDec       = &boolDecoder{}
 )
 
 func unpackRootValue(val interface{}) (etp reflect.Type, vp unsafe.Pointer, err error) {
-	etp, vp, _, err = unpackAndCompileRoot(val)
+	etp, vp, _, _, err = unpackAndCompileRoot(val)
 	return
 }
 
-func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer, dec decFunc, err error) {
+func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer, dec decFunc, proj *projPlan, err error) {
 	if val == nil {
-		return nil, nil, nil, &json.InvalidUnmarshalError{}
+		return nil, nil, nil, nil, &json.InvalidUnmarshalError{}
 	}
 	switch v := val.(type) {
 	case *interface{}:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return anyType, unsafe.Pointer(v), efaceRootDec, nil
+		return anyType, unsafe.Pointer(v), efaceRootDec, nil, nil
 	case *map[string]interface{}:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return mapEfaceType, unsafe.Pointer(v), mapEfaceRootDec, nil
+		return mapEfaceType, unsafe.Pointer(v), mapEfaceRootDec, nil, nil
 	case *[]interface{}:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return sliceEfaceType, unsafe.Pointer(v), sliceEfaceRootDec, nil
+		return sliceEfaceType, unsafe.Pointer(v), sliceEfaceRootDec, nil, nil
 	case *map[string]string:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return mapStringType, unsafe.Pointer(v), mapStringRootDec, nil
+		return mapStringType, unsafe.Pointer(v), mapStringRootDec, nil, nil
 	case *string:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return stringType, unsafe.Pointer(v), stringRootDec, nil
+		return stringType, unsafe.Pointer(v), stringRootDec, projScalarPlan, nil
 	case *int:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return intType, unsafe.Pointer(v), intRootDec, nil
+		return intType, unsafe.Pointer(v), intRootDec, projScalarPlan, nil
 	case *int64:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return int64Type, unsafe.Pointer(v), int64RootDec, nil
+		return int64Type, unsafe.Pointer(v), int64RootDec, projScalarPlan, nil
 	case *float64:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return float64Type, unsafe.Pointer(v), float64RootDec, nil
+		return float64Type, unsafe.Pointer(v), float64RootDec, projScalarPlan, nil
 	case *bool:
 		if v == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return boolType, unsafe.Pointer(v), boolRootDec, nil
+		return boolType, unsafe.Pointer(v), boolRootDec, projScalarPlan, nil
 	}
 
 	rv := reflect.ValueOf(val)
@@ -119,18 +120,18 @@ func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer,
 		info := cached.(*rootPtrInfo)
 		vp = rv.UnsafePointer()
 		if vp == nil {
-			return nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
+			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
 		}
 		if info.isNamed {
 			ptrSlot := reflect.New(vt)
 			*(*unsafe.Pointer)(ptrSlot.UnsafePointer()) = vp
 			vp = ptrSlot.UnsafePointer()
 		}
-		return info.etp, vp, info.dec, nil
+		return info.etp, vp, info.dec, info.proj, nil
 	}
 
 	if vt.Kind() != reflect.Ptr || rv.IsNil() {
-		return nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
+		return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
 	}
 
 	vp = rv.UnsafePointer()
@@ -147,17 +148,19 @@ func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer,
 
 	dec, err = findOrCompile(etp)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+	proj = compileProjPlan(dec)
 	rootPtrCache.PutMany([]caching.ProgramBatchItem{{
 		Vt: vt,
 		Fn: &rootPtrInfo{
 			etp:     etp,
 			dec:     dec,
+			proj:    proj,
 			isNamed: isNamed,
 		},
 	}})
-	return etp, vp, dec, nil
+	return etp, vp, dec, proj, nil
 }
 
 func Decode(s *string, i *int, f uint64, val interface{}) error {
@@ -166,7 +169,7 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 
 // DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
 func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
-	etp, vp, dec, err := unpackAndCompileRoot(val)
+	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return s, 0, err
 	}
@@ -174,7 +177,7 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	p := newParserImpl(s, 0, f)
 	defer p.free()
 
-	ctx, err := newContextOnParser(p, f, etp)
+	ctx, err := newContextOnParserWithPlan(p, f, etp, proj)
 	if p.Utf8Inv {
 		s = p.Json
 	}
@@ -191,7 +194,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		sess = *sessPtr
 	}
 
-	etp, vp, dec, err := unpackAndCompileRoot(val)
+	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return err
 	}
@@ -201,7 +204,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	p := newParserFromSession(*s, origPos, uint64(f), sess)
 	defer p.free()
 
-	ctx, err := newContextOnParser(p, uint64(f), etp)
+	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, proj)
 	if p.Utf8Inv {
 		*s = parserCorrectedSource(p, *s, origPos)
 	}

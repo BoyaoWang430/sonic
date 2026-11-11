@@ -128,6 +128,7 @@ type Parser struct {
 
 	// Per-decode typed pointer slabs for optional *Scalar / *string struct fields.
 	// Placed after ctx so assembly-referenced Parser offsets remain unchanged.
+	hasProjHints   bool
 	scalarSlab     []uint64
 	scalarSlabOff  int
 	scalarSlabNext int
@@ -428,6 +429,7 @@ func (p *Parser) reset() {
 	p._nbk = _nospaceBlock{}
 	p.Utf8Inv = false
 	p.isEface = false
+	p.hasProjHints = false
 	p.sessionPadded = nil
 	p.unesc = nil
 	p.resetSlabs()

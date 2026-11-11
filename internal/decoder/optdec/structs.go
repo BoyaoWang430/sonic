@@ -400,19 +400,12 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 	size := int(uint32(objPtr.val))
 	fields := d.fields
 	nfields := len(fields)
+	hasHints := p.hasProjHints
 	expectedIdx := 0
 	next := PtrOffset(objPtr, 1)
 
 	for i := 0; i < size; i++ {
 		knode := next
-		var key string
-		if uint8(knode.typ) == KStringCommon {
-			off := int(knode.typ >> PosBits)
-			key = jsonStr[off : off+int(knode.val)]
-		} else {
-			key = p.strRefEscaped(int(knode.typ>>PosBits), knode.val)
-		}
-
 		vptr := PtrOffset(next, 1)
 		vnode := vptr
 		vtyp := uint8(vnode.typ)
@@ -423,17 +416,34 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 		}
 
 		var idx int
-		if uint(expectedIdx) < uint(nfields) && fields[expectedIdx].name == key {
-			idx = expectedIdx
-			expectedIdx++
-		} else {
-			idx = d.fieldMap.GetInsensitive(key)
-			if idx == -1 {
-				continue
+		if hasHints {
+			if hint := int((knode.typ >> 8) & 0xFFFFFF); hint != 0 {
+				idx = hint - 1
+				expectedIdx = idx + 1
+				goto fastFieldHit
 			}
-			expectedIdx = idx + 1
+		}
+		{
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				off := int(knode.typ >> PosBits)
+				key = jsonStr[off : off+int(knode.val)]
+			} else {
+				key = p.strRefEscaped(int(knode.typ>>PosBits), knode.val)
+			}
+			if uint(expectedIdx) < uint(nfields) && fields[expectedIdx].name == key {
+				idx = expectedIdx
+				expectedIdx++
+			} else {
+				idx = d.fieldMap.GetInsensitive(key)
+				if idx == -1 {
+					continue
+				}
+				expectedIdx = idx + 1
+			}
 		}
 
+	fastFieldHit:
 		fe := &fields[idx]
 		elem := unsafe.Add(vp, uintptr(fe.offset))
 		if vtyp == KNull {
@@ -799,18 +809,11 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 
 	fields := d.fields
 	nfields := len(fields)
+	hasHints := p.hasProjHints
 	expectedIdx := 0
 	next := PtrOffset(objPtr, 1)
 	for i := 0; i < size; i++ {
 		knode := next
-		var key string
-		if uint8(knode.typ) == KStringCommon {
-			off := int(knode.typ >> PosBits)
-			key = jsonStr[off : off+int(knode.val)]
-		} else {
-			key, _ = NewNode(next).AsStrRef(ctx)
-		}
-
 		vptr := PtrOffset(next, 1)
 		vnode := vptr
 		vtyp := uint8(vnode.typ)
@@ -820,22 +823,39 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			next = PtrOffset(vptr, int64(vnode.val>>ConLenBits))
 		}
 
-		// find field idx
+		// find field idx (use pre-matched schema hint when present)
 		var idx int
-		if expectedIdx < nfields && fields[expectedIdx].name == key {
-			idx = expectedIdx
-			expectedIdx++
-		} else {
-			idx = d.fieldMap.Get(key, caseSensitive)
-			if idx == -1 {
-				if disUnknown {
-					return error_field(key)
-				}
-				continue
+		if hasHints {
+			if hint := int((knode.typ >> 8) & 0xFFFFFF); hint != 0 {
+				idx = hint - 1
+				expectedIdx = idx + 1
+				goto slowFieldHit
 			}
-			expectedIdx = idx + 1
+		}
+		{
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				off := int(knode.typ >> PosBits)
+				key = jsonStr[off : off+int(knode.val)]
+			} else {
+				key, _ = NewNode(knode).AsStrRef(ctx)
+			}
+			if expectedIdx < nfields && fields[expectedIdx].name == key {
+				idx = expectedIdx
+				expectedIdx++
+			} else {
+				idx = d.fieldMap.Get(key, caseSensitive)
+				if idx == -1 {
+					if disUnknown {
+						return error_field(key)
+					}
+					continue
+				}
+				expectedIdx = idx + 1
+			}
 		}
 
+	slowFieldHit:
 		fe := &fields[idx]
 		var elem unsafe.Pointer
 		if fe.kind == fieldKindWideOffset {

@@ -60,13 +60,22 @@ func canUseFastMap(opts uint64, root reflect.Type) bool {
 }
 
 func newContextOnParser(p *Parser, opts uint64, root reflect.Type) (*Context, error) {
+	return newContextOnParserWithPlan(p, opts, root, nil)
+}
+
+func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj *projPlan) (*Context, error) {
 	ctx := &p.ctx
 	ctx.Parser = p
 	if root == anyType || root == mapEfaceType || root == sliceEfaceType {
 		p.isEface = true
 	}
 
-	ecode := p.parse()
+	var ecode ErrorCode
+	if proj != nil {
+		ecode = parseWithSchemaOrFull(p, proj)
+	} else {
+		ecode = p.parse()
+	}
 	if ecode != 0 {
 		return ctx, p.fixError(ecode)
 	}
