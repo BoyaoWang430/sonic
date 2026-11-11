@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -563,5 +564,81 @@ func TestBoundaryCombinationScenarios(t *testing.T) {
 	sort.Strings(gotArrVals)
 	if !reflect.DeepEqual(gotArrVals, []string{"v1", "v2", "v3", "v4"}) {
 		t.Fatalf("inline array map value callbacks overwrote receivers: %v", gotArrVals)
+	}
+}
+
+func TestEfaceSmallUintStaticTableSemantics(t *testing.T) {
+	payload := `{"zero":0,"one":1,"edgeLo":4095,"edgeHi":4096,"negZero":-0,"negZeroFrac":-0.0,"negOne":-1,"exp":1e2,"e1":[],"e2":[],"arr":[0,7,4095,4096,-0.0,[],18446744073709551615]}`
+
+	// 1. Default float64 mode must match encoding/json dynamic types and values.
+	var wantAny, gotAny any
+	if err := json.Unmarshal([]byte(payload), &wantAny); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if err := ConfigDefault.Unmarshal([]byte(payload), &gotAny); err != nil {
+		t.Fatalf("ConfigDefault.Unmarshal failed: %v", err)
+	}
+	if !reflect.DeepEqual(gotAny, wantAny) {
+		t.Fatalf("ConfigDefault.Unmarshal mismatch:\ngot:  %#v\nwant: %#v", gotAny, wantAny)
+	}
+	gotMap := gotAny.(map[string]any)
+	e1 := gotMap["e1"].([]any)
+	e2 := gotMap["e2"].([]any)
+	if e1 == nil || e2 == nil || cap(e1) != 0 || cap(e2) != 0 {
+		t.Fatalf("expected empty eface slices to be non-nil with cap=0: len/cap=(%d,%d) and (%d,%d)", len(e1), cap(e1), len(e2), cap(e2))
+	}
+	e1 = append(e1, "mutated")
+	if len(gotMap["e2"].([]any)) != 0 {
+		t.Fatalf("appending to empty eface slice unexpectedly mutated sibling empty slice")
+	}
+	if !math.Signbit(gotMap["negZeroFrac"].(float64)) {
+		t.Fatalf("expected -0.0 to preserve negative signbit")
+	}
+	if math.Signbit(gotMap["zero"].(float64)) {
+		t.Fatalf("expected 0 to have positive signbit")
+	}
+
+	// Also verify direct map[string]any, []any, and scalar root entrypoints.
+	var gotDirectMap map[string]any
+	if err := ConfigDefault.Unmarshal([]byte(`{"a":0,"b":42,"c":4095,"d":4096}`), &gotDirectMap); err != nil {
+		t.Fatalf("direct map[string]any Unmarshal failed: %v", err)
+	}
+	if gotDirectMap["a"] != float64(0) || gotDirectMap["b"] != float64(42) || gotDirectMap["c"] != float64(4095) || gotDirectMap["d"] != float64(4096) {
+		t.Fatalf("unexpected direct map values: %#v", gotDirectMap)
+	}
+	var gotScalar any
+	if err := ConfigDefault.Unmarshal([]byte(`512`), &gotScalar); err != nil || gotScalar != float64(512) {
+		t.Fatalf("scalar Unmarshal(512) = %#v (%T), err=%v", gotScalar, gotScalar, err)
+	}
+
+	// 2. UseNumber mode must still return json.Number across all integer magnitudes.
+	cfgNum := Config{UseNumber: true}.Froze()
+	var gotNum any
+	if err := cfgNum.Unmarshal([]byte(payload), &gotNum); err != nil {
+		t.Fatalf("UseNumber Unmarshal failed: %v", err)
+	}
+	numMap := gotNum.(map[string]any)
+	if numMap["one"] != json.Number("1") || numMap["edgeLo"] != json.Number("4095") || numMap["edgeHi"] != json.Number("4096") {
+		t.Fatalf("UseNumber did not preserve json.Number: %#v", numMap)
+	}
+
+	// 3. UseInt64 mode (native Sonic feature) must return int64 for representable ints and float64 for >MaxInt64.
+	if APIKind == UseSonicJSON {
+		cfgI64 := Config{UseInt64: true}.Froze()
+		var gotI64 any
+		if err := cfgI64.Unmarshal([]byte(payload), &gotI64); err != nil {
+			t.Fatalf("UseInt64 Unmarshal failed: %v", err)
+		}
+		i64Map := gotI64.(map[string]any)
+		if i64Map["zero"] != int64(0) || i64Map["one"] != int64(1) || i64Map["edgeLo"] != int64(4095) || i64Map["edgeHi"] != int64(4096) || i64Map["negOne"] != int64(-1) {
+			t.Fatalf("UseInt64 integer mismatch: %#v", i64Map)
+		}
+		i64Arr := i64Map["arr"].([]any)
+		if i64Arr[0] != int64(0) || i64Arr[1] != int64(7) || i64Arr[2] != int64(4095) || i64Arr[3] != int64(4096) {
+			t.Fatalf("UseInt64 array integer mismatch: %#v", i64Arr)
+		}
+		if _, ok := i64Arr[6].(float64); !ok {
+			t.Fatalf("expected MaxUint64 under UseInt64 to fall back to float64, got %T", i64Arr[6])
+		}
 	}
 }

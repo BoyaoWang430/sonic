@@ -935,6 +935,35 @@ func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
 	return b64, nil
 }
 
+const smallUintAnyLimit = 4096
+
+var (
+	emptyEfaceSliceAny any = []interface{}{}
+	smallFloat64Any    [smallUintAnyLimit]any
+	smallInt64Any      [smallUintAnyLimit]any
+)
+
+func init() {
+	for i := 0; i < smallUintAnyLimit; i++ {
+		smallFloat64Any[i] = float64(i)
+		smallInt64Any[i] = int64(i)
+	}
+}
+
+func uintToFloat64Any(v uint64) any {
+	if v < smallUintAnyLimit {
+		return smallFloat64Any[v]
+	}
+	return float64(v)
+}
+
+func uintToInt64Any(v uint64) any {
+	if v < smallUintAnyLimit {
+		return smallInt64Any[v]
+	}
+	return int64(v)
+}
+
 // AsEface will always ok, because we have parse in native.
 func (node *Node) AsEface(ctx *Context) (interface{}, error) {
 	if ctx.Parser != nil && ctx.Parser.isEface && (ctx.Parser.options&(1<<_F_use_int64)) == 0 && node.ptr == ctx.Root().ptr && ctx.sliceArena == nil {
@@ -989,7 +1018,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KUint:
-					m[key] = float64(vnode.val)
+					m[key] = uintToFloat64Any(vnode.val)
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KSint:
@@ -1000,6 +1029,12 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					m[key] = math.Float64frombits(vnode.val)
 					cur = PtrOffset(vptr, 1)
 					continue
+				case KArray:
+					if (uint64(vnode.val) & ConLenMask) == 0 {
+						m[key] = emptyEfaceSliceAny
+						cur = PtrOffset(vptr, 1)
+						continue
+					}
 				}
 			}
 			*node = Node{ptr: vptr}
@@ -1014,11 +1049,13 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 	case KArray:
 		arr := node.Array()
 		size := arr.Len()
+		if size == 0 {
+			*node = Node{ptr: arr.Children()}
+			return emptyEfaceSliceAny, nil
+		}
 		var a []interface{}
 		if ctx.sliceArena != nil {
 			a = ctx.allocEfaceSlice(size)
-		} else if size == 0 {
-			a = []interface{}{}
 		} else {
 			a = make([]interface{}, size)
 		}
@@ -1048,7 +1085,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					cur = PtrOffset(cur, 1)
 					continue
 				case KUint:
-					a[i] = float64(vnode.val)
+					a[i] = uintToFloat64Any(vnode.val)
 					cur = PtrOffset(cur, 1)
 					continue
 				case KSint:
@@ -1059,6 +1096,12 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					a[i] = math.Float64frombits(vnode.val)
 					cur = PtrOffset(cur, 1)
 					continue
+				case KArray:
+					if (uint64(vnode.val) & ConLenMask) == 0 {
+						a[i] = emptyEfaceSliceAny
+						cur = PtrOffset(cur, 1)
+						continue
+					}
 				}
 			}
 			*node = Node{ptr: cur}
@@ -1087,6 +1130,18 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 	case KNull:
 		*node = NewNode(PtrOffset(node.ptr, 1))
 		return nil, nil
+	case KUint:
+		if !numSpecial {
+			v := node.ptr.val
+			*node = NewNode(PtrOffset(node.ptr, 1))
+			return uintToFloat64Any(v), nil
+		}
+		if opts&(1<<_F_use_int64) != 0 && node.ptr.val <= math.MaxInt64 {
+			v := node.ptr.val
+			*node = NewNode(PtrOffset(node.ptr, 1))
+			return uintToInt64Any(v), nil
+		}
+		fallthrough
 	default:
 		// use float64
 		if ctx.Parser.options&(1<<_F_use_number) != 0 {
