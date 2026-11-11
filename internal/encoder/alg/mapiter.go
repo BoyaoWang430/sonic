@@ -52,6 +52,15 @@ type mapIterTypeInfo struct {
 
 var mapIterTypeCache sync.Map // map[reflect.Type]*mapIterTypeInfo
 
+func init() {
+	vars.RegisterCacheReset(func() {
+		mapIterTypeCache.Range(func(k, _ any) bool {
+			mapIterTypeCache.Delete(k)
+			return true
+		})
+	})
+}
+
 func getMapIterTypeInfo(vt reflect.Type) *mapIterTypeInfo {
 	if v, ok := mapIterTypeCache.Load(vt); ok {
 		return v.(*mapIterTypeInfo)

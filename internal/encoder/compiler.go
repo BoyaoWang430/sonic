@@ -596,7 +596,7 @@ func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]i
 			}
 			if childOffset, ok := self.tryFlattenNestedStruct(&fvs[i], baseOffset, curDepth); ok {
 				specs = append(specs, ir.StructFieldSpec{
-					KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
+					Ptr:         unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset]),
 					KeyLen:      uint8(fv.CommaKeyLen + 1),
 					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 					Kind:        ir.OP_struct_begin,
@@ -670,7 +670,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 		}
 	}
 	var kind ir.Op
-	var specAux uint32
+	specPtr := unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset])
 	if (fv.Opts & resolver.F_stringize) != 0 {
 		if ft != vars.JsonNumberType && ft.Kind() == reflect.String {
 			kind = ir.OP_quote
@@ -746,7 +746,8 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 					if !ok {
 						return ir.StructFieldSpec{}, false
 					}
-					specAux = ir.RegisterStructSliceSpec(ir.StructSliceSpec{
+					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
+						KeyPtr:    &fv.KeyBlob[fv.KeyOffset],
 						SliceType: ft,
 						ElemSize:  et.Size(),
 						Specs:     elemSpecs,
@@ -770,9 +771,8 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 		flags |= ir.SpecFlagOmitEmpty
 	}
 	return ir.StructFieldSpec{
-		KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
+		Ptr:         specPtr,
 		Offset:      offset,
-		Aux:         specAux,
 		KeyLen:      uint8(fv.CommaKeyLen),
 		NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 		Kind:        kind,
@@ -836,7 +836,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 
 			if childOffset, ok := self.tryFlattenNestedStruct(&fvs[i], baseOffset, depth); ok {
 				specs = append(specs, ir.StructFieldSpec{
-					KeyPtr:      &fv.KeyBlob[fv.KeyOffset],
+					Ptr:         unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset]),
 					KeyLen:      uint8(fv.CommaKeyLen + 1),
 					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 					Kind:        ir.OP_struct_begin,

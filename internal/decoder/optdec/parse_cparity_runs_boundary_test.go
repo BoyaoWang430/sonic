@@ -75,3 +75,33 @@ func BenchmarkCParityRunsColdNumbers(b *testing.B) {
 	src := "[" + strings.Repeat(group+",", 31) + group + "]"
 	armAnalysisParseStages[interface{}](b, src, true)
 }
+
+func TestZeroCapParserAndStreamSessionBeginReset(t *testing.T) {
+	// 1. Bare Parser with zero-cap nodes slice must not underflow nodesLast in cParityParseRunsAsm.
+	src := `{"a":1,"b":"ok"}`
+	bare := &Parser{
+		Json:   src,
+		padded: append(append([]byte(nil), src...), padding...),
+		dbuf:   make([]byte, 800),
+		end:    len(src),
+	}
+	bare.nbuf.init(nil)
+	if code := cParityParseWithPadding(bare); code != SONIC_OK {
+		t.Fatalf("cParityParseWithPadding on zero-cap Parser failed: code=%v", code)
+	}
+	if bare.nbuf.nlen == 0 || cap(bare.nodes) == 0 {
+		t.Fatalf("expected initialized nodes after zero-cap parse, nlen=%d cap=%d", bare.nbuf.nlen, cap(bare.nodes))
+	}
+
+	// 2. StreamSession.Begin must clear stale strSlab state even if a prior run aborted without Reset.
+	sess := getStreamSession()
+	defer FreeStreamSession(sess)
+	p := sess.ensureParser()
+	p.strSlab = []byte("stale-slab")
+	p.strSlabOff = 5
+	p.strSlabNext = 2048
+	sess.Begin(0, false)
+	if p.strSlab != nil || p.strSlabOff != 0 || p.strSlabNext != 0 {
+		t.Fatalf("StreamSession.Begin left stale strSlab state: len=%d off=%d next=%d", len(p.strSlab), p.strSlabOff, p.strSlabNext)
+	}
+}

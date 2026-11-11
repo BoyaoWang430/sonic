@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math/bits"
 	"reflect"
+	"strconv"
 	"sync"
 	"unsafe"
 
@@ -160,6 +161,9 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 		s.unesc = s.unesc[:0]
 	}
 	p.nbuf = nodeBuf{parent: -1}
+	p.strSlab = nil
+	p.strSlabOff = 0
+	p.strSlabNext = 0
 	p.Utf8Inv = false
 	p.isEface = isEface
 	s.cur = 0
@@ -979,14 +983,33 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 	}
 }
 
+func cloneIfAliasesStreamVal(s string, b0, bEnd uintptr) (string, bool) {
+	if len(s) == 0 {
+		return s, false
+	}
+	sp := uintptr(rt.IndexChar(s, 0))
+	if sp < b0 || sp >= bEnd {
+		return s, false
+	}
+	return string([]byte(s)), true
+}
+
 func detachStreamError(err error, rawVal []byte) error {
 	switch e := err.(type) {
 	case SyntaxError:
 		return SyntaxError{
-			Pos: e.Pos,
-			Src: string(rawVal),
-			Msg: e.Msg,
+			Pos:  e.Pos,
+			Src:  string(rawVal),
+			Code: e.Code,
+			Msg:  e.Msg,
 		}
+	case *SyntaxError:
+		if e == nil {
+			return err
+		}
+		cp := *e
+		cp.Src = string(rawVal)
+		return &cp
 	case MismatchTypeError:
 		return &MismatchTypeError{
 			Pos:  e.Pos,
@@ -994,9 +1017,43 @@ func detachStreamError(err error, rawVal []byte) error {
 			Type: e.Type,
 		}
 	case *MismatchTypeError:
+		if e == nil {
+			return err
+		}
 		cp := *e
 		cp.Src = string(rawVal)
 		return &cp
+	case *json.UnmarshalTypeError:
+		if e == nil || len(rawVal) == 0 {
+			return err
+		}
+		b0 := uintptr(unsafe.Pointer(&rawVal[0]))
+		bEnd := b0 + uintptr(len(rawVal))
+		valCloned, okV := cloneIfAliasesStreamVal(e.Value, b0, bEnd)
+		fldCloned, okF := cloneIfAliasesStreamVal(e.Field, b0, bEnd)
+		if okV || okF {
+			cp := *e
+			if okV {
+				cp.Value = valCloned
+			}
+			if okF {
+				cp.Field = fldCloned
+			}
+			return &cp
+		}
+		return err
+	case *strconv.NumError:
+		if e == nil || len(rawVal) == 0 {
+			return err
+		}
+		b0 := uintptr(unsafe.Pointer(&rawVal[0]))
+		bEnd := b0 + uintptr(len(rawVal))
+		if cloned, ok := cloneIfAliasesStreamVal(e.Num, b0, bEnd); ok {
+			cp := *e
+			cp.Num = cloned
+			return &cp
+		}
+		return err
 	default:
 		return err
 	}

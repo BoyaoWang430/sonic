@@ -48,8 +48,6 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 	return Execute(buf, p, sb, fv, pp.(*ir.Program))
 }
 
-var valueBoxPools sync.Map // map[reflect.Type]*sync.Pool
-
 type rootEncPlan struct {
 	prog         *ir.Program
 	boxPool      *sync.Pool
@@ -83,17 +81,12 @@ func extractPureStructSpecs(prog *ir.Program, start, end int) ([]ir.StructFieldS
 	return nil, false
 }
 
-func getValueBoxPool(vt reflect.Type) *sync.Pool {
-	if p, ok := valueBoxPools.Load(vt); ok {
-		return p.(*sync.Pool)
-	}
-	pool := &sync.Pool{
+func newValueBoxPool(vt reflect.Type) *sync.Pool {
+	return &sync.Pool{
 		New: func() any {
 			return reflect.New(vt)
 		},
 	}
-	actual, _ := valueBoxPools.LoadOrStore(vt, pool)
-	return actual.(*sync.Pool)
 }
 
 func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
@@ -129,7 +122,7 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
 		return &rootEncPlan{
 			prog:         prog,
-			boxPool:      getValueBoxPool(vt),
+			boxPool:      newValueBoxPool(vt),
 			pureSpecs:    pureSpecs,
 			hasPureSpecs: hasPureSpecs,
 		}, nil

@@ -796,15 +796,22 @@ func TestReview_PretouchMergedAddressabilityPlans(t *testing.T) {
 }
 
 type reviewCountingAppender struct {
-	ID          int
-	appendCalls *atomic.Int64
-	jsonCalls   *atomic.Int64
-	textCalls   *atomic.Int64
+	ID           int
+	appendCalls  *atomic.Int64
+	jsonCalls    *atomic.Int64
+	textCalls    *atomic.Int64
+	stdRaceCalls *atomic.Int64
 }
 
 func (c reviewCountingAppender) AppendJSON(dst []byte) ([]byte, error) {
-	if c.appendCalls != nil {
-		c.appendCalls.Add(1)
+	if c.appendCalls != nil || c.stdRaceCalls != nil {
+		if calledFromStdEncodingJSON() {
+			if c.stdRaceCalls != nil {
+				c.stdRaceCalls.Add(1)
+			}
+		} else if c.appendCalls != nil {
+			c.appendCalls.Add(1)
+		}
 	}
 	dst = append(dst, `{"id":`...)
 	dst = strconv.AppendInt(dst, int64(c.ID), 10)
@@ -813,27 +820,34 @@ func (c reviewCountingAppender) AppendJSON(dst []byte) ([]byte, error) {
 }
 
 func (c reviewCountingAppender) MarshalJSON() ([]byte, error) {
-	if c.jsonCalls != nil {
-		c.jsonCalls.Add(1)
+	if c.jsonCalls != nil || c.stdRaceCalls != nil {
+		if calledFromStdEncodingJSON() {
+			if c.stdRaceCalls != nil {
+				c.stdRaceCalls.Add(1)
+			}
+		} else if c.jsonCalls != nil {
+			c.jsonCalls.Add(1)
+		}
 	}
 	return c.AppendJSON(nil)
 }
 
 func (c reviewCountingAppender) MarshalText() ([]byte, error) {
-	if c.textCalls != nil {
+	if c.textCalls != nil && !calledFromStdEncodingJSON() {
 		c.textCalls.Add(1)
 	}
 	return []byte("text_fallback"), nil
 }
 
 func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
-	var appendCalls, jsonCalls, textCalls atomic.Int64
+	var appendCalls, jsonCalls, textCalls, stdRaceCalls atomic.Int64
 	makeItem := func(id int) reviewCountingAppender {
 		return reviewCountingAppender{
-			ID:          id,
-			appendCalls: &appendCalls,
-			jsonCalls:   &jsonCalls,
-			textCalls:   &textCalls,
+			ID:           id,
+			appendCalls:  &appendCalls,
+			jsonCalls:    &jsonCalls,
+			textCalls:    &textCalls,
+			stdRaceCalls: &stdRaceCalls,
 		}
 	}
 
@@ -876,7 +890,11 @@ func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
 		t.Fatalf("DispatchContainer parity mismatch:\ngot:  %s\nwant: %s", got, want)
 	}
 
-	// Verify 0 allocations when encoding into preallocated buffer under both default and ConfigStd options.
+	// Verify 0 allocations when encoding into preallocated buffer under both default and ConfigStd options
+	// (skipped under -race where encodeIntoCheckRace intentionally invokes encoding/json.Marshal).
+	if stdRaceCalls.Load() > 0 {
+		return
+	}
 	type SingleHolder struct {
 		Item reviewCountingAppender `json:"item"`
 	}

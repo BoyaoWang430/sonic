@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/internal/encoder/ir"
 	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/option"
 )
@@ -70,14 +74,36 @@ func TestGenericMapAndNilChecks(t *testing.T) {
 	}
 }
 
-var retainedBoxPtrs []*boxEscapeField
+var (
+	retainedBoxMu   sync.Mutex
+	retainedBoxPtrs []*boxEscapeField
+)
 
 type boxEscapeField struct {
 	V int `json:"v"`
 }
 
+func calledFromStdEncodingJSON() bool {
+	var pcs [16]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		fr, more := frames.Next()
+		if strings.HasPrefix(fr.Function, "encoding/json.") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
 func (f *boxEscapeField) IsZero() bool {
-	retainedBoxPtrs = append(retainedBoxPtrs, f)
+	if !calledFromStdEncodingJSON() {
+		retainedBoxMu.Lock()
+		retainedBoxPtrs = append(retainedBoxPtrs, f)
+		retainedBoxMu.Unlock()
+	}
 	return f.V == 0
 }
 
@@ -1360,4 +1386,120 @@ func BenchmarkStepD4Maps(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestPhase1ReviewFixes(t *testing.T) {
+	// 1. StructFieldSpec layout must remain strictly 24 bytes.
+	if sz := unsafe.Sizeof(ir.StructFieldSpec{}); sz != 24 {
+		t.Fatalf("StructFieldSpec size = %d, want 24", sz)
+	}
+
+	// 2. End-to-end Unmarshal & StreamDecoder error detachment when caller overwrites input []byte.
+	type ageStruct struct {
+		Age int `json:"age"`
+	}
+	bMismatch := []byte(`{"age":"wrong_type"}`)
+	var as ageStruct
+	errMismatch := ConfigStd.Unmarshal(bMismatch, &as)
+	if errMismatch == nil {
+		t.Fatal("expected mismatch error")
+	}
+	for i := range bMismatch {
+		bMismatch[i] = 'X'
+	}
+	if msg := errMismatch.Error(); strings.Contains(msg, "XXXX") {
+		t.Fatalf("Unmarshal mismatch error aliased caller buffer: %s", msg)
+	}
+
+	bU8Key := []byte(`{"999":1}`)
+	var u8Map map[uint8]int
+	errU8Key := ConfigStd.Unmarshal(bU8Key, &u8Map)
+	if errU8Key == nil {
+		t.Fatal("expected map[uint8]int overflow key error")
+	}
+	for i := range bU8Key {
+		bU8Key[i] = 'X'
+	}
+	if msg := errU8Key.Error(); strings.Contains(msg, "XXX") {
+		t.Fatalf("Unmarshal map[uint8]int error aliased caller buffer: %s", msg)
+	}
+
+	if APIKind == UseSonicJSON {
+		bNumKey := []byte(`{"bad_json_num":1}`)
+		var numMap map[json.Number]int
+		errNumKey := ConfigStd.Unmarshal(bNumKey, &numMap)
+		if errNumKey == nil {
+			t.Fatal("expected map[json.Number]int key error")
+		}
+		for i := range bNumKey {
+			bNumKey[i] = 'X'
+		}
+		if msg := errNumKey.Error(); strings.Contains(msg, "XXXX") {
+			t.Fatalf("Unmarshal map[json.Number]int error aliased caller buffer: %s", msg)
+		}
+
+		bStreamKey := []byte(`{"bad_stream_num":1}`)
+		var streamNumMap map[json.Number]int
+		errStream := ConfigStd.NewDecoder(bytes.NewReader(bStreamKey)).Decode(&streamNumMap)
+		if errStream == nil {
+			t.Fatal("expected stream map[json.Number]int key error")
+		}
+		for i := range bStreamKey {
+			bStreamKey[i] = 'X'
+		}
+		if msg := errStream.Error(); strings.Contains(msg, "XXXX") {
+			t.Fatalf("StreamDecoder map[json.Number]int error aliased input buffer: %s", msg)
+		}
+	}
+
+	// 3. FreeStack must evict oversized KVBuf / KVOrder (> 4096) on normal Marshal success path.
+	bigMap := make(map[string]int, 5000)
+	for i := 0; i < 5000; i++ {
+		bigMap["key_"+strconv.Itoa(i)] = i
+	}
+	runtime.LockOSThread()
+	_, errBig := ConfigStd.Marshal(bigMap)
+	stk := vars.NewStack()
+	kvCap, ordCap := cap(stk.KVBuf), cap(stk.KVOrder)
+	vars.FreeStack(stk)
+	runtime.UnlockOSThread()
+	if errBig != nil {
+		t.Fatalf("ConfigStd.Marshal(bigMap) failed: %v", errBig)
+	}
+	if kvCap > 4096 || ordCap > 4096 {
+		t.Fatalf("FreeStack retained oversized map sort buffers: cap(KVBuf)=%d cap(KVOrder)=%d", kvCap, ordCap)
+	}
+
+	// 4. Dynamic reflect.StructOf with OP_slice_struct + custom map across ResetProgramCache().
+	dynType := reflect.StructOf([]reflect.StructField{
+		{
+			Name: "Items",
+			Type: reflect.TypeOf([]pureLeafSpecItem{}),
+			Tag:  `json:"items"`,
+		},
+		{
+			Name: "Meta",
+			Type: reflect.TypeOf(customStringIntMap{}),
+			Tag:  `json:"meta"`,
+		},
+	})
+	val := reflect.New(dynType).Elem()
+	val.Field(0).Set(reflect.ValueOf([]pureLeafSpecItem{{Opt: "a<b", ID: 1}, {ID: 2}}))
+	val.Field(1).Set(reflect.ValueOf(customStringIntMap{"y": 2, "x": 1}))
+
+	wantDyn, err := json.Marshal(val.Interface())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 2; round++ {
+		gotVal, err := ConfigStd.Marshal(val.Interface())
+		if err != nil || !bytes.Equal(gotVal, wantDyn) {
+			t.Fatalf("round %d dynamic value Marshal = %s, err=%v, want %s", round, gotVal, err, wantDyn)
+		}
+		gotPtr, err := ConfigStd.Marshal(val.Addr().Interface())
+		if err != nil || !bytes.Equal(gotPtr, wantDyn) {
+			t.Fatalf("round %d dynamic ptr Marshal = %s, err=%v, want %s", round, gotPtr, err, wantDyn)
+		}
+		vars.ResetProgramCache()
+	}
 }

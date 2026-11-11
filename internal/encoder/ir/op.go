@@ -21,8 +21,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/vars"
@@ -289,50 +287,38 @@ const (
 )
 
 type StructFieldSpec struct {
-	KeyPtr      *byte
+	Ptr         unsafe.Pointer // *byte key data, or *StructSliceSpec when Kind == OP_slice_struct
 	Offset      uintptr
-	Aux         uint32
 	KeyLen      uint8
 	NoCommaSkip uint8
 	Kind        Op
 	Flags       uint8
+	_           [4]byte
 }
 
+// Keep StructFieldSpec strictly 24 bytes with a single pointer word for L1 & GC scan density.
+var (
+	_ [24 - unsafe.Sizeof(StructFieldSpec{})]byte
+	_ [unsafe.Sizeof(StructFieldSpec{}) - 24]byte
+)
+
 type StructSliceSpec struct {
+	KeyPtr    *byte
 	SliceType reflect.Type
 	ElemSize  uintptr
 	Specs     []StructFieldSpec
 }
 
-var (
-	sliceSpecsMu  sync.Mutex
-	sliceSpecsPtr atomic.Pointer[[]StructSliceSpec]
-)
-
-func RegisterStructSliceSpec(spec StructSliceSpec) uint32 {
-	sliceSpecsMu.Lock()
-	defer sliceSpecsMu.Unlock()
-	var old []StructSliceSpec
-	if p := sliceSpecsPtr.Load(); p != nil {
-		old = *p
-	}
-	idx := uint32(len(old))
-	next := make([]StructSliceSpec, idx+1)
-	copy(next, old)
-	next[idx] = spec
-	sliceSpecsPtr.Store(&next)
-	return idx
-}
-
-func GetStructSliceSpec(idx uint32) *StructSliceSpec {
-	s := *sliceSpecsPtr.Load()
-	return &s[idx]
-}
-
 // FirstKey returns the key pointer and length without its leading comma when NoCommaSkip == 1.
 func (s *StructFieldSpec) FirstKey() (*byte, int) {
 	skip := s.NoCommaSkip
-	return (*byte)(unsafe.Add(unsafe.Pointer(s.KeyPtr), skip)), int(s.KeyLen - skip)
+	return (*byte)(unsafe.Add(s.Ptr, skip)), int(s.KeyLen - skip)
+}
+
+// FirstSliceKey returns keyPtr and length without its leading comma when NoCommaSkip == 1.
+func (s *StructFieldSpec) FirstSliceKey(keyPtr *byte) (*byte, int) {
+	skip := s.NoCommaSkip
+	return (*byte)(unsafe.Add(unsafe.Pointer(keyPtr), skip)), int(s.KeyLen - skip)
 }
 
 func newInsFields(specs []StructFieldSpec) Instr {

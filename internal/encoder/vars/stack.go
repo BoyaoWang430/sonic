@@ -60,15 +60,29 @@ var (
 		},
 	}
 	bufferPool     = sync.Pool{}
-	programCache   = caching.CreateProgramCache()
-	programCachePV = caching.CreateProgramCache()
-	rootEncCache   = caching.CreateProgramCache()
+	programCache    = caching.CreateProgramCache()
+	programCachePV  = caching.CreateProgramCache()
+	rootEncCache    = caching.CreateProgramCache()
+	cacheResetMu    sync.Mutex
+	cacheResetHooks []func()
 )
+
+func RegisterCacheReset(fn func()) {
+	cacheResetMu.Lock()
+	cacheResetHooks = append(cacheResetHooks, fn)
+	cacheResetMu.Unlock()
+}
 
 func ResetProgramCache() {
 	programCache.Reset()
 	programCachePV.Reset()
 	rootEncCache.Reset()
+	cacheResetMu.Lock()
+	hooks := append([]func(){}, cacheResetHooks...)
+	cacheResetMu.Unlock()
+	for _, fn := range hooks {
+		fn()
+	}
 }
 
 func NewBytes() *[]byte {
@@ -262,6 +276,12 @@ func FreeStack(p *Stack) {
 	p.sp = 0
 	p.ptrSp = 0
 	p.ValPtr = nil
+	if cap(p.KVBuf) > maxPooledMapKV {
+		p.KVBuf = nil
+	}
+	if cap(p.KVOrder) > maxPooledMapKV {
+		p.KVOrder = nil
+	}
 	stackPool.Put(p)
 }
 

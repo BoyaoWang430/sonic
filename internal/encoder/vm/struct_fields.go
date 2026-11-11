@@ -41,7 +41,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				if sflags&ir.SpecFlagOmitNil != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -57,7 +57,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -68,7 +68,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -79,7 +79,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && !v {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -110,7 +110,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -131,7 +131,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -141,7 +141,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				return buf, f, err
 			}
 		case ir.OP_struct_begin:
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				keyPtr, keyLen = spec.FirstKey()
 			}
@@ -151,17 +151,17 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			f &^= 1 << _S_cond
 			buf = append(buf, '}')
 		case ir.OP_slice_struct:
-			sliceSpec := ir.GetStructSliceSpec(spec.Aux)
+			sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
 			rv := reflect.NewAt(sliceSpec.SliceType, fp).Elem()
 			n := rv.Len()
 			if n == 0 {
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
-					keyPtr, keyLen = spec.FirstKey()
+					keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 				}
 				buf = appendPaddedKey(buf, keyPtr, keyLen)
 				if !rv.IsNil() || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
@@ -171,10 +171,10 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
-				keyPtr, keyLen = spec.FirstKey()
+				keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 			}
 			buf = appendPaddedKey(buf, keyPtr, keyLen)
 			if !s.Save(0, 0, nil, nil) || !s.Save(0, 0, nil, nil) {
@@ -208,7 +208,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -221,7 +221,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -248,7 +248,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -261,7 +261,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -280,7 +280,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -293,7 +293,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -311,7 +311,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -322,7 +322,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -333,7 +333,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -344,7 +344,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -355,7 +355,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -366,7 +366,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -377,7 +377,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -387,7 +387,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint64)(fp) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -406,7 +406,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint32)(fp) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -426,7 +426,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -438,7 +438,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -467,7 +467,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				if sflags&ir.SpecFlagOmitNil != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -483,7 +483,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -494,7 +494,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -505,7 +505,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && !v {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -536,7 +536,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -557,7 +557,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -567,7 +567,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				return buf, f, err
 			}
 		case ir.OP_struct_begin:
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				keyPtr, keyLen = spec.FirstKey()
 			}
@@ -577,17 +577,17 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			f &^= 1 << _S_cond
 			buf = append(buf, '}')
 		case ir.OP_slice_struct:
-			sliceSpec := ir.GetStructSliceSpec(spec.Aux)
+			sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
 			rv := reflect.NewAt(sliceSpec.SliceType, fp).Elem()
 			n := rv.Len()
 			if n == 0 {
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
-					keyPtr, keyLen = spec.FirstKey()
+					keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 				}
 				buf = appendPaddedKey(buf, keyPtr, keyLen)
 				if !rv.IsNil() || flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
@@ -597,10 +597,10 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
-				keyPtr, keyLen = spec.FirstKey()
+				keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 			}
 			buf = appendPaddedKey(buf, keyPtr, keyLen)
 			if !s.Save(0, 0, nil, nil) || !s.Save(0, 0, nil, nil) {
@@ -634,7 +634,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -647,7 +647,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -674,7 +674,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -687,7 +687,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -706,7 +706,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
 				}
-				keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+				keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 				if f&(1<<_S_cond) != 0 {
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstKey()
@@ -719,7 +719,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 				}
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -737,7 +737,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -748,7 +748,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -759,7 +759,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -770,7 +770,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -781,7 +781,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -792,7 +792,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -803,7 +803,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && v == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -813,7 +813,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint64)(fp) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -832,7 +832,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint32)(fp) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -852,7 +852,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()
@@ -864,7 +864,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if (sflags&ir.SpecFlagOmitEmpty != 0) && len(v) == 0 {
 				continue
 			}
-			keyPtr, keyLen := spec.KeyPtr, int(spec.KeyLen)
+			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
 			if f&(1<<_S_cond) != 0 {
 				f &^= 1 << _S_cond
 				keyPtr, keyLen = spec.FirstKey()

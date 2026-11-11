@@ -67,6 +67,18 @@ func cParityParseRunsAsm(p *Parser, state *cParityRunsState, rawBase *byte, node
 func cParityParseWithPadding(p *Parser) ErrorCode {
 	var state cParityRunsState
 	buf := &p.nbuf
+	if len(p.nodes) == 0 {
+		n := cap(p.nodes)
+		if n == 0 {
+			n = int(defaultNodesCap)
+			p.nodes = make([]node, n, n)
+		} else {
+			p.nodes = p.nodes[:n]
+		}
+		buf.ncap = len(p.nodes)
+	} else if buf.ncap <= 0 || buf.ncap > len(p.nodes) {
+		buf.ncap = len(p.nodes)
+	}
 	if buf.parent != -1 {
 		// C's grow/restart contract records the continuation in the last node
 		// plus the current parent's type and the key-capacity-failure flag.
