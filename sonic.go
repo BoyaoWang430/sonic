@@ -120,16 +120,25 @@ func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
 	return api.UnmarshalString(buf, uint64(cfg.decoderOpts), val)
 }
 
+func isUntypedDOMTarget(val interface{}) bool {
+	switch val.(type) {
+	case *interface{}, *map[string]interface{}, *[]interface{}:
+		return true
+	default:
+		return false
+	}
+}
+
 // Unmarshal is implemented by sonic
 func (cfg frozenConfig) Unmarshal(buf []byte, val interface{}) error {
-	if cfg.CopyString {
-		err := cfg.UnmarshalFromString(rt.Mem2Str(buf), val)
-		if err != nil {
-			return copyUnmarshalErrorSource(err, buf)
-		}
-		return nil
+	if !cfg.CopyString && isUntypedDOMTarget(val) {
+		return cfg.UnmarshalFromString(string(buf), val)
 	}
-	return cfg.UnmarshalFromString(string(buf), val)
+	err := api.UnmarshalString(rt.Mem2Str(buf), uint64(cfg.decoderOpts)|uint64(decoder.OptionCopyString), val)
+	if err != nil {
+		return copyUnmarshalErrorSource(err, buf)
+	}
+	return nil
 }
 
 func copyUnmarshalErrorSource(err error, buf []byte) error {

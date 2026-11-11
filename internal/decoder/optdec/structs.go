@@ -230,7 +230,17 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 			switch fe.kind {
 			case fieldKindString:
 				if vtyp == KStringCommon {
-					*(*string)(elem) = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+					off := int(vnode.typ >> PosBits)
+					n := int(vnode.val)
+					s := p.Json[off : off+n]
+					if copyStr && n != 0 {
+						if copied, ok := p.copyArenaHit(s); ok {
+							s = copied
+						} else {
+							s = p.copyArenaStringSlow(s)
+						}
+					}
+					*(*string)(elem) = s
 					continue
 				}
 				if vtyp == KStringEscaped {

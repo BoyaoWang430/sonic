@@ -1021,3 +1021,110 @@ func TestStepD1SliceGrowAndInlineTypedSlices(t *testing.T) {
 		t.Fatalf("expected error on trailing non-whitespace tokens")
 	}
 }
+
+type stepD2ArenaDoc struct {
+	Empty   string            `json:"empty"`
+	Short   string            `json:"short"`
+	Escaped string            `json:"escaped"`
+	Large   string            `json:"large"`
+	Many    []string          `json:"many"`
+	Meta    map[string]string `json:"meta"`
+	Raw     NoCopyRawMessage  `json:"raw"`
+	Any     any               `json:"any"`
+}
+
+func TestStepD2StringArenaAndUnmarshalBytesSafety(t *testing.T) {
+	largeVal := strings.Repeat("abcdefghij", 150) // 1500 bytes > maxArenaStrLen (1024)
+	manyVals := make([]string, 80)
+	for i := range manyVals {
+		manyVals[i] = fmt.Sprintf("item-%03d-payload-string", i)
+	}
+	want := stepD2ArenaDoc{
+		Empty:   "",
+		Short:   "alpha",
+		Escaped: "line1\n\"quote\"\t\u4e2d\u6587",
+		Large:   largeVal,
+		Many:    manyVals,
+		Meta:    map[string]string{"k1": "v1", "k2": "escaped\\val"},
+		Raw:     NoCopyRawMessage(`{"nested":"raw"}`),
+		Any:     "boxed-string-value",
+	}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cfg := range []API{ConfigDefault, ConfigStd, ConfigFastest} {
+		// Typed struct binding from mutable []byte: wiping buf must never corrupt decoded fields.
+		buf := append([]byte(nil), encoded...)
+		var got stepD2ArenaDoc
+		if err := cfg.Unmarshal(buf, &got); err != nil {
+			t.Fatalf("Unmarshal struct failed: %v", err)
+		}
+		for i := range buf {
+			buf[i] = 'X'
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("decoded struct mutated after caller []byte wipe:\ngot:  %+v\nwant: %+v", got, want)
+		}
+
+		// Untyped DOM (*any) from mutable []byte: wiping buf must never corrupt DOM strings.
+		bufAny := append([]byte(nil), encoded...)
+		var gotAny any
+		if err := cfg.Unmarshal(bufAny, &gotAny); err != nil {
+			t.Fatalf("Unmarshal any failed: %v", err)
+		}
+		for i := range bufAny {
+			bufAny[i] = 'Y'
+		}
+		m := gotAny.(map[string]any)
+		if m["short"] != want.Short || m["escaped"] != want.Escaped || m["large"] != want.Large || m["empty"] != "" {
+			t.Fatalf("decoded any DOM corrupted after caller []byte wipe: %#v", m)
+		}
+
+		// Error source detachment on invalid []byte.
+		badBuf := []byte(`{"short": 123}`)
+		var badTarget stepD2ArenaDoc
+		errBad := cfg.Unmarshal(badBuf, &badTarget)
+		if errBad == nil {
+			t.Fatalf("expected mismatch error")
+		}
+		wantErrMsg := errBad.Error()
+		for i := range badBuf {
+			badBuf[i] = 'Z'
+		}
+		if errBad.Error() != wantErrMsg {
+			t.Fatalf("error message aliased caller []byte: got %q want %q", errBad.Error(), wantErrMsg)
+		}
+	}
+
+	// StreamDecoder sequential decodes must never overwrite slabs from prior documents.
+	var streamBuf bytes.Buffer
+	for i := 0; i < 5; i++ {
+		doc := stepD2ArenaDoc{
+			Short:   fmt.Sprintf("stream-doc-%d", i),
+			Escaped: fmt.Sprintf("esc-\"-%d", i),
+			Many:    []string{fmt.Sprintf("s0-%d", i), fmt.Sprintf("s1-%d", i)},
+		}
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		streamBuf.Write(b)
+		streamBuf.WriteByte('\n')
+	}
+	dec := ConfigStd.NewDecoder(&streamBuf)
+	var docs []stepD2ArenaDoc
+	for i := 0; i < 5; i++ {
+		var d stepD2ArenaDoc
+		if err := dec.Decode(&d); err != nil {
+			t.Fatalf("stream decode %d failed: %v", i, err)
+		}
+		docs = append(docs, d)
+	}
+	for i, d := range docs {
+		if d.Short != fmt.Sprintf("stream-doc-%d", i) || d.Escaped != fmt.Sprintf("esc-\"-%d", i) {
+			t.Fatalf("stream doc %d slab overwritten by later decode: %+v", i, d)
+		}
+	}
+}

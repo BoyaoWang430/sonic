@@ -121,6 +121,9 @@ type Parser struct {
 	paddedBackup  []byte
 	sessionPadded []byte
 	unesc         []byte
+	strSlab       []byte
+	strSlabOff    int
+	strSlabNext   int
 	ctx           Context
 }
 
@@ -177,13 +180,99 @@ func (p *Parser) strRefCommon(off, length int) string {
 	return p.Json[off : off+length]
 }
 
+const (
+	minStrSlabCap  = 64
+	initStrSlabCap = 512
+	maxStrSlabCap  = 4096
+	maxArenaStrLen = 1024
+)
+
 // strCommon returns an unescaped JSON string token, copying if copyStr is true.
 func (p *Parser) strCommon(off, length int, copyStr bool) string {
 	s := p.Json[off : off+length]
 	if !copyStr {
 		return s
 	}
-	return string(rt.Str2Mem(s))
+	return p.copyArenaString(s)
+}
+
+func (p *Parser) copyArenaHit(s string) (string, bool) {
+	n := len(s)
+	off := p.strSlabOff
+	if len(p.strSlab)-off >= n {
+		p.strSlabOff = off + n
+		dst := p.strSlab[off : off+n]
+		copy(dst, s)
+		return unsafe.String(&dst[0], n), true
+	}
+	return s, false
+}
+
+func (p *Parser) copyArenaString(s string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	if out, ok := p.copyArenaHit(s); ok {
+		return out
+	}
+	return p.copyArenaStringSlow(s)
+}
+
+//go:noinline
+func (p *Parser) copyArenaStringSlow(s string) string {
+	n := len(s)
+	if n > maxArenaStrLen {
+		return string(rt.Str2Mem(s))
+	}
+	slab := p.allocStrSlab(n)
+	copy(slab[:n], s)
+	return unsafe.String(&slab[0], n)
+}
+
+//go:noinline
+func (p *Parser) copyArenaBytesSlow(b []byte) string {
+	n := len(b)
+	if n > maxArenaStrLen {
+		return string(b)
+	}
+	slab := p.allocStrSlab(n)
+	copy(slab[:n], b)
+	return unsafe.String(&slab[0], n)
+}
+
+func (p *Parser) allocStrSlab(n int) []byte {
+	nextCap := p.strSlabNext
+	if nextCap == 0 {
+		jsonLen := len(p.Json)
+		if p.options&(1<<_F_copy_string) == 0 {
+			nextCap = 128
+		} else if p.isEface {
+			nextCap = jsonLen / 2
+			if nextCap < minStrSlabCap {
+				nextCap = minStrSlabCap
+			} else if nextCap > maxStrSlabCap {
+				nextCap = maxStrSlabCap
+			}
+		} else if jsonLen <= 128 {
+			nextCap = minStrSlabCap
+		} else if jsonLen <= 1024 {
+			nextCap = 256
+		} else {
+			nextCap = initStrSlabCap
+		}
+	}
+	if nextCap < n*2 {
+		nextCap = n * 2
+	}
+	growCap := nextCap * 2
+	if growCap > maxStrSlabCap {
+		growCap = maxStrSlabCap
+	}
+	p.strSlabNext = growCap
+	slab := make([]byte, nextCap)
+	p.strSlab = slab
+	p.strSlabOff = n
+	return slab
 }
 
 // bytesEscaped returns the decoded byte slice for an escaped JSON string token.
@@ -203,7 +292,19 @@ func (p *Parser) strRefEscaped(off int, val uint64) string {
 
 // strEscaped returns a heap-copied string of a decoded escaped JSON string token.
 func (p *Parser) strEscaped(off int, val uint64) string {
-	return string(p.bytesEscaped(off, val))
+	b := p.bytesEscaped(off, val)
+	n := len(b)
+	if n == 0 {
+		return ""
+	}
+	slabOff := p.strSlabOff
+	if len(p.strSlab)-slabOff >= n {
+		p.strSlabOff = slabOff + n
+		dst := p.strSlab[slabOff : slabOff+n]
+		copy(dst, b)
+		return unsafe.String(&dst[0], n)
+	}
+	return p.copyArenaBytesSlow(b)
 }
 
 //go:inline
@@ -239,6 +340,9 @@ func (p *Parser) reset() {
 	p.isEface = false
 	p.sessionPadded = nil
 	p.unesc = nil
+	p.strSlab = nil
+	p.strSlabOff = 0
+	p.strSlabNext = 0
 	p.ctx = Context{}
 }
 
