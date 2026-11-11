@@ -344,3 +344,374 @@ copy_short_byte:
 	CBZ R11, copy_advance
 	MOVB R10, (R22)
 	B copy_advance
+
+// func quoteHTML(src *byte, size int, dst *byte, capacity int) (consumed, written int)
+// Normal Go ABI0 frame metadata and RET; no use of g (R28), R18, SP, or RA as scratch.
+TEXT ·quoteHTML(SB), $0-48
+	MOVD src+0(FP), R0
+	MOVD size+8(FP), R1
+	MOVD dst+16(FP), R2
+	MOVD capacity+24(FP), R3
+	MOVD R1, R5
+	MOVD R3, R6
+	MOVD $32, R7
+	MOVD $34, R8
+	MOVD $92, R9
+
+	VMOV R8, V1.B16
+	VMOV R9, V2.B16
+	VEOR V3.B16, V3.B16, V3.B16
+	MOVD $0xfb, R4
+	VMOV R4, V16.B16
+	MOVD $0xfd, R4
+	VMOV R4, V17.B16
+	MOVD $0x3c, R4
+	VMOV R4, V18.B16
+	MOVD $0xe2, R4
+	VMOV R4, V19.B16
+
+qh_scan:
+	CMP $32, R1
+	BLO qh_scan_16
+	CMP $32, R3
+	BLO qh_scan_16
+	FLDPQ (R0), (F0, F6)
+
+	VUSHR $5, V0.B16, V4.B16
+	VCMEQ V3.B16, V4.B16, V4.B16
+	VAND V16.B16, V0.B16, V5.B16
+	VCMEQ V1.B16, V5.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VAND V17.B16, V0.B16, V5.B16
+	VCMEQ V18.B16, V5.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VCMEQ V2.B16, V0.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VCMEQ V19.B16, V0.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+
+	VUSHR $5, V6.B16, V7.B16
+	VCMEQ V3.B16, V7.B16, V7.B16
+	VAND V16.B16, V6.B16, V5.B16
+	VCMEQ V1.B16, V5.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+	VAND V17.B16, V6.B16, V5.B16
+	VCMEQ V18.B16, V5.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+	VCMEQ V2.B16, V6.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+	VCMEQ V19.B16, V6.B16, V5.B16
+	VORR V5.B16, V7.B16, V7.B16
+
+	VORR V7.B16, V4.B16, V5.B16
+	VMOV V5.D[0], R23
+	VMOV V5.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, qh_neon32_event
+	FSTPQ (F0, F6), (R2)
+	ADD $32, R0
+	ADD $32, R2
+	SUB $32, R1
+	SUB $32, R3
+	B qh_scan
+
+qh_neon32_event:
+	VMOV V4.D[0], R23
+	VMOV V4.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, qh_neon_event
+	VST1 [V0.B16], (R2)
+	ADD $16, R0
+	ADD $16, R2
+	SUB $16, R1
+	SUB $16, R3
+	VMOV V6.B16, V0.B16
+	VMOV V7.D[0], R23
+	VMOV V7.D[1], R22
+	B qh_neon_event
+
+qh_scan_16:
+	CMP $16, R1
+	BLO qh_scan_scalar
+	CMP $16, R3
+	BLO qh_scan_scalar
+	VLD1 (R0), [V0.B16]
+	VUSHR $5, V0.B16, V4.B16
+	VCMEQ V3.B16, V4.B16, V4.B16
+	VAND V16.B16, V0.B16, V5.B16
+	VCMEQ V1.B16, V5.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VAND V17.B16, V0.B16, V5.B16
+	VCMEQ V18.B16, V5.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VCMEQ V2.B16, V0.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VCMEQ V19.B16, V0.B16, V5.B16
+	VORR V5.B16, V4.B16, V4.B16
+	VMOV V4.D[0], R23
+	VMOV V4.D[1], R22
+	ORR R22, R23, R24
+	CBNZ R24, qh_neon_event
+	VST1 [V0.B16], (R2)
+	ADD $16, R0
+	ADD $16, R2
+	SUB $16, R1
+	SUB $16, R3
+	B qh_scan
+
+qh_neon_event:
+	MOVD $0, R24
+	CBNZ R23, qh_neon_first
+	MOVD R22, R23
+	MOVD $8, R24
+qh_neon_first:
+	RBIT R23, R23
+	CLZ R23, R23
+	ADD R23>>3, R24, R24
+	CBZ R24, qh_classify
+	MOVD R2, R22
+	VMOV V0.D[0], R10
+	TBZ $3, R24, qh_neon_prefix_4
+	MOVD R10, (R22)
+	ADD $8, R22
+	VMOV V0.D[1], R10
+qh_neon_prefix_4:
+	TBZ $2, R24, qh_neon_prefix_2
+	MOVW R10, (R22)
+	LSR $32, R10, R10
+	ADD $4, R22
+qh_neon_prefix_2:
+	TBZ $1, R24, qh_neon_prefix_1
+	MOVH R10, (R22)
+	LSR $16, R10, R10
+	ADD $2, R22
+qh_neon_prefix_1:
+	TBZ $0, R24, qh_neon_prefix_done
+	MOVB R10, (R22)
+qh_neon_prefix_done:
+	ADD R24, R0
+	ADD R24, R2
+	SUB R24, R1
+	SUB R24, R3
+	B qh_classify
+
+qh_scan_scalar:
+	CBZ R1, qh_success
+	CBZ R3, qh_exhausted
+	CMP $8, R1
+	BLO qh_scan_byte
+	CMP $8, R3
+	BLO qh_scan_byte
+	MOVD $0x0101010101010101, R12
+	MOVD $0x8080808080808080, R13
+	MOVD $0xfbfbfbfbfbfbfbfb, R14
+	MOVD $0x2222222222222222, R15
+	MOVD $0x2020202020202020, R16
+	MOVD $0xfdfdfdfdfdfdfdfd, R19
+	MOVD $0x3c3c3c3c3c3c3c3c, R20
+	MOVD $0x5c5c5c5c5c5c5c5c, R21
+	MOVD $0xe2e2e2e2e2e2e2e2, R25
+
+qh_scan_word:
+	CMP $8, R1
+	BLO qh_scan_byte
+	CMP $8, R3
+	BLO qh_scan_byte
+	MOVD (R0), R10
+
+	AND R14, R10, R22
+	EOR R15, R22, R22
+	SUB R12, R22, R23
+	BIC R22, R23, R23
+
+	AND R19, R10, R22
+	EOR R20, R22, R22
+	SUB R12, R22, R24
+	BIC R22, R24, R24
+	ORR R24, R23, R23
+
+	EOR R21, R10, R22
+	SUB R12, R22, R24
+	BIC R22, R24, R24
+	ORR R24, R23, R23
+
+	EOR R25, R10, R22
+	SUB R12, R22, R24
+	BIC R22, R24, R24
+	ORR R24, R23, R23
+
+	SUB R16, R10, R24
+	BIC R10, R24, R24
+	ORR R24, R23, R23
+
+	AND R13, R23, R23
+	CBNZ R23, qh_word_event
+
+	MOVD R10, (R2)
+	ADD $8, R0
+	SUB $8, R1
+	ADD $8, R2
+	SUB $8, R3
+	B qh_scan_word
+
+qh_word_event:
+	RBIT R23, R24
+	CLZ R24, R24
+	LSR $3, R24, R24
+	CBZ R24, qh_classify
+	MOVD R2, R22
+	TBZ $2, R24, qh_word_short2
+	MOVW R10, (R22)
+	LSR $32, R10, R10
+	ADD $4, R22
+qh_word_short2:
+	TBZ $1, R24, qh_word_short1
+	MOVH R10, (R22)
+	LSR $16, R10, R10
+	ADD $2, R22
+qh_word_short1:
+	TBZ $0, R24, qh_word_short_done
+	MOVB R10, (R22)
+qh_word_short_done:
+	ADD R24, R0
+	SUB R24, R1
+	ADD R24, R2
+	SUB R24, R3
+	B qh_classify
+
+qh_scan_byte:
+	CBZ R1, qh_success
+	CBZ R3, qh_exhausted
+	MOVBU (R0), R24
+	CMP R7, R24
+	BLO qh_classify
+	AND $0xfb, R24, R22
+	CMP R8, R22
+	BEQ qh_classify
+	AND $0xfd, R24, R22
+	CMP $0x3c, R22
+	BEQ qh_classify
+	CMP R9, R24
+	BEQ qh_classify
+	CMP $0xe2, R24
+	BEQ qh_classify
+	MOVB R24, (R2)
+	ADD $1, R0
+	ADD $1, R2
+	SUB $1, R1
+	SUB $1, R3
+	B qh_scan_byte
+
+qh_classify:
+	MOVBU 0(R0), R24
+	CMP $0xe2, R24
+	BEQ qh_check_e2
+	CMP R8, R24
+	BEQ qh_quote_or_bs
+	CMP R9, R24
+	BEQ qh_quote_or_bs
+	CMP $9, R24
+	BEQ qh_tab
+	CMP $10, R24
+	BEQ qh_newline
+	CMP $13, R24
+	BEQ qh_cr
+
+	// \u00hh for < 0x20, '&', '<', '>'
+	CMP $6, R3
+	BLO qh_exhausted
+	MOVB R9, 0(R2)
+	MOVD $117, R12
+	MOVB R12, 1(R2)
+	MOVD $48, R12
+	MOVB R12, 2(R2)
+	MOVB R12, 3(R2)
+	LSR $4, R24, R12
+	ADD $48, R12
+	MOVB R12, 4(R2)
+	AND $15, R24, R12
+	CMP $10, R12
+	BLO qh_hex_digit
+	ADD $87, R12
+	B qh_hex_store
+qh_hex_digit:
+	ADD $48, R12
+qh_hex_store:
+	MOVB R12, 5(R2)
+	ADD $1, R0
+	SUB $1, R1
+	ADD $6, R2
+	SUB $6, R3
+	B qh_scan
+
+qh_check_e2:
+	CMP $3, R1
+	BLO qh_literal_e2
+	MOVBU 1(R0), R23
+	CMP $0x80, R23
+	BNE qh_literal_e2
+	MOVBU 2(R0), R12
+	AND $0xfe, R12, R23
+	CMP $0xa8, R23
+	BNE qh_literal_e2
+	CMP $6, R3
+	BLO qh_exhausted
+	MOVB R9, 0(R2)
+	MOVD $117, R23
+	MOVB R23, 1(R2)
+	MOVD $50, R23
+	MOVB R23, 2(R2)
+	MOVD $48, R23
+	MOVB R23, 3(R2)
+	MOVD $50, R23
+	MOVB R23, 4(R2)
+	SUB $0x70, R12, R12
+	MOVB R12, 5(R2)
+	ADD $3, R0
+	SUB $3, R1
+	ADD $6, R2
+	SUB $6, R3
+	B qh_scan
+
+qh_literal_e2:
+	CBZ R3, qh_exhausted
+	MOVB R24, 0(R2)
+	ADD $1, R0
+	SUB $1, R1
+	ADD $1, R2
+	SUB $1, R3
+	B qh_scan
+
+qh_quote_or_bs:
+	MOVD R24, R12
+	B qh_emit2
+qh_tab:
+	MOVD $116, R12
+	B qh_emit2
+qh_newline:
+	MOVD $110, R12
+	B qh_emit2
+qh_cr:
+	MOVD $114, R12
+qh_emit2:
+	CMP $2, R3
+	BLO qh_exhausted
+	MOVB R9, 0(R2)
+	MOVB R12, 1(R2)
+	ADD $1, R0
+	SUB $1, R1
+	ADD $2, R2
+	SUB $2, R3
+	B qh_scan
+
+qh_exhausted:
+	SUB R1, R5, R22
+	MVN R22, R22
+	B qh_done
+qh_success:
+	MOVD R5, R22
+qh_done:
+	SUB R3, R6, R23
+	MOVD R22, consumed+32(FP)
+	MOVD R23, written+40(FP)
+	RET

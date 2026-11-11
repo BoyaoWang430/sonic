@@ -106,3 +106,48 @@ func TestQuoteGuardPages(t *testing.T) {
 		}
 	}
 }
+
+func TestQuoteHTMLGuardPages(t *testing.T) {
+	sourcePage, destPage := newEscapingGuardPage(t), newEscapingGuardPage(t)
+	maxPrefix := 3*quoteVectorBytes() + 1
+	if maxPrefix > len(sourcePage)-16 {
+		maxPrefix = len(sourcePage) - 16
+	}
+	operation := func(src string, dst []byte) (int, int) { return QuoteHTML(src, dst) }
+	for n := 0; n <= maxPrefix; n++ {
+		prefix := strings.Repeat("a", n)
+		checkEscapingGuarded(t, sourcePage, destPage, prefix, n, operation, n, prefix)
+		if n > 0 {
+			checkEscapingGuarded(t, sourcePage, destPage, prefix, n-1, operation, ^(n - 1), prefix[:n-1])
+		}
+		for _, tt := range []struct{ src, want string }{
+			{"\n", `\n`}, {"\b", `\u0008`}, {"\x1f", `\u001f`},
+			{`"`, `\"`}, {`\`, `\\`}, {"<", `\u003c`}, {">", `\u003e`}, {"&", `\u0026`},
+			{"\u2028", `\u2028`}, {"\u2029", `\u2029`},
+		} {
+			input := prefix + tt.src
+			for capacity := n; capacity < n+len(tt.want); capacity++ {
+				checkEscapingGuarded(t, sourcePage, destPage, input, capacity, operation, ^n, prefix)
+			}
+			checkEscapingGuarded(t, sourcePage, destPage, input, n+len(tt.want), operation, len(input), prefix+tt.want)
+		}
+		// Truncated and ordinary 0xe2 sequences placed right against the PROT_NONE page boundary.
+		for _, lit := range []string{"\xe2", "\xe2\x80", "—"} {
+			input := prefix + lit
+			checkEscapingGuarded(t, sourcePage, destPage, input, len(input), operation, len(input), input)
+		}
+	}
+
+	src := "<>&\"\u2028\u2029\xe2"
+	want := `\u003c\u003e\u0026\"\u2028\u2029` + "\xe2"
+	input := sourcePage[len(sourcePage)-len(src):]
+	copy(input, src)
+	if err := syscall.Mprotect(sourcePage, syscall.PROT_READ); err != nil {
+		t.Fatal(err)
+	}
+	dst := destPage[len(destPage)-len(want):]
+	consumed, written := QuoteHTML(rt.String(rt.SliceData(input), len(input)), dst)
+	if consumed != len(src) || written != len(want) || string(dst) != want {
+		t.Fatalf("read-only QuoteHTML: (%d,%d) %q, want %q", consumed, written, dst, want)
+	}
+}

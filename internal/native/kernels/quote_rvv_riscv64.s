@@ -195,3 +195,245 @@ done:
 	MOV	X5, consumed+40(FP)
 	MOV	X6, written+48(FP)
 	RET
+
+// func quoteHTML(src *byte, size int, dst *byte, capacity int) (consumed, written int)
+// Normal Go ABI0 frame metadata and RET; no use of g (X27), SP, or RA as scratch.
+TEXT ·quoteHTML(SB), NOSPLIT, $0-48
+	MOV	src+0(FP), X10
+	MOV	size+8(FP), X11
+	MOV	dst+16(FP), X12
+	MOV	capacity+24(FP), X13
+	MOV	X11, X14
+	MOV	X13, X15
+	MOV	$60, X16
+	MOV	$32, X17
+	MOV	$34, X18
+	MOV	$92, X19
+	MOV	$226, X28
+
+qh_scan:
+	BEQZ	X11, qh_success
+	BEQZ	X13, qh_exhausted
+	MOV	X11, X20
+	BLEU	X11, X13, qh_bounded
+	MOV	X13, X20
+qh_bounded:
+	MOV	$16, X5
+	BLTU	X20, X5, qh_short_bounded
+	VSETVLI	X20, E8, M4, TA, MA, X5
+	VLE8V	(X10), V8
+	VMSLTUVX X17, V8, V2
+	VANDVI	$-5, V8, V12
+	VMSEQVX	X18, V12, V3
+	VMORMM	V2, V3, V2
+	VANDVI	$-3, V8, V12
+	VMSEQVX	X16, V12, V3
+	VMORMM	V2, V3, V2
+	VMSEQVX	X19, V8, V3
+	VMORMM	V2, V3, V2
+	VMSEQVX	X28, V8, V3
+	VMORMM	V2, V3, V2
+	VFIRSTM	V2, X6
+	BGEZ	X6, qh_special
+	VSE8V	V8, (X12)
+	ADD	X5, X10
+	SUB	X5, X11
+	ADD	X5, X12
+	SUB	X5, X13
+	JMP	qh_scan
+
+qh_short_bounded:
+	MOV	$8, X5
+	BLTU	X20, X5, qh_short_byte_loop
+	MOV	0(X10), X21
+	MOV	$0x0404040404040404, X6
+	OR	X21, X6, X6
+	MOV	$0x2626262626262626, X7
+	XOR	X7, X6, X6
+	ORCB	X6, X6
+	MOV	$0x0202020202020202, X7
+	OR	X21, X7, X7
+	MOV	$0x3e3e3e3e3e3e3e3e, X5
+	XOR	X5, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0x5c5c5c5c5c5c5c5c, X7
+	XOR	X21, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0xe2e2e2e2e2e2e2e2, X7
+	XOR	X21, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0xe0e0e0e0e0e0e0e0, X7
+	AND	X21, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0x8080808080808080, X7
+	ANDN	X6, X7, X6
+	BNEZ	X6, qh_short_word_special
+	MOV	X21, 0(X12)
+	ADD	$8, X10
+	SUB	$8, X11
+	ADD	$8, X12
+	SUB	$8, X13
+	SUB	$8, X20
+	BNEZ	X20, qh_short_byte_loop
+	BEQZ	X11, qh_success
+	JMP	qh_exhausted
+
+qh_short_word_special:
+	CTZ	X6, X6
+	SRL	$3, X6
+	BEQZ	X6, qh_classify
+qh_short_word_prefix:
+	MOVBU	0(X10), X7
+	MOVB	X7, 0(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$1, X12
+	SUB	$1, X13
+	SUB	$1, X6
+	BNEZ	X6, qh_short_word_prefix
+	JMP	qh_classify
+
+qh_short_byte_loop:
+	MOVBU	0(X10), X7
+	BLTU	X7, X17, qh_classify_loaded
+	AND	$0xfb, X7, X6
+	BEQ	X6, X18, qh_classify_loaded
+	AND	$0xfd, X7, X6
+	BEQ	X6, X16, qh_classify_loaded
+	BEQ	X7, X19, qh_classify_loaded
+	BEQ	X7, X28, qh_classify_loaded
+	MOVB	X7, 0(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$1, X12
+	SUB	$1, X13
+	SUB	$1, X20
+	BNEZ	X20, qh_short_byte_loop
+	BEQZ	X11, qh_success
+	JMP	qh_exhausted
+
+qh_special:
+	BEQZ	X6, qh_classify
+	VSETVLI	X6, E8, M4, TA, MA, X5
+	VSE8V	V8, (X12)
+	ADD	X5, X10
+	SUB	X5, X11
+	ADD	X5, X12
+	SUB	X5, X13
+
+qh_classify:
+	MOVBU	0(X10), X7
+qh_classify_loaded:
+	BEQ	X7, X28, qh_check_e2
+	BEQ	X7, X18, qh_quote_or_bs
+	BEQ	X7, X19, qh_quote_or_bs
+	MOV	$9, X6
+	BEQ	X7, X6, qh_tab
+	MOV	$10, X6
+	BEQ	X7, X6, qh_newline
+	MOV	$13, X6
+	BEQ	X7, X6, qh_cr
+
+	MOV	$6, X5
+	BLTU	X13, X5, qh_exhausted
+	MOVB	X19, 0(X12)
+	MOV	$117, X22
+	MOVB	X22, 1(X12)
+	MOV	$48, X22
+	MOVB	X22, 2(X12)
+	MOVB	X22, 3(X12)
+	SRLI	$4, X7, X22
+	ADD	$48, X22
+	MOVB	X22, 4(X12)
+	AND	$15, X7, X22
+	MOV	$10, X23
+	BLTU	X22, X23, qh_hex_digit
+	ADD	$87, X22
+	JMP	qh_hex_store
+qh_hex_digit:
+	ADD	$48, X22
+qh_hex_store:
+	MOVB	X22, 5(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$6, X12
+	SUB	$6, X13
+	JMP	qh_scan
+
+qh_check_e2:
+	MOV	$3, X5
+	BLTU	X11, X5, qh_plain_e2
+	MOVBU	1(X10), X6
+	MOV	$128, X5
+	BNE	X6, X5, qh_plain_e2
+	MOVBU	2(X10), X24
+	AND	$0xfe, X24, X5
+	MOV	$168, X6
+	BNE	X5, X6, qh_plain_e2
+	MOV	$6, X5
+	BLTU	X13, X5, qh_exhausted
+	MOVB	X19, 0(X12)
+	MOV	$117, X6
+	MOVB	X6, 1(X12)
+	MOV	$50, X6
+	MOVB	X6, 2(X12)
+	MOV	$48, X6
+	MOVB	X6, 3(X12)
+	MOV	$50, X6
+	MOVB	X6, 4(X12)
+	ADD	$-112, X24
+	MOVB	X24, 5(X12)
+	ADD	$3, X10
+	SUB	$3, X11
+	ADD	$6, X12
+	SUB	$6, X13
+	JMP	qh_scan
+
+qh_plain_e2:
+	BEQZ	X13, qh_exhausted
+	MOVB	X7, 0(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$1, X12
+	SUB	$1, X13
+	JMP	qh_scan
+
+qh_quote_or_bs:
+	MOV	X7, X22
+	JMP	qh_emit2
+qh_tab:
+	MOV	$116, X22
+	JMP	qh_emit2
+qh_newline:
+	MOV	$110, X22
+	JMP	qh_emit2
+qh_cr:
+	MOV	$114, X22
+qh_emit2:
+	MOV	$2, X5
+	BLTU	X13, X5, qh_exhausted
+	MOVB	X19, 0(X12)
+	MOVB	X22, 1(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$2, X12
+	SUB	$2, X13
+	JMP	qh_scan
+
+qh_exhausted:
+	MOV	X14, X5
+	SUB	X11, X5
+	XOR	$-1, X5
+	JMP	qh_done
+qh_success:
+	MOV	X14, X5
+qh_done:
+	MOV	X15, X6
+	SUB	X13, X6
+	MOV	X5, consumed+32(FP)
+	MOV	X6, written+40(FP)
+	RET

@@ -27,6 +27,7 @@ import (
 	"github.com/bytedance/sonic/internal/native/kernels"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
+	"github.com/bytedance/sonic/utf8"
 )
 
 // Valid validates json and returns first non-blank character position,
@@ -687,4 +688,381 @@ func U64toa(buf []byte, v uint64) []byte {
 		return append(buf, digits100[i], digits100[i+1])
 	}
 	return u64toaLarge(buf, v)
+}
+
+func tryQuoteHTMLNoValSmall(sp unsafe.Pointer, nb int, dp unsafe.Pointer) bool {
+	if nb >= 8 {
+		if nb <= 16 {
+			w0 := *(*uint64)(sp)
+			w1 := *(*uint64)(unsafe.Add(sp, nb-8))
+			if ((quoteSafeHTMLNoValBits64(w0) | quoteSafeHTMLNoValBits64(w1)) & saniMSB64) == 0 {
+				*(*uint64)(dp) = w0
+				*(*uint64)(unsafe.Add(dp, nb-8)) = w1
+				return true
+			}
+			return false
+		}
+		w0 := *(*uint64)(sp)
+		w1 := *(*uint64)(unsafe.Add(sp, 8))
+		w2 := *(*uint64)(unsafe.Add(sp, nb-16))
+		w3 := *(*uint64)(unsafe.Add(sp, nb-8))
+		if ((quoteSafeHTMLNoValBits64(w0) | quoteSafeHTMLNoValBits64(w1) | quoteSafeHTMLNoValBits64(w2) | quoteSafeHTMLNoValBits64(w3)) & saniMSB64) == 0 {
+			*(*uint64)(dp) = w0
+			*(*uint64)(unsafe.Add(dp, 8)) = w1
+			*(*uint64)(unsafe.Add(dp, nb-16)) = w2
+			*(*uint64)(unsafe.Add(dp, nb-8)) = w3
+			return true
+		}
+		return false
+	}
+	if nb >= 4 {
+		u0 := *(*uint32)(sp)
+		u1 := *(*uint32)(unsafe.Add(sp, nb-4))
+		w := uint64(u0) | (uint64(u1) << 32)
+		if (quoteSafeHTMLNoValBits64(w) & saniMSB64) == 0 {
+			*(*uint32)(dp) = u0
+			*(*uint32)(unsafe.Add(dp, nb-4)) = u1
+			return true
+		}
+		return false
+	}
+	b0 := *(*byte)(sp)
+	b1 := *(*byte)(unsafe.Add(sp, nb>>1))
+	b2 := *(*byte)(unsafe.Add(sp, nb-1))
+	if isSafeHTMLNoValByte(b0) && isSafeHTMLNoValByte(b1) && isSafeHTMLNoValByte(b2) {
+		*(*byte)(dp) = b0
+		*(*byte)(unsafe.Add(dp, nb>>1)) = b1
+		*(*byte)(unsafe.Add(dp, nb-1)) = b2
+		return true
+	}
+	return false
+}
+
+func tryQuoteHTMLASCIISmall(sp unsafe.Pointer, nb int, dp unsafe.Pointer) bool {
+	if nb >= 8 {
+		if nb <= 16 {
+			w0 := *(*uint64)(sp)
+			w1 := *(*uint64)(unsafe.Add(sp, nb-8))
+			if ((quoteSafeHTMLBits64(w0) | quoteSafeHTMLBits64(w1)) & saniMSB64) == 0 {
+				*(*uint64)(dp) = w0
+				*(*uint64)(unsafe.Add(dp, nb-8)) = w1
+				return true
+			}
+			return false
+		}
+		w0 := *(*uint64)(sp)
+		w1 := *(*uint64)(unsafe.Add(sp, 8))
+		w2 := *(*uint64)(unsafe.Add(sp, nb-16))
+		w3 := *(*uint64)(unsafe.Add(sp, nb-8))
+		if ((quoteSafeHTMLBits64(w0) | quoteSafeHTMLBits64(w1) | quoteSafeHTMLBits64(w2) | quoteSafeHTMLBits64(w3)) & saniMSB64) == 0 {
+			*(*uint64)(dp) = w0
+			*(*uint64)(unsafe.Add(dp, 8)) = w1
+			*(*uint64)(unsafe.Add(dp, nb-16)) = w2
+			*(*uint64)(unsafe.Add(dp, nb-8)) = w3
+			return true
+		}
+		return false
+	}
+	if nb >= 4 {
+		u0 := *(*uint32)(sp)
+		u1 := *(*uint32)(unsafe.Add(sp, nb-4))
+		w := uint64(u0) | (uint64(u1) << 32)
+		if (quoteSafeHTMLBits64(w) & saniMSB64) == 0 {
+			*(*uint32)(dp) = u0
+			*(*uint32)(unsafe.Add(dp, nb-4)) = u1
+			return true
+		}
+		return false
+	}
+	b0 := *(*byte)(sp)
+	b1 := *(*byte)(unsafe.Add(sp, nb>>1))
+	b2 := *(*byte)(unsafe.Add(sp, nb-1))
+	if isSafeHTMLASCIIByte(b0) && isSafeHTMLASCIIByte(b1) && isSafeHTMLASCIIByte(b2) {
+		*(*byte)(dp) = b0
+		*(*byte)(unsafe.Add(dp, nb>>1)) = b1
+		*(*byte)(unsafe.Add(dp, nb-1)) = b2
+		return true
+	}
+	return false
+}
+
+func quoteHTMLGrowLoop(buf []byte, sp unsafe.Pointer, nb int, val string, ret int, suffix byte) []byte {
+	for {
+		buf = rt.GuardSlice2(buf, cap(buf)+16)
+		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+		bLen := len(buf)
+		bCap := cap(buf)
+		ret = ^ret
+		nb -= ret
+		sp = unsafe.Add(sp, ret)
+		dp := unsafe.Add(basePtr, bLen)
+		var dn int
+		ret, dn = kernels.QuoteHTMLBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen)
+		bLen += dn
+		buf = buf[:bLen]
+		if ret >= 0 {
+			break
+		}
+	}
+	runtime.KeepAlive(val)
+	if suffix != 0 {
+		return append(buf, '"', suffix)
+	}
+	return append(buf, '"')
+}
+
+func quoteHTMLTail(buf []byte, val string, suffix byte) []byte {
+	nb := len(val)
+	basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+	bLen := len(buf)
+	bCap := cap(buf)
+	sp := unsafe.Pointer(unsafe.StringData(val))
+	dp := unsafe.Add(basePtr, bLen)
+	ret, dn := kernels.QuoteHTMLBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen)
+	runtime.KeepAlive(val)
+	bLen += dn
+	buf = buf[:bLen]
+	if ret >= 0 {
+		if suffix != 0 {
+			if bLen+2 <= bCap {
+				ep := unsafe.Add(basePtr, bLen)
+				*(*byte)(ep) = '"'
+				*(*byte)(unsafe.Add(ep, 1)) = suffix
+				return buf[:bLen+2]
+			}
+			return append(buf, '"', suffix)
+		}
+		if bLen < bCap {
+			*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
+			return buf[:bLen+1]
+		}
+		return append(buf, '"')
+	}
+	return quoteHTMLGrowLoop(buf, sp, nb, val, ret, suffix)
+}
+
+func quotePlainTail(buf []byte, val string, suffix byte) []byte {
+	nb := len(val)
+	basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+	bLen := len(buf)
+	bCap := cap(buf)
+	sp := unsafe.Pointer(unsafe.StringData(val))
+	dp := unsafe.Add(basePtr, bLen)
+	ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+	runtime.KeepAlive(val)
+	bLen += dn
+	buf = buf[:bLen]
+	if ret >= 0 {
+		if suffix != 0 {
+			if bLen+2 <= bCap {
+				ep := unsafe.Add(basePtr, bLen)
+				*(*byte)(ep) = '"'
+				*(*byte)(unsafe.Add(ep, 1)) = suffix
+				return buf[:bLen+2]
+			}
+			return append(buf, '"', suffix)
+		}
+		if bLen < bCap {
+			*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
+			return buf[:bLen+1]
+		}
+		return append(buf, '"')
+	}
+	for {
+		buf = rt.GuardSlice2(buf, cap(buf)+16)
+		basePtr = unsafe.Pointer(unsafe.SliceData(buf))
+		bLen = len(buf)
+		bCap = cap(buf)
+		ret = ^ret
+		nb -= ret
+		sp = unsafe.Add(sp, ret)
+		dp = unsafe.Add(basePtr, bLen)
+		ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
+		bLen += dn
+		buf = buf[:bLen]
+		if ret >= 0 {
+			break
+		}
+	}
+	runtime.KeepAlive(val)
+	if suffix != 0 {
+		return append(buf, '"', suffix)
+	}
+	return append(buf, '"')
+}
+
+func QuoteWithPaddedKeyFlags(buf []byte, keyPtr *byte, keyLen int, val string, sanitize uint64) []byte {
+	if sanitize == 0 {
+		return QuoteWithPaddedKey(buf, keyPtr, keyLen, val)
+	}
+	nb := len(val)
+	if cap(buf)-len(buf) >= 34+nb && keyLen <= 32 {
+		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+		bLen := len(buf)
+		bCap := cap(buf)
+		dp := unsafe.Add(basePtr, bLen)
+		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
+		dk := (*[4]uint64)(dp)
+		dk[0], dk[1] = sk[0], sk[1]
+		if keyLen > 16 {
+			dk[2], dk[3] = sk[2], sk[3]
+		}
+		dp = unsafe.Add(dp, keyLen)
+		if nb == 0 {
+			*(*[2]byte)(dp) = [2]byte{'"', '"'}
+			return buf[:bLen+keyLen+2]
+		}
+		*(*byte)(dp) = '"'
+		sp := unsafe.Pointer(unsafe.StringData(val))
+		dp = unsafe.Add(dp, 1)
+		if sanitize == (1 << BitEscapeHTML) {
+			if nb <= 32 && tryQuoteHTMLNoValSmall(sp, nb, dp) {
+				*(*byte)(unsafe.Add(dp, nb)) = '"'
+				return buf[:bLen+keyLen+nb+2]
+			}
+			bLen += keyLen + 1
+			ret, dn := kernels.QuoteHTMLBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen)
+			runtime.KeepAlive(val)
+			bLen += dn
+			buf = buf[:bLen]
+			if ret >= 0 {
+				if bLen < bCap {
+					*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
+					return buf[:bLen+1]
+				}
+				return append(buf, '"')
+			}
+			return quoteHTMLGrowLoop(buf, sp, nb, val, ret, 0)
+		}
+		if nb <= 32 && tryQuoteHTMLASCIISmall(sp, nb, dp) {
+			*(*byte)(unsafe.Add(dp, nb)) = '"'
+			return buf[:bLen+keyLen+nb+2]
+		}
+		buf = buf[:bLen+keyLen+1]
+		if utf8.ValidateString(val) {
+			if sanitize&(1<<BitEscapeHTML) != 0 {
+				return quoteHTMLTail(buf, val, 0)
+			}
+			return quotePlainTail(buf, val, 0)
+		}
+		return appendQuoteSanitizedTail(buf, val, sanitize, 0)
+	}
+	if keyLen > 0 {
+		buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
+	}
+	return QuoteFlags(buf, val, false, sanitize)
+}
+
+func QuoteFlags(buf []byte, val string, double bool, sanitize uint64) []byte {
+	if sanitize == 0 {
+		return Quote(buf, val, double)
+	}
+	if !double {
+		nb := len(val)
+		if cap(buf)-len(buf) < nb+2 {
+			buf = rt.GuardSlice2(buf, nb+2)
+		}
+		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+		bLen := len(buf)
+		bCap := cap(buf)
+		dp := unsafe.Add(basePtr, bLen)
+		*(*byte)(dp) = '"'
+		if nb == 0 {
+			*(*byte)(unsafe.Add(dp, 1)) = '"'
+			return buf[:bLen+2]
+		}
+		sp := unsafe.Pointer(unsafe.StringData(val))
+		dp = unsafe.Add(dp, 1)
+		if sanitize == (1 << BitEscapeHTML) {
+			if nb <= 32 && tryQuoteHTMLNoValSmall(sp, nb, dp) {
+				*(*byte)(unsafe.Add(dp, nb)) = '"'
+				return buf[:bLen+nb+2]
+			}
+			bLen++
+			ret, dn := kernels.QuoteHTMLBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen)
+			runtime.KeepAlive(val)
+			bLen += dn
+			buf = buf[:bLen]
+			if ret >= 0 {
+				if bLen < bCap {
+					*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
+					return buf[:bLen+1]
+				}
+				return append(buf, '"')
+			}
+			return quoteHTMLGrowLoop(buf, sp, nb, val, ret, 0)
+		}
+		if nb <= 32 && tryQuoteHTMLASCIISmall(sp, nb, dp) {
+			*(*byte)(unsafe.Add(dp, nb)) = '"'
+			return buf[:bLen+nb+2]
+		}
+		buf = buf[:bLen+1]
+		if utf8.ValidateString(val) {
+			if sanitize&(1<<BitEscapeHTML) != 0 {
+				return quoteHTMLTail(buf, val, 0)
+			}
+			return quotePlainTail(buf, val, 0)
+		}
+		return appendQuoteSanitizedTail(buf, val, sanitize, 0)
+	}
+	mark := len(buf)
+	buf = Quote(buf, val, true)
+	return SanitizeAppended(buf, mark, sanitize)
+}
+
+func QuoteKeyFlags(buf []byte, val string, sanitize uint64) []byte {
+	if sanitize == 0 {
+		return QuoteKey(buf, val)
+	}
+	nb := len(val)
+	if cap(buf)-len(buf) < nb+3 {
+		buf = rt.GuardSlice2(buf, nb+3)
+	}
+	basePtr := unsafe.Pointer(unsafe.SliceData(buf))
+	bLen := len(buf)
+	bCap := cap(buf)
+	dp := unsafe.Add(basePtr, bLen)
+	*(*byte)(dp) = '"'
+	if nb == 0 {
+		*(*byte)(unsafe.Add(dp, 1)) = '"'
+		*(*byte)(unsafe.Add(dp, 2)) = ':'
+		return buf[:bLen+3]
+	}
+	sp := unsafe.Pointer(unsafe.StringData(val))
+	dp = unsafe.Add(dp, 1)
+	if sanitize == (1 << BitEscapeHTML) {
+		if nb <= 32 && tryQuoteHTMLNoValSmall(sp, nb, dp) {
+			*(*byte)(unsafe.Add(dp, nb)) = '"'
+			*(*byte)(unsafe.Add(dp, nb+1)) = ':'
+			return buf[:bLen+nb+3]
+		}
+		bLen++
+		ret, dn := kernels.QuoteHTMLBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen)
+		runtime.KeepAlive(val)
+		bLen += dn
+		buf = buf[:bLen]
+		if ret >= 0 {
+			if bLen+2 <= bCap {
+				ep := unsafe.Add(basePtr, bLen)
+				*(*byte)(ep) = '"'
+				*(*byte)(unsafe.Add(ep, 1)) = ':'
+				return buf[:bLen+2]
+			}
+			return append(buf, '"', ':')
+		}
+		return quoteHTMLGrowLoop(buf, sp, nb, val, ret, ':')
+	}
+	if nb <= 32 && tryQuoteHTMLASCIISmall(sp, nb, dp) {
+		*(*byte)(unsafe.Add(dp, nb)) = '"'
+		*(*byte)(unsafe.Add(dp, nb+1)) = ':'
+		return buf[:bLen+nb+3]
+	}
+	buf = buf[:bLen+1]
+	if utf8.ValidateString(val) {
+		if sanitize&(1<<BitEscapeHTML) != 0 {
+			return quoteHTMLTail(buf, val, ':')
+		}
+		return quotePlainTail(buf, val, ':')
+	}
+	return appendQuoteSanitizedTail(buf, val, sanitize, ':')
 }

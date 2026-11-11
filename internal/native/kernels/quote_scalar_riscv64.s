@@ -310,3 +310,307 @@ scan_enter_bulk:
 	JMP scan_word
 
 #undef QUOTE_MASK
+
+#define QUOTE_HTML_MASK \
+	OR X24, X20, X6; \
+	XOR X25, X6; \
+	OR X26, X20, X5; \
+	XOR X28, X5; \
+	ORCB X6, X6; \
+	ORCB X5, X5; \
+	AND X5, X6, X6; \
+	XOR X30, X20, X5; \
+	ORCB X5, X5; \
+	AND X5, X6, X6; \
+	XOR X16, X20, X5; \
+	ORCB X5, X5; \
+	AND X5, X6, X6; \
+	AND X17, X20, X5; \
+	ORCB X5, X5; \
+	AND X5, X6, X6; \
+	ANDN X6, X23, X6
+
+// func quoteHTML(src *byte, size int, dst *byte, capacity int) (consumed, written int)
+// Normal Go ABI0 frame metadata and RET; no use of FP (X8), g (X27), SP, RA, or X31 as scratch.
+TEXT ·quoteHTML(SB), NOSPLIT, $0-48
+	MOV	src+0(FP), X10
+	MOV	size+8(FP), X11
+	MOV	dst+16(FP), X12
+	MOV	capacity+24(FP), X13
+	MOV	X11, X14
+	MOV	X13, X15
+	MOV	$34, X18
+	MOV	$92, X19
+
+	BEQZ X11, qh_success
+	BEQZ X13, qh_exhausted
+	MOV $8, X5
+	BLTU X11, X5, qh_scan_byte
+	BLTU X13, X5, qh_scan_byte
+	MOV $0xe2e2e2e2e2e2e2e2, X16
+	MOV $0xe0e0e0e0e0e0e0e0, X17
+	MOV $0x8080808080808080, X23
+	MOV $0x0404040404040404, X24
+	MOV $0x2626262626262626, X25
+	MOV $0x0202020202020202, X26
+	MOV $0x3e3e3e3e3e3e3e3e, X28
+	MOV $0x5c5c5c5c5c5c5c5c, X30
+
+qh_scan_word_load:
+	MOV (X10), X20
+	QUOTE_HTML_MASK
+	MOV $8, X7
+	BEQZ X6, qh_copy_word
+qh_word_candidate:
+	CTZ X6, X7
+	SRL $3, X7, X7
+	BEQZ X7, qh_classify
+	JMP qh_copy_short
+
+qh_copy_word:
+	MOV $32, X5
+	BLTU X11, X5, qh_copy_single_word
+	BLTU X13, X5, qh_copy_single_word
+	MOV X20, (X12)
+	JMP qh_scan_enter_bulk
+qh_copy_single_word:
+	MOV X20, (X12)
+	JMP qh_copy_advance
+
+qh_copy_short:
+	ADD X7, X12, X5
+	MOV $4, X21
+	BLTU X7, X21, qh_copy_short_lt4
+	MOVW X20, (X12)
+	ADD $-4, X7, X21
+	SLL $3, X21
+	SRL X21, X20
+	MOVW X20, -4(X5)
+	JMP qh_copy_advance
+qh_copy_short_lt4:
+	MOV $1, X21
+	BEQ X7, X21, qh_copy_short_1
+	MOVH X20, (X12)
+	ADD $-2, X7, X21
+	SLL $3, X21
+	SRL X21, X20
+	MOVH X20, -2(X5)
+	JMP qh_copy_advance
+qh_copy_short_1:
+	MOVB X20, (X12)
+
+qh_copy_advance:
+	ADD X7, X10
+	SUB X7, X11
+	ADD X7, X12
+	SUB X7, X13
+	BEQZ X6, qh_scan_word
+	JMP qh_classify
+
+qh_scan_byte:
+	BEQZ X11, qh_success
+	BEQZ X13, qh_exhausted
+	MOVBU (X10), X7
+	MOV $32, X5
+	BLTU X7, X5, qh_classify_loaded
+	AND $0xfb, X7, X6
+	BEQ X6, X18, qh_classify_loaded
+	AND $0xfd, X7, X6
+	MOV $60, X5
+	BEQ X6, X5, qh_classify_loaded
+	BEQ X7, X19, qh_classify_loaded
+	MOV $226, X5
+	BEQ X7, X5, qh_classify_loaded
+	MOVB X7, (X12)
+	ADD $1, X10
+	ADD $1, X12
+	SUB $1, X11
+	SUB $1, X13
+	JMP qh_scan_byte
+
+qh_classify:
+	MOVBU 0(X10), X7
+qh_classify_loaded:
+	MOV $226, X5
+	BEQ X7, X5, qh_check_e2
+	BEQ X7, X18, qh_quote_or_bs
+	BEQ X7, X19, qh_quote_or_bs
+	MOV $9, X6
+	BEQ X7, X6, qh_tab
+	MOV $10, X6
+	BEQ X7, X6, qh_newline
+	MOV $13, X6
+	BEQ X7, X6, qh_cr
+
+	MOV $6, X5
+	BLTU X13, X5, qh_exhausted
+	MOVB X19, 0(X12)
+	MOV $117, X22
+	MOVB X22, 1(X12)
+	MOV $48, X22
+	MOVB X22, 2(X12)
+	MOVB X22, 3(X12)
+	SRLI $4, X7, X22
+	ADD $48, X22
+	MOVB X22, 4(X12)
+	AND $15, X7, X22
+	MOV $10, X29
+	BLTU X22, X29, qh_hex_digit
+	ADD $87, X22
+	JMP qh_hex_store
+qh_hex_digit:
+	ADD $48, X22
+qh_hex_store:
+	MOVB X22, 5(X12)
+	ADD $1, X10
+	SUB $1, X11
+	ADD $6, X12
+	SUB $6, X13
+	JMP qh_scan
+
+qh_check_e2:
+	MOV $3, X5
+	BLTU X11, X5, qh_plain_e2
+	MOVBU 1(X10), X6
+	MOV $128, X5
+	BNE X6, X5, qh_plain_e2
+	MOVBU 2(X10), X29
+	AND $0xfe, X29, X5
+	MOV $168, X6
+	BNE X5, X6, qh_plain_e2
+	MOV $6, X5
+	BLTU X13, X5, qh_exhausted
+	MOVB X19, 0(X12)
+	MOV $117, X6
+	MOVB X6, 1(X12)
+	MOV $50, X6
+	MOVB X6, 2(X12)
+	MOV $48, X6
+	MOVB X6, 3(X12)
+	MOV $50, X6
+	MOVB X6, 4(X12)
+	ADD $-112, X29
+	MOVB X29, 5(X12)
+	ADD $3, X10
+	SUB $3, X11
+	ADD $6, X12
+	SUB $6, X13
+	JMP qh_scan
+
+qh_plain_e2:
+	BEQZ X13, qh_exhausted
+	MOVB X7, 0(X12)
+	ADD $1, X10
+	SUB $1, X11
+	ADD $1, X12
+	SUB $1, X13
+	JMP qh_scan
+
+qh_quote_or_bs:
+	MOV X7, X22
+	JMP qh_emit2
+qh_tab:
+	MOV $116, X22
+	JMP qh_emit2
+qh_newline:
+	MOV $110, X22
+	JMP qh_emit2
+qh_cr:
+	MOV $114, X22
+qh_emit2:
+	MOV $2, X5
+	BLTU X13, X5, qh_exhausted
+	MOVB X19, 0(X12)
+	MOVB X22, 1(X12)
+	ADD $1, X10
+	SUB $1, X11
+	ADD $2, X12
+	SUB $2, X13
+	JMP qh_scan
+
+qh_exhausted:
+	MOV X14, X5
+	SUB X11, X5
+	XOR $-1, X5
+	JMP qh_done
+qh_success:
+	MOV X14, X5
+qh_done:
+	MOV X15, X6
+	SUB X13, X6
+	MOV X5, consumed+32(FP)
+	MOV X6, written+40(FP)
+	RET
+
+qh_scan:
+	BEQZ X11, qh_success
+	BEQZ X13, qh_exhausted
+	MOV $8, X5
+	BLTU X11, X5, qh_scan_byte
+	BLTU X13, X5, qh_scan_byte
+	JMP qh_scan_word_load
+
+qh_scan_word:
+	MOV $8, X5
+	BLTU X11, X5, qh_scan_byte
+	BLTU X13, X5, qh_scan_byte
+	JMP qh_scan_word_load
+
+	PCALIGN $64
+qh_scan_bulk:
+	MOV 0(X10), X20
+	QUOTE_HTML_MASK
+	BNEZ X6, qh_word_candidate
+	MOV X20, 0(X12)
+qh_scan_bulk_next:
+	MOV 8(X10), X20
+	QUOTE_HTML_MASK
+	BNEZ X6, qh_bulk_candidate_8
+	MOV X20, 8(X12)
+	MOV 16(X10), X20
+	QUOTE_HTML_MASK
+	BNEZ X6, qh_bulk_candidate_16
+	MOV X20, 16(X12)
+	MOV 24(X10), X20
+	QUOTE_HTML_MASK
+	BNEZ X6, qh_bulk_candidate_24
+	MOV X20, 24(X12)
+	ADD $32, X10
+	SUB $32, X11
+	ADD $32, X12
+	SUB $32, X13
+	MOV $32, X5
+	BLTU X11, X5, qh_scan_word
+	BGEU X13, X5, qh_scan_bulk
+	JMP qh_scan_word
+
+qh_bulk_candidate_8:
+	MOV $8, X7
+	JMP qh_bulk_candidate
+qh_bulk_candidate_16:
+	MOV $16, X7
+	JMP qh_bulk_candidate
+qh_bulk_candidate_24:
+	MOV $24, X7
+qh_bulk_candidate:
+	ADD X7, X10
+	SUB X7, X11
+	ADD X7, X12
+	SUB X7, X13
+	JMP qh_word_candidate
+
+qh_scan_enter_bulk:
+	BNE X11, X14, qh_scan_bulk_next
+	AND $7, X10, X5
+	BEQZ X5, qh_scan_bulk_next
+	SUB X5, X7, X7
+	ADD X7, X10
+	SUB X7, X11
+	ADD X7, X12
+	SUB X7, X13
+	MOV $32, X5
+	BLTU X11, X5, qh_scan_word
+	BGEU X13, X5, qh_scan_bulk
+	JMP qh_scan_word
+
+#undef QUOTE_HTML_MASK

@@ -23,5 +23,25 @@ func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (co
 	return quote(src, size, dst, capacity, flags)
 }
 
+// QuoteHTML escapes src into dst without surrounding quotes, performing both
+// JSON string escaping and HTML escaping (<, >, &, U+2028, U+2029) in a single
+// pass without UTF-8 validation. src must represent the remaining unchunked
+// suffix of the string so 3-byte U+2028/U+2029 sequences are never split.
+//
+// On success consumed equals len(src). If dst is too short, consumed is the
+// complement of the input byte count processed. Every escape is written atomically.
+func QuoteHTML(src string, dst []byte) (consumed, written int) {
+	return quoteHTML(rt.StringData(src), len(src), rt.SliceData(dst), len(dst))
+}
+
+// QuoteHTMLBuffer escapes size bytes from src into dst capacity bytes without
+// surrounding quotes, fusing JSON string escaping and HTML escaping in one pass.
+func QuoteHTMLBuffer(src *byte, size int, dst *byte, capacity int) (consumed, written int) {
+	return quoteHTML(src, size, dst, capacity)
+}
+
 //go:noescape
 func quote(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int)
+
+//go:noescape
+func quoteHTML(src *byte, size int, dst *byte, capacity int) (consumed, written int)
