@@ -633,7 +633,7 @@ func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]i
 }
 
 func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffset uintptr, hasGuaranteedField bool, depth int) (ir.StructFieldSpec, bool) {
-	if !self.useVM || fv.KeyNeedsSanitize || fv.CommaKeyLen > 32 || len(fv.KeyBlob) == 0 {
+	if !self.useVM || fv.KeyNeedsSanitize || fv.CommaKeyLen > 255 || len(fv.KeyBlob) == 0 {
 		return ir.StructFieldSpec{}, false
 	}
 	if (fv.Opts & resolver.F_omitzero) != 0 {

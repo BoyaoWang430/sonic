@@ -122,19 +122,25 @@ func tryQuoteSmall(sp unsafe.Pointer, nb int, dp unsafe.Pointer) bool {
 	return false
 }
 
-// QuoteWithPaddedKey appends a 32-byte-padded struct key (len <= 32) followed by '"' + escaped(val) + '"' to buf.
+// QuoteWithPaddedKey appends a struct key (32B-padded when len <= 32, or raw when len > 32) followed by '"' + escaped(val) + '"' to buf.
 func QuoteWithPaddedKey(buf []byte, keyPtr *byte, nk int, val string) []byte {
 	nb := len(val)
-	if cap(buf)-len(buf) >= 34+nb && nk <= 32 {
+	rem := cap(buf) - len(buf)
+	if (nk <= 32 && rem >= 34+nb) || (nk <= 64 && nk > 32 && rem >= nk+2+nb) {
 		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
 		bLen := len(buf)
 		bCap := cap(buf)
 		dp := unsafe.Add(basePtr, bLen)
-		dk := (*[4]uint64)(dp)
-		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
-		dk[0], dk[1] = sk[0], sk[1]
-		if nk > 16 {
-			dk[2], dk[3] = sk[2], sk[3]
+		if nk <= 32 {
+			dk := (*[4]uint64)(dp)
+			sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
+			dk[0], dk[1] = sk[0], sk[1]
+			if nk > 16 {
+				dk[2], dk[3] = sk[2], sk[3]
+			}
+		} else {
+			*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+			*(*[4]uint64)(unsafe.Add(dp, nk-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), nk-32))
 		}
 		dp = unsafe.Add(dp, nk)
 		if nb == 0 {
@@ -896,16 +902,22 @@ func QuoteWithPaddedKeyFlags(buf []byte, keyPtr *byte, keyLen int, val string, s
 		return QuoteWithPaddedKey(buf, keyPtr, keyLen, val)
 	}
 	nb := len(val)
-	if cap(buf)-len(buf) >= 34+nb && keyLen <= 32 {
+	rem := cap(buf) - len(buf)
+	if (keyLen <= 32 && rem >= 34+nb) || (keyLen <= 64 && keyLen > 32 && rem >= keyLen+2+nb) {
 		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
 		bLen := len(buf)
 		bCap := cap(buf)
 		dp := unsafe.Add(basePtr, bLen)
-		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
-		dk := (*[4]uint64)(dp)
-		dk[0], dk[1] = sk[0], sk[1]
-		if keyLen > 16 {
-			dk[2], dk[3] = sk[2], sk[3]
+		if keyLen <= 32 {
+			sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
+			dk := (*[4]uint64)(dp)
+			dk[0], dk[1] = sk[0], sk[1]
+			if keyLen > 16 {
+				dk[2], dk[3] = sk[2], sk[3]
+			}
+		} else {
+			*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+			*(*[4]uint64)(unsafe.Add(dp, keyLen-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), keyLen-32))
 		}
 		dp = unsafe.Add(dp, keyLen)
 		if nb == 0 {

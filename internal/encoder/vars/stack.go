@@ -38,14 +38,18 @@ type MapKVEntry struct {
 	V any
 }
 
-const maxPooledMapKV = 4096
+const (
+	maxPooledMapKV = 4096
+	inlineStackCap = 64
+)
 
 type Stack struct {
 	sp        int
 	ptrSp     int
 	kvSp      int
 	kvOrderSp int
-	sb        [MaxStack]State
+	sb        [inlineStackCap]State
+	sbExtra   []State
 	ptrSlots  [64]unsafe.Pointer
 	KVBuf     []MapKVEntry
 	KVOrder   []int
@@ -126,9 +130,14 @@ func ResetStack(p *Stack) {
 	if cap(p.KVOrder) > maxPooledMapKV {
 		p.KVOrder = nil
 	}
-	for i := 0; i < p.sp; i++ {
+	limit := p.sp
+	if limit > inlineStackCap {
+		limit = inlineStackCap
+	}
+	for i := 0; i < limit; i++ {
 		p.sb[i] = State{}
 	}
+	p.sbExtra = nil
 	p.sp = 0
 }
 
@@ -219,19 +228,37 @@ func (s *Stack) PopPtr(idx int) {
 	}
 }
 
+func (s *Stack) extraAt(idx int) *State {
+	if s.sbExtra == nil {
+		s.sbExtra = make([]State, MaxStack-inlineStackCap)
+	}
+	return &s.sbExtra[idx-inlineStackCap]
+}
+
 func (s *Stack) Top() *State {
-	return &s.sb[s.sp]
+	if uint(s.sp) < inlineStackCap {
+		return &s.sb[s.sp]
+	}
+	return s.extraAt(s.sp)
 }
 
 func (s *Stack) Cur() *State {
-	return &s.sb[s.sp-1]
+	idx := s.sp - 1
+	if uint(idx) < inlineStackCap {
+		return &s.sb[idx]
+	}
+	return s.extraAt(idx)
 }
 
 func (s *Stack) Push(v State) bool {
 	if s.sp >= MaxStack {
 		return false
 	}
-	s.sb[s.sp] = v
+	if uint(s.sp) < inlineStackCap {
+		s.sb[s.sp] = v
+	} else {
+		*s.extraAt(s.sp) = v
+	}
 	s.sp++
 	return true
 }
@@ -250,8 +277,14 @@ func (s *Stack) LeaveDepth(n int) {
 
 func (s *Stack) Pop() State {
 	s.sp--
-	ret := s.sb[s.sp]
-	s.sb[s.sp] = State{}
+	if uint(s.sp) < inlineStackCap {
+		ret := s.sb[s.sp]
+		s.sb[s.sp] = State{}
+		return ret
+	}
+	slot := s.extraAt(s.sp)
+	ret := *slot
+	*slot = State{}
 	return ret
 }
 
@@ -288,6 +321,7 @@ func FreeStack(p *Stack) {
 	p.sp = 0
 	p.ptrSp = 0
 	p.ValPtr = nil
+	p.sbExtra = nil
 	if cap(p.KVBuf) > maxPooledMapKV {
 		p.KVBuf = nil
 	}

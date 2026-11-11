@@ -643,13 +643,20 @@ func sliceBegin(p unsafe.Pointer, st reflect.Type) (isNil bool, n int, dataPtr u
 }
 
 func appendPaddedKey(buf []byte, keyPtr *byte, keyLen int) []byte {
-	if cap(buf)-len(buf) >= 32 {
+	rem := cap(buf) - len(buf)
+	if uint(keyLen) <= 32 && rem >= 32 {
 		dp := (*[4]uint64)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf)))
 		sp := (*[4]uint64)(unsafe.Pointer(keyPtr))
 		dp[0], dp[1] = sp[0], sp[1]
 		if keyLen > 16 {
 			dp[2], dp[3] = sp[2], sp[3]
 		}
+		return buf[:len(buf)+keyLen]
+	}
+	if keyLen <= 64 && keyLen > 32 && rem >= keyLen {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+		*(*[4]uint64)(unsafe.Add(dp, keyLen-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), keyLen-32))
 		return buf[:len(buf)+keyLen]
 	}
 	return append(buf, unsafe.Slice(keyPtr, keyLen)...)

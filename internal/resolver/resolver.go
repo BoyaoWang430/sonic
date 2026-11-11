@@ -291,7 +291,7 @@ func populateKeyBlob(ret []FieldMeta) {
 		blob = append(blob, ':')
 		commaKeyLen := len(blob) - start
 		hasStructB := false
-		if fm.Type.Kind() == reflect.Struct && !fm.KeyNeedsSanitize && commaKeyLen <= 31 {
+		if fm.Type.Kind() == reflect.Struct && !fm.KeyNeedsSanitize && commaKeyLen <= 254 {
 			blob = append(blob, '{')
 			hasStructB = true
 		}

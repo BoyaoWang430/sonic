@@ -57,6 +57,11 @@ func TestQuoteAndPaddedKeyGuardPages(t *testing.T) {
 	longKey := `,"twenty_char_field":`
 	copy(paddedLong[:], longKey)
 
+	veryLongKey := `,"profile_background_image_url_https":`
+	veryLongSrc := newAlgGuardPage(t)
+	copy(veryLongSrc[len(veryLongSrc)-len(veryLongKey):], veryLongKey)
+	veryLongPtr := &veryLongSrc[len(veryLongSrc)-len(veryLongKey)]
+
 	alphabet := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/._-?"
 	makeClean := func(n int) string {
 		b := make([]byte, n)
@@ -92,11 +97,25 @@ func TestQuoteAndPaddedKeyGuardPages(t *testing.T) {
 					}{
 						{&paddedShort[0], shortKey},
 						{&paddedLong[0], longKey},
+						{veryLongPtr, veryLongKey},
 					} {
-						dst := dstPage[len(dstPage)-capNeed : len(dstPage)-capNeed : len(dstPage)]
+						need := capNeed
+						if len(kp.key) > 32 {
+							need = len(kp.key) + 2 + n
+						}
+						if need > len(dstPage) {
+							continue
+						}
+						dst := dstPage[len(dstPage)-need : len(dstPage)-need : len(dstPage)]
 						got := QuoteWithPaddedKey(dst, kp.ptr, len(kp.key), gs)
 						if !bytes.HasPrefix(got, []byte(kp.key)) || !bytes.Equal(got[len(kp.key):], wantJSON) {
 							t.Fatalf("QuoteWithPaddedKey(len=%d, key=%q) = %s", n, kp.key, got)
+						}
+						gotHTML := QuoteWithPaddedKeyFlags(dst, kp.ptr, len(kp.key), gs, 1<<BitEscapeHTML)
+						var wantHTML bytes.Buffer
+						json.HTMLEscape(&wantHTML, wantJSON)
+						if !bytes.HasPrefix(gotHTML, []byte(kp.key)) || !bytes.Equal(gotHTML[len(kp.key):], wantHTML.Bytes()) {
+							t.Fatalf("QuoteWithPaddedKeyFlags(len=%d, key=%q) = %s", n, kp.key, gotHTML)
 						}
 					}
 				}

@@ -51,7 +51,7 @@ func encodePureStructRoot(b *[]byte, ptr unsafe.Pointer, specs []ir.StructFieldS
 }
 
 func appendKeyAndNull(buf []byte, keyPtr *byte, keyLen int) []byte {
-	if cap(buf)-len(buf) >= 36 {
+	if uint(keyLen) <= 32 && cap(buf)-len(buf) >= 36 {
 		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 		dk := (*[4]uint64)(dp)
 		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
@@ -62,12 +62,19 @@ func appendKeyAndNull(buf []byte, keyPtr *byte, keyLen int) []byte {
 		*(*[4]byte)(unsafe.Add(dp, keyLen)) = [4]byte{'n', 'u', 'l', 'l'}
 		return buf[:len(buf)+keyLen+4]
 	}
+	if keyLen <= 64 && keyLen > 32 && cap(buf)-len(buf) >= keyLen+4 {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+		*(*[4]uint64)(unsafe.Add(dp, keyLen-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), keyLen-32))
+		*(*[4]byte)(unsafe.Add(dp, keyLen)) = [4]byte{'n', 'u', 'l', 'l'}
+		return buf[:len(buf)+keyLen+4]
+	}
 	buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
 	return append(buf, "null"...)
 }
 
 func appendKeyAndBool(buf []byte, keyPtr *byte, keyLen int, v bool) []byte {
-	if cap(buf)-len(buf) >= 40 {
+	if uint(keyLen) <= 32 && cap(buf)-len(buf) >= 40 {
 		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 		dk := (*[4]uint64)(dp)
 		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
@@ -83,13 +90,25 @@ func appendKeyAndBool(buf []byte, keyPtr *byte, keyLen int, v bool) []byte {
 		*(*[5]byte)(vp) = [5]byte{'f', 'a', 'l', 's', 'e'}
 		return buf[:len(buf)+keyLen+5]
 	}
+	if keyLen <= 64 && keyLen > 32 && cap(buf)-len(buf) >= keyLen+5 {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+		*(*[4]uint64)(unsafe.Add(dp, keyLen-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), keyLen-32))
+		vp := unsafe.Add(dp, keyLen)
+		if v {
+			*(*[4]byte)(vp) = [4]byte{'t', 'r', 'u', 'e'}
+			return buf[:len(buf)+keyLen+4]
+		}
+		*(*[5]byte)(vp) = [5]byte{'f', 'a', 'l', 's', 'e'}
+		return buf[:len(buf)+keyLen+5]
+	}
 	buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
 	return appendBool(buf, v)
 }
 
 func appendKeyAndEmptySlice(buf []byte, keyPtr *byte, keyLen int, nonNil bool, flags uint64) []byte {
 	isArr := nonNil || flags&(1<<alg.BitNoNullSliceOrMap) != 0
-	if cap(buf)-len(buf) >= 36 {
+	if uint(keyLen) <= 32 && cap(buf)-len(buf) >= 36 {
 		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
 		dk := (*[4]uint64)(dp)
 		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
@@ -97,6 +116,18 @@ func appendKeyAndEmptySlice(buf []byte, keyPtr *byte, keyLen int, nonNil bool, f
 		if keyLen > 16 {
 			dk[2], dk[3] = sk[2], sk[3]
 		}
+		vp := unsafe.Add(dp, keyLen)
+		if isArr {
+			*(*[2]byte)(vp) = [2]byte{'[', ']'}
+			return buf[:len(buf)+keyLen+2]
+		}
+		*(*[4]byte)(vp) = [4]byte{'n', 'u', 'l', 'l'}
+		return buf[:len(buf)+keyLen+4]
+	}
+	if keyLen <= 64 && keyLen > 32 && cap(buf)-len(buf) >= keyLen+4 {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+		*(*[4]uint64)(unsafe.Add(dp, keyLen-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), keyLen-32))
 		vp := unsafe.Add(dp, keyLen)
 		if isArr {
 			*(*[2]byte)(vp) = [2]byte{'[', ']'}

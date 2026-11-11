@@ -535,3 +535,100 @@ func BenchmarkEncode_Float32(b *testing.B) {
 		}
 	}
 }
+
+type longKeyNested struct {
+	VeryLongNestedStructFieldName38Chars string `json:"very_long_nested_struct_field_name_38"`
+	UltraLongNestedField72Chars          int64  `json:"ultra_long_nested_struct_field_name_exceeding_sixty_four_bytes_threshold"`
+}
+
+type longKeyItem struct {
+	ProfileBackgroundImageURLHTTPS string        `json:"profile_background_image_url_https"`
+	LongBoolFieldNameThirtySixChar bool          `json:"long_bool_field_name_thirty_six_char"`
+	LongNullAnyFieldThirtySevenCh  interface{}   `json:"long_null_any_field_thirty_seven_ch"`
+	LongEmptySliceFieldThirtyEight []int         `json:"long_empty_slice_field_thirty_eight"`
+	LongNestedStructThirtyNineChar longKeyNested `json:"long_nested_struct_thirty_nine_char"`
+	UltraLongStringField74Chars    string        `json:"ultra_long_string_field_name_exceeding_sixty_four_bytes_fast_copy_limit_74"`
+	UltraLongBoolField70Chars      bool          `json:"ultra_long_bool_field_name_exceeding_sixty_four_bytes_fast_copy_limit"`
+	UltraLongNullField70Chars      interface{}   `json:"ultra_long_null_field_name_exceeding_sixty_four_bytes_fast_copy_limit"`
+}
+
+type longKeyRoot struct {
+	Items []longKeyItem `json:"long_struct_slice_field_name_thirty_eight"`
+}
+
+func TestLongStructKeysAndDeepStack(t *testing.T) {
+	v := longKeyRoot{
+		Items: []longKeyItem{
+			{
+				ProfileBackgroundImageURLHTTPS: "https://si0.twimg.com/images/themes/theme1/bg.png?a=1&b=2",
+				LongBoolFieldNameThirtySixChar: true,
+				LongNullAnyFieldThirtySevenCh:  nil,
+				LongEmptySliceFieldThirtyEight: []int{},
+				LongNestedStructThirtyNineChar: longKeyNested{
+					VeryLongNestedStructFieldName38Chars: "<tag>&val",
+					UltraLongNestedField72Chars:          -9876543210,
+				},
+				UltraLongStringField74Chars: "hello <world> & friends",
+				UltraLongBoolField70Chars:   false,
+				UltraLongNullField70Chars:   nil,
+			},
+			{
+				ProfileBackgroundImageURLHTTPS: "",
+				LongBoolFieldNameThirtySixChar: false,
+				LongNullAnyFieldThirtySevenCh:  "non-nil",
+				LongEmptySliceFieldThirtyEight: nil,
+				LongNestedStructThirtyNineChar: longKeyNested{
+					VeryLongNestedStructFieldName38Chars: "plain",
+					UltraLongNestedField72Chars:          42,
+				},
+				UltraLongStringField74Chars: "",
+				UltraLongBoolField70Chars:   true,
+				UltraLongNullField70Chars:   123,
+			},
+		},
+	}
+
+	wantEsc, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEsc, err := Encode(&v, SortMapKeys|EscapeHTML|CompactMarshaler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotEsc) != string(wantEsc) {
+		t.Fatalf("EscapeHTML mismatch:\ngot:  %s\nwant: %s", gotEsc, wantEsc)
+	}
+
+	var rawBuf bytes.Buffer
+	enc := json.NewEncoder(&rawBuf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		t.Fatal(err)
+	}
+	wantFast := bytes.TrimSuffix(rawBuf.Bytes(), []byte("\n"))
+	gotFast, err := Encode(&v, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotFast) != string(wantFast) {
+		t.Fatalf("fast mode mismatch:\ngot:  %s\nwant: %s", gotFast, wantFast)
+	}
+
+	// Exercise Stack.sbExtra overflow beyond inlineStackCap (64 levels).
+	var deep interface{} = "leaf"
+	for i := 0; i < 96; i++ {
+		deep = []interface{}{deep}
+	}
+	wantDeep, err := json.Marshal(deep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDeep, err := Encode(deep, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDeep) != string(wantDeep) {
+		t.Fatalf("deep stack mismatch: len(got)=%d len(want)=%d", len(gotDeep), len(wantDeep))
+	}
+}
