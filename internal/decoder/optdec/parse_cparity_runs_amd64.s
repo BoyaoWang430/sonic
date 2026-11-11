@@ -110,12 +110,19 @@ runs_parent_loaded:
 	JMP  runs_value
 
 runs_parent_continue:
-	CALL runs_space<>(SB)
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JBE  runs_parent_continue_space
+	INCQ SI
+runs_parent_continue_dispatch:
 	MOVQ 16(SP), BX
 	MOVBLZX (BX), CX
 	CMPB CL, $const_KObject
 	JE   runs_object_continue
 	JMP  runs_array_continue
+runs_parent_continue_space:
+	CALL runs_space<>(SB)
+	JMP  runs_parent_continue_dispatch
 
 runs_object_key:
 	CMPQ AX, $34
@@ -135,11 +142,11 @@ runs_key_string_result:
 runs_key_escape_saved:
 	CMPQ AX, $0
 	JL   runs_string_error
-	MOVQ AX, 8(SP)
-	CALL runs_space<>(SB)
-	CMPQ AX, $58
-	JNE  runs_error_colon
-	MOVQ 8(SP), DX
+	CMPB (SI), $58
+	JNE  runs_key_colon_space
+	INCQ SI
+	MOVQ AX, DX
+runs_key_colon_ok:
 	MOVQ cParityRunsState_hasEsc(R13), BX
 	SHLQ $3, BX
 	ORQ  $const_KStringCommon, BX
@@ -154,9 +161,36 @@ runs_key_escape_saved:
 	JBE  runs_object_value
 	MOVB $1, WB_ISKEY(R12)
 	JMP  runs_error_capacity
+runs_key_colon_space:
+	MOVQ AX, 8(SP)
+	CALL runs_space<>(SB)
+	CMPQ AX, $58
+	JNE  runs_error_colon
+	MOVQ 8(SP), DX
+	JMP  runs_key_colon_ok
 
 runs_object_value:
 	MOVQ $const_cParityRunsContextObject, 32(SP)
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JA   runs_object_value_0sp
+	JNE  runs_object_value_space
+	MOVBLZX 1(SI), AX
+	CMPB AL, $32
+	JBE  runs_object_value_space
+	MOVQ SI, BX
+	SUBQ rawBase+16(FP), BX
+	INCQ BX
+	MOVQ BX, 24(SP)
+	ADDQ $2, SI
+	JMP  runs_value
+runs_object_value_0sp:
+	MOVQ SI, BX
+	SUBQ rawBase+16(FP), BX
+	MOVQ BX, 24(SP)
+	INCQ SI
+	JMP  runs_value
+runs_object_value_space:
 	CALL runs_space<>(SB)
 	MOVQ SI, BX
 	SUBQ rawBase+16(FP), BX
@@ -227,11 +261,27 @@ runs_value_array:
 	JA   runs_error_capacity
 	JMP  runs_open_array
 runs_open_object:
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JBE  runs_open_object_space
+	INCQ SI
+	CMPQ AX, $125
+	JNE  runs_object_key
+	JMP  runs_close_container
+runs_open_object_space:
 	CALL runs_space<>(SB)
 	CMPQ AX, $125
 	JNE  runs_object_key
 	JMP  runs_close_container
 runs_open_array:
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JBE  runs_open_array_space
+	INCQ SI
+	CMPQ AX, $93
+	JNE  runs_array_value
+	JMP  runs_close_container
+runs_open_array_space:
 	CALL runs_space<>(SB)
 	CMPQ AX, $93
 	JNE  runs_array_value
@@ -390,6 +440,14 @@ runs_after_scalar:
 	JA   runs_error_capacity
 	CMPQ 32(SP), $0
 	JE   runs_ok
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JBE  runs_after_scalar_space
+	INCQ SI
+	CMPQ 32(SP), $const_cParityRunsContextObject
+	JE   runs_object_continue
+	JMP  runs_array_continue
+runs_after_scalar_space:
 	CALL runs_space<>(SB)
 	CMPQ 32(SP), $const_cParityRunsContextObject
 	JE   runs_object_continue
@@ -404,6 +462,12 @@ runs_object_continue:
 	JNE  runs_error_object_end
 	JMP  runs_close_container
 runs_next_key:
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JBE  runs_next_key_space
+	INCQ SI
+	JMP  runs_object_key
+runs_next_key_space:
 	CALL runs_space<>(SB)
 	JMP  runs_object_key
 
@@ -468,6 +532,19 @@ runs_error_stack_overflow:
 	JMP  runs_done
 
 runs_next_array_value:
+	MOVBLZX (SI), AX
+	CMPB AL, $32
+	JA   runs_next_array_0sp
+	JNE  runs_next_array_space
+	MOVBLZX 1(SI), AX
+	CMPB AL, $32
+	JBE  runs_next_array_space
+	ADDQ $2, SI
+	JMP  runs_array_value
+runs_next_array_0sp:
+	INCQ SI
+	JMP  runs_array_value
+runs_next_array_space:
 	CALL runs_space<>(SB)
 	JMP  runs_array_value
 
@@ -592,10 +669,19 @@ runs_number_negative_real:
 	SHRQ $1, AX
 	ANDQ $1, DI
 	ORQ  DI, AX
+	CMPB ·hasAVX2(SB), $0
+	JE   runs_number_negative_real_sse
+	VXORPD X0, X0, X0
+	VCVTSI2SDQ AX, X0, X0
+	VADDSD X0, X0, X0
+	VMOVQ X0, DX
+	JMP  runs_number_negative_real_done
+runs_number_negative_real_sse:
 	XORPD X0, X0
 	CVTSQ2SD AX, X0
 	ADDSD X0, X0
 	MOVQ X0, DX
+runs_number_negative_real_done:
 	BTSQ $63, DX
 	MOVQ $const_KReal, BX
 	XORQ AX, AX
@@ -682,6 +768,45 @@ runs_number_float:
 	MOVQ DI, AX
 	SHRQ $52, AX
 	JNZ  runs_number_el_0
+	CMPB ·hasAVX2(SB), $0
+	JE   runs_number_float_sse
+	VXORPD X0, X0, X0
+	VCVTSI2SDQ DI, X0, X0
+	TESTQ BX, BX
+	JZ   runs_number_float_avx_sign
+	MOVQ $0x8000000000000000, AX
+	VMOVQ AX, X1
+	VXORPD X1, X0, X0
+runs_number_float_avx_sign:
+	TESTQ DI, DI
+	JZ   runs_number_float_avx_done
+	TESTQ R9, R9
+	JZ   runs_number_float_avx_done
+	LEAQ runsPow10<>(SB), AX
+	CMPQ R9, $0
+	JL   runs_number_float_avx_divide
+	CMPQ R9, $22
+	JG   runs_number_el_0
+	MOVQ $1000000000000000, CX
+	CMPQ DI, CX
+	JA   runs_number_el_0
+	VMOVSD (AX)(R9*8), X1
+	VMULSD X1, X0, X0
+	JMP  runs_number_float_avx_done
+runs_number_float_avx_divide:
+	CMPQ R9, $-22
+	JL   runs_number_el_0
+	MOVQ R9, CX
+	NEGQ CX
+	VMOVSD (AX)(CX*8), X1
+	VDIVSD X1, X0, X0
+runs_number_float_avx_done:
+	VMOVQ X0, DX
+	MOVQ $const_KReal, BX
+	XORQ AX, AX
+	RET
+
+runs_number_float_sse:
 	XORPD X0, X0
 	CVTSQ2SD DI, X0
 	TESTQ BX, BX
@@ -825,12 +950,12 @@ runs_number_el_pack:
 	JZ   runs_number_el_done
 	CMPQ R11, $1
 	JNE  runs_number_el_check_trunc
-	MOVQ DX, X6
+	MOVQ DX, 16(SP)
 	INCQ DI
 	MOVQ $2, R11
 	JMP  runs_number_eisel_lemire
 runs_number_el_check_trunc:
-	MOVQ X6, AX
+	MOVQ 16(SP), AX
 	CMPQ DX, AX
 	JNE  runs_number_fallback
 runs_number_el_done:
@@ -872,7 +997,72 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOVQ SI, DX
 	MOVQ $-1, R11
 	XORL R8, R8
+	CMPB ·hasAVX2(SB), $0
+	JE   runs_string_sse
+	TESTB $32, Parser_options(R12)
+	JNZ  runs_string_scan_avx2_val
 
+runs_string_scan_avx2_fast:
+	VMOVDQU 0(SI), Y0
+	VPCMPEQB Y13, Y0, Y4
+	VPCMPEQB Y14, Y0, Y5
+	VPOR Y5, Y4, Y4
+	VPMOVMSKB Y4, AX
+	TESTL AX, AX
+	JNZ  runs_string_avx2_event_fast
+	ADDQ $32, SI
+	JMP  runs_string_scan_avx2_fast
+
+runs_string_avx2_event_fast:
+	BSFL AX, CX
+	CMPB (SI)(CX*1), $34
+	JE   runs_string_plain_at
+	ADDQ CX, SI
+	MOVQ SI, DI
+	JMP  runs_string_continue<>(SB)
+
+runs_string_scan_avx2_val:
+	VMOVDQU 0(SI), Y0
+	VPCMPEQB Y13, Y0, Y4
+	VPCMPEQB Y14, Y0, Y5
+	VPOR Y5, Y4, Y4
+	VPMAXUB Y11, Y0, Y6
+	VPCMPEQB Y11, Y6, Y6
+	VPOR Y6, Y4, Y4
+	VPMOVMSKB Y4, AX
+	TESTL AX, AX
+	JNZ  runs_string_avx2_event_val
+	ADDQ $32, SI
+	JMP  runs_string_scan_avx2_val
+
+runs_string_avx2_event_val:
+	BSFL AX, CX
+	MOVBLZX (SI)(CX*1), AX
+	CMPB AL, $34
+	JE   runs_string_plain_at
+	CMPB AL, $92
+	JE   runs_string_avx2_escape
+	// Raw control char at CX; preserve C-parity backslash priority before first quote.
+	MOVL CX, R8
+	VPCMPEQB Y13, Y0, Y4
+	VPMOVMSKB Y4, R9
+	VPCMPEQB Y14, Y0, Y5
+	VPMOVMSKB Y5, R10
+	MOVL R10, AX
+	DECL AX
+	TESTL R9, AX
+	JNZ  runs_string_first_escape
+	ADDQ R8, SI
+	MOVQ $-const_SONIC_CONTROL_CHAR, AX
+	MOVQ R11, BX
+	RET
+
+runs_string_avx2_escape:
+	ADDQ CX, SI
+	MOVQ SI, DI
+	JMP  runs_string_continue<>(SB)
+
+runs_string_sse:
 	MOVOU (SI), X0
 	MOVO X0, X4; PCMPEQB X13, X4
 	MOVO X0, X5; PCMPEQB X14, X5
@@ -885,25 +1075,10 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 runs_string_short_events:
 	PMOVMSKB X4, AX
 	TESTL AX, AX
-	JZ   runs_string_scan
+	JZ   runs_string_scan_sse
 	BSFL AX, CX
 	CMPB (SI)(CX*1), $34
 	JE   runs_string_plain_at
-
-runs_string_scan:
-	CMPB ·hasAVX2(SB), $0
-	JE   runs_string_scan_sse
-	VMOVDQU 0(SI), Y0
-	VPCMPEQB Y13, Y0, Y4
-	VPMOVMSKB Y4, R9
-	VPCMPEQB Y14, Y0, Y4
-	VPMOVMSKB Y4, R10
-	TESTB $32, Parser_options(R12)
-	JZ   runs_string_scan_events
-	VPMAXUB Y11, Y0, Y4
-	VPCMPEQB Y11, Y4, Y4
-	VPMOVMSKB Y4, R8
-	JMP  runs_string_scan_events
 
 runs_string_scan_sse:
 	MOVOU 0(SI), X0
@@ -915,12 +1090,12 @@ runs_string_scan_sse:
 	MOVO X1, X4; PCMPEQB X14, X4; PMOVMSKB X4, AX
 	SHLL $16, AX; ORL AX, R10
 	TESTB $32, Parser_options(R12)
-	JZ   runs_string_scan_events
+	JZ   runs_string_scan_sse_events
 	MOVO X0, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, R8
 	MOVO X1, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, AX
 	SHLL $16, AX; ORL AX, R8
 
-runs_string_scan_events:
+runs_string_scan_sse_events:
 	MOVL R9, AX
 	ORL  R8, AX
 	DECL AX
@@ -933,7 +1108,7 @@ runs_string_scan_events:
 	TESTL R8, AX
 	JNZ  runs_string_plain_control_error
 	ADDQ $32, SI
-	JMP  runs_string_scan
+	JMP  runs_string_scan_sse
 
 runs_string_plain_done:
 	BSFL R10, CX
@@ -999,6 +1174,7 @@ runs_string_resume:
 runs_string_move:
 	CMPB ·hasAVX2(SB), $0
 	JE   runs_string_move_sse
+runs_string_move_avx2:
 	VMOVDQU 0(SI), Y0
 	VPCMPEQB Y13, Y0, Y4
 	VPMOVMSKB Y4, R9
@@ -1025,7 +1201,7 @@ runs_string_move_events:
 	VMOVDQU Y0, 0(DI)
 	ADDQ $32, SI
 	ADDQ $32, DI
-	JMP  runs_string_move
+	JMP  runs_string_move_avx2
 
 runs_string_move_sse:
 	MOVOU 0(SI), X0
@@ -1066,6 +1242,12 @@ runs_string_copy_quote:
 	VPEXTRQ $1, X1, BX
 	JMP  runs_quote_8
 runs_quote_lt16:
+	CMPB ·hasAVX2(SB), $0
+	JE   runs_quote_lt16_sse
+	VMOVQ X0, AX
+	VPEXTRQ $1, X0, BX
+	JMP  runs_quote_8
+runs_quote_lt16_sse:
 	MOVQ X0, AX
 	PSRLDQ $8, X0
 	MOVQ X0, BX
@@ -1111,6 +1293,12 @@ runs_string_copy_slash:
 	VPEXTRQ $1, X1, BX
 	JMP  runs_slash_8
 runs_slash_lt16:
+	CMPB ·hasAVX2(SB), $0
+	JE   runs_slash_lt16_sse
+	VMOVQ X0, AX
+	VPEXTRQ $1, X0, BX
+	JMP  runs_slash_8
+runs_slash_lt16_sse:
 	MOVQ X0, AX
 	PSRLDQ $8, X0
 	MOVQ X0, BX
@@ -1199,6 +1387,7 @@ runs_space_cached:
 runs_space_scan:
 	CMPB ·hasAVX2(SB), $0
 	JE   runs_space_scan_sse
+runs_space_scan_avx2:
 	VMOVDQU 0(SI), Y0
 	VMOVDQU 32(SI), Y1
 
@@ -1216,7 +1405,7 @@ runs_space_scan:
 	TESTQ DX, DX
 	JNZ  runs_space_refilled
 	ADDQ $64, SI
-	JMP  runs_space_scan
+	JMP  runs_space_scan_avx2
 
 runs_space_scan_sse:
 	MOVOU 0(SI), X0

@@ -94,11 +94,18 @@ runs_parent_loaded:
 	JMP runs_value
 
 runs_parent_continue:
-	CALL runs_space<>(SB)
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_parent_continue_space
+	ADD $1, X21
+runs_parent_continue_dispatch:
 	MOVBU 0(X23), X11
 	MOV $const_KObject, X19
 	BEQ X11, X19, runs_object_continue
 	JMP runs_array_continue
+runs_parent_continue_space:
+	CALL runs_space<>(SB)
+	JMP runs_parent_continue_dispatch
 
 runs_object_key:
 	MOV $34, X19
@@ -115,11 +122,12 @@ runs_key_string_result:
 	MOV X11, cParityRunsState_hasEsc(X18)
 runs_key_escape_saved:
 	BLT X10, X0, runs_string_error
-	MOV X10, 8(X2)
-	CALL runs_space<>(SB)
+	MOV X10, X12
+	MOVBU 0(X21), X10
 	MOV $58, X19
-	BNE X10, X19, runs_error_colon
-	MOV 8(X2), X12
+	BNE X10, X19, runs_key_colon_space
+	ADD $1, X21
+runs_key_colon_ok:
 	MOV cParityRunsState_hasEsc(X18), X11
 	SLL $3, X11
 	OR $const_KStringCommon, X11
@@ -134,9 +142,31 @@ runs_key_escape_saved:
 	MOV $1, X11
 	MOVB X11, WB_ISKEY(X9)
 	JMP runs_error_capacity
+runs_key_colon_space:
+	MOV X12, 8(X2)
+	CALL runs_space<>(SB)
+	MOV $58, X19
+	BNE X10, X19, runs_error_colon
+	MOV 8(X2), X12
+	JMP runs_key_colon_ok
 
 runs_object_value:
 	MOV $const_cParityRunsContextObject, X28
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BGTU X10, X19, runs_object_value_0sp
+	BNE X10, X19, runs_object_value_space
+	MOVBU 1(X21), X10
+	BLEU X10, X19, runs_object_value_space
+	SUB X24, X21, X26
+	ADD $1, X26
+	ADD $2, X21
+	JMP runs_value
+runs_object_value_0sp:
+	SUB X24, X21, X26
+	ADD $1, X21
+	JMP runs_value
+runs_object_value_space:
 	CALL runs_space<>(SB)
 	SUB X24, X21, X26
 	ADD $-1, X26
@@ -204,11 +234,27 @@ runs_value_array:
 	BGTU X22, X16, runs_error_capacity
 	JMP runs_open_array
 runs_open_object:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_open_object_space
+	ADD $1, X21
+	MOV $125, X19
+	BNE X10, X19, runs_object_key
+	JMP runs_close_container
+runs_open_object_space:
 	CALL runs_space<>(SB)
 	MOV $125, X19
 	BNE X10, X19, runs_object_key
 	JMP runs_close_container
 runs_open_array:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_open_array_space
+	ADD $1, X21
+	MOV $93, X19
+	BNE X10, X19, runs_array_value
+	JMP runs_close_container
+runs_open_array_space:
 	CALL runs_space<>(SB)
 	MOV $93, X19
 	BNE X10, X19, runs_array_value
@@ -359,6 +405,14 @@ runs_after_scalar:
 	RUNS_CAPACITY
 	BLTU X16, X22, runs_error_capacity
 	BEQZ X28, runs_ok
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_after_scalar_space
+	ADD $1, X21
+	MOV $const_cParityRunsContextObject, X19
+	BEQ X28, X19, runs_object_continue
+	JMP runs_array_continue
+runs_after_scalar_space:
 	CALL runs_space<>(SB)
 	MOV $const_cParityRunsContextObject, X19
 	BEQ X28, X19, runs_object_continue
@@ -374,6 +428,12 @@ runs_object_continue:
 	BNE X10, X19, runs_error_object_end
 	JMP runs_close_container
 runs_next_key:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_next_key_space
+	ADD $1, X21
+	JMP runs_object_key
+runs_next_key_space:
 	CALL runs_space<>(SB)
 	JMP runs_object_key
 runs_array_continue:
@@ -447,6 +507,18 @@ runs_error_stack_overflow:
 	MOV $const_SONIC_STACK_OVERFLOW, X10
 	JMP runs_done
 runs_next_array_value:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BGTU X10, X19, runs_next_array_0sp
+	BNE X10, X19, runs_next_array_space
+	MOVBU 1(X21), X10
+	BLEU X10, X19, runs_next_array_space
+	ADD $2, X21
+	JMP runs_array_value
+runs_next_array_0sp:
+	ADD $1, X21
+	JMP runs_array_value
+runs_next_array_space:
 	CALL runs_space<>(SB)
 	JMP runs_array_value
 
@@ -785,19 +857,33 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	AND $32, X20, X13
 	MOV $32, X15
 	VSETVLI X15, E8, M2, TA, MA, X0
-runs_string_scan:
+	BNEZ X13, runs_string_scan_val
+runs_string_scan_fast:
 	VLE8V (X21), V8
 	VMSEQVX X30, V8, V2
 	VMSEQVX X29, V8, V3
 	VMORMM V2, V3, V4
-	BEQZ X13, runs_string_first
+	VFIRSTM V4, X6
+	BGEZ X6, runs_string_event_fast
+	ADD $32, X21
+	JMP runs_string_scan_fast
+runs_string_event_fast:
+	ADD X6, X21, X7
+	MOVBU 0(X7), X10
+	BEQ X10, X29, runs_string_plain_at
+	JMP runs_string_first_escape
+
+runs_string_scan_val:
+	VLE8V (X21), V8
+	VMSEQVX X30, V8, V2
+	VMSEQVX X29, V8, V3
+	VMORMM V2, V3, V4
 	VMSLTUVX X15, V8, V5
 	VMORMM V4, V5, V4
-runs_string_first:
 	VFIRSTM V4, X6
 	BGEZ X6, runs_string_event
 	ADD $32, X21
-	JMP runs_string_scan
+	JMP runs_string_scan_val
 
 runs_string_event:
 	ADD X6, X21, X7
@@ -864,22 +950,39 @@ runs_string_resume:
 
 runs_string_move:
 	VSETVLI X15, E8, M2, TA, MA, X0
-runs_string_move_loop:
+	BNEZ X13, runs_string_move_loop_val
+runs_string_move_loop_fast:
 	// V8 retains the 32-byte snapshot for overlapping in-place copies.
 	VLE8V (X21), V8
 	VMSEQVX X30, V8, V2
 	VMSEQVX X29, V8, V3
 	VMORMM V2, V3, V4
-	BEQZ X13, runs_string_move_first
+	VFIRSTM V4, X6
+	BGEZ X6, runs_string_move_event_fast
+	VSE8V V8, (X11)
+	ADD $32, X21
+	ADD $32, X11
+	JMP runs_string_move_loop_fast
+runs_string_move_event_fast:
+	ADD X6, X21, X7
+	MOVBU 0(X7), X10
+	BEQ X10, X29, runs_string_copy_quote
+	JMP runs_string_copy_slash
+
+runs_string_move_loop_val:
+	// V8 retains the 32-byte snapshot for overlapping in-place copies.
+	VLE8V (X21), V8
+	VMSEQVX X30, V8, V2
+	VMSEQVX X29, V8, V3
+	VMORMM V2, V3, V4
 	VMSLTUVX X15, V8, V5
 	VMORMM V4, V5, V4
-runs_string_move_first:
 	VFIRSTM V4, X6
 	BGEZ X6, runs_string_move_event
 	VSE8V V8, (X11)
 	ADD $32, X21
 	ADD $32, X11
-	JMP runs_string_move_loop
+	JMP runs_string_move_loop_val
 
 runs_string_move_event:
 	ADD X6, X21, X7

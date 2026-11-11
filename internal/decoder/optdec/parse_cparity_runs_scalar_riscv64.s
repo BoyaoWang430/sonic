@@ -93,11 +93,18 @@ runs_parent_loaded:
 	JMP runs_value
 
 runs_parent_continue:
-	CALL runs_space<>(SB)
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_parent_continue_space
+	ADD $1, X21
+runs_parent_continue_dispatch:
 	MOVBU 0(X23), X11
 	MOV $const_KObject, X19
 	BEQ X11, X19, runs_object_continue
 	JMP runs_array_continue
+runs_parent_continue_space:
+	CALL runs_space<>(SB)
+	JMP runs_parent_continue_dispatch
 
 runs_object_key:
 	MOV $34, X19
@@ -114,11 +121,12 @@ runs_key_string_result:
 	MOV X11, cParityRunsState_hasEsc(X18)
 runs_key_escape_saved:
 	BLT X10, X0, runs_string_error
-	MOV X10, 8(X2)
-	CALL runs_space<>(SB)
+	MOV X10, X12
+	MOVBU 0(X21), X10
 	MOV $58, X19
-	BNE X10, X19, runs_error_colon
-	MOV 8(X2), X12
+	BNE X10, X19, runs_key_colon_space
+	ADD $1, X21
+runs_key_colon_ok:
 	MOV cParityRunsState_hasEsc(X18), X11
 	SLL $3, X11
 	OR $const_KStringCommon, X11
@@ -133,9 +141,31 @@ runs_key_escape_saved:
 	MOV $1, X11
 	MOVB X11, WB_ISKEY(X9)
 	JMP runs_error_capacity
+runs_key_colon_space:
+	MOV X12, 8(X2)
+	CALL runs_space<>(SB)
+	MOV $58, X19
+	BNE X10, X19, runs_error_colon
+	MOV 8(X2), X12
+	JMP runs_key_colon_ok
 
 runs_object_value:
 	MOV $const_cParityRunsContextObject, X28
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BGTU X10, X19, runs_object_value_0sp
+	BNE X10, X19, runs_object_value_space
+	MOVBU 1(X21), X10
+	BLEU X10, X19, runs_object_value_space
+	SUB X24, X21, X26
+	ADD $1, X26
+	ADD $2, X21
+	JMP runs_value
+runs_object_value_0sp:
+	SUB X24, X21, X26
+	ADD $1, X21
+	JMP runs_value
+runs_object_value_space:
 	CALL runs_space<>(SB)
 	SUB X24, X21, X26
 	ADD $-1, X26
@@ -203,11 +233,27 @@ runs_value_array:
 	BGTU X22, X16, runs_error_capacity
 	JMP runs_open_array
 runs_open_object:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_open_object_space
+	ADD $1, X21
+	MOV $125, X19
+	BNE X10, X19, runs_object_key
+	JMP runs_close_container
+runs_open_object_space:
 	CALL runs_space<>(SB)
 	MOV $125, X19
 	BNE X10, X19, runs_object_key
 	JMP runs_close_container
 runs_open_array:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_open_array_space
+	ADD $1, X21
+	MOV $93, X19
+	BNE X10, X19, runs_array_value
+	JMP runs_close_container
+runs_open_array_space:
 	CALL runs_space<>(SB)
 	MOV $93, X19
 	BNE X10, X19, runs_array_value
@@ -358,6 +404,14 @@ runs_after_scalar:
 	RUNS_CAPACITY
 	BLTU X16, X22, runs_error_capacity
 	BEQZ X28, runs_ok
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_after_scalar_space
+	ADD $1, X21
+	MOV $const_cParityRunsContextObject, X19
+	BEQ X28, X19, runs_object_continue
+	JMP runs_array_continue
+runs_after_scalar_space:
 	CALL runs_space<>(SB)
 	MOV $const_cParityRunsContextObject, X19
 	BEQ X28, X19, runs_object_continue
@@ -373,6 +427,12 @@ runs_object_continue:
 	BNE X10, X19, runs_error_object_end
 	JMP runs_close_container
 runs_next_key:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BLEU X10, X19, runs_next_key_space
+	ADD $1, X21
+	JMP runs_object_key
+runs_next_key_space:
 	CALL runs_space<>(SB)
 	JMP runs_object_key
 runs_array_continue:
@@ -446,6 +506,18 @@ runs_error_stack_overflow:
 	MOV $const_SONIC_STACK_OVERFLOW, X10
 	JMP runs_done
 runs_next_array_value:
+	MOVBU 0(X21), X10
+	MOV $32, X19
+	BGTU X10, X19, runs_next_array_0sp
+	BNE X10, X19, runs_next_array_space
+	MOVBU 1(X21), X10
+	BLEU X10, X19, runs_next_array_space
+	ADD $2, X21
+	JMP runs_array_value
+runs_next_array_0sp:
+	ADD $1, X21
+	JMP runs_array_value
+runs_next_array_space:
 	CALL runs_space<>(SB)
 	JMP runs_array_value
 
@@ -788,6 +860,14 @@ runs_number_el_done:
 	AND tmp, out; \
 	XOR $-1, out, out
 
+#define RUNS_STRING_EVENTS_FAST(word, out, tmp) \
+	XOR X29, word, out; \
+	XOR X30, word, tmp; \
+	ORCB out, out; \
+	ORCB tmp, tmp; \
+	AND tmp, out; \
+	XOR $-1, out, out
+
 // X13 = 0 when option bit 5 rejects raw controls, otherwise all ones.
 #define RUNS_STRING_INIT \
 	AND $32, X20, X13; \
@@ -811,7 +891,41 @@ runs_number_el_done:
 TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOV X21, X12
 	MOV $-1, X14
-	RUNS_STRING_INIT
+	AND $32, X20, X13
+	BNEZ X13, runs_string_val
+runs_string_block_fast:
+	MOV 0(X21), X5
+	RUNS_STRING_EVENTS_FAST(X5, X6, X10)
+	MOV $0, X16
+	BNEZ X6, runs_string_event_fast
+	MOV 8(X21), X5
+	RUNS_STRING_EVENTS_FAST(X5, X6, X10)
+	MOV $8, X16
+	BNEZ X6, runs_string_event_fast
+	MOV 16(X21), X5
+	RUNS_STRING_EVENTS_FAST(X5, X6, X10)
+	MOV $16, X16
+	BNEZ X6, runs_string_event_fast
+	MOV 24(X21), X5
+	RUNS_STRING_EVENTS_FAST(X5, X6, X10)
+	MOV $24, X16
+	BNEZ X6, runs_string_event_fast
+	ADD $32, X21
+	JMP runs_string_block_fast
+
+runs_string_event_fast:
+	CTZ X6, X6
+	SRL $3, X6
+	ADD X16, X6
+	ADD X6, X21, X7
+	MOVBU 0(X7), X10
+	MOV $34, X15
+	BEQ X10, X15, runs_string_plain_at
+	JMP runs_string_first_escape
+
+runs_string_val:
+	MOV $0, X13
+	MOV $0xe0e0e0e0e0e0e0e0, X17
 runs_string_block:
 	MOV 0(X21), X5
 	RUNS_STRING_EVENTS(X5, X6, X10)
@@ -1139,7 +1253,30 @@ runs_space_second:
 	MOV $13, X7
 	BNE X10, X7, runs_space_return
 runs_space_scan:
-	MOV $0x2020202020202020, X11
+	// Derive 0x2020202020202020 in 2 cycles from X29 (0x22...) & ~(X30 (0x5c...) >> 2).
+	SRL $2, X30, X11
+	ANDN X11, X29, X11
+runs_space_pure:
+	MOV 0(X21), X5
+	XOR X11, X5, X6
+	BEQZ X6, runs_space_pure_next
+	CTZ X6, X7
+	AND $-8, X7
+	SRL X7, X5, X10
+	AND $0xff, X10
+	MOV $32, X15
+	BGTU X10, X15, runs_space_pure_hit
+	JMP runs_space_mixed
+runs_space_pure_next:
+	ADD $8, X21
+	AND $-8, X21
+	JMP runs_space_pure
+runs_space_pure_hit:
+	SRL $3, X7
+	ADD X7, X21
+	ADD $1, X21
+	RET
+runs_space_mixed:
 	MOV $0x0909090909090909, X12
 	MOV $0x0a0a0a0a0a0a0a0a, X13
 	MOV $0x0d0d0d0d0d0d0d0d, X14

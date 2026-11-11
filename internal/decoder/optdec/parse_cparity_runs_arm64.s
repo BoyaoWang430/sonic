@@ -31,20 +31,14 @@
 	CMP R14, R23
 
 // These constants survive the entire parser invocation. Helpers and the core
-// preserve V20/V21/V22/V25/V29/V30/V31; cold Go returns reinitialize them.
+// preserve V20/V21/V22/V25/V29/V30; cold Go returns reinitialize them.
 #define RUNS_SCAN_INIT \
 	MOVD $cParityRunsSpaceTables<>(SB), R9; \
-	VLD1 (R9), [V29.B16, V30.B16, V31.B16]; \
+	VLD1 (R9), [V29.B16, V30.B16]; \
 	VMOVI $143, V25.B16; \
 	VMOVI $92, V20.B16; \
 	VMOVI $34, V21.B16; \
 	VEOR V22.B16, V22.B16, V22.B16
-
-#define CP_RUNS_PACK(reg, output) \
-	VAND V30.B16, reg.B16, reg.B16; \
-	VTBL V31.B16, [reg.B16], reg.B16; \
-	VADDV reg.H8, reg; \
-	VMOV reg.H[0], output
 
 // Classify one C-sized block; V0/V1 retain the entire original input snapshot
 // for the overlapping in-place copy. R6/R7 are slash/quote bitmaps. Constants
@@ -145,11 +139,18 @@ runs_parent_loaded:
 	JMP runs_value
 
 runs_parent_continue:
-	CALL runs_space<>(SB)
+	MOVBU (R22), R0
+	CMP $32, R0
+	BLS runs_parent_continue_space
+	ADD $1, R22
+runs_parent_continue_dispatch:
 	MOVBU (R24), R1
 	CMP $const_KObject, R1
 	BEQ runs_object_continue
 	JMP runs_array_continue
+runs_parent_continue_space:
+	CALL runs_space<>(SB)
+	JMP runs_parent_continue_dispatch
 
 runs_object_key:
 	CMP $34, R0
@@ -167,11 +168,12 @@ runs_key_string_result:
 runs_key_escape_saved:
 	CMP $0, R0
 	BLT runs_string_error
-	MOVD R0, 8(RSP)
-	CALL runs_space<>(SB)
+	MOVD R0, R2
+	MOVBU (R22), R0
 	CMP $58, R0
-	BNE runs_error_colon
-	MOVD 8(RSP), R2
+	BNE runs_key_colon_space
+	ADD $1, R22
+runs_key_colon_ok:
 	MOVD cParityRunsState_hasEsc(R20), R1
 	LSL $3, R1
 	ORR $const_KStringCommon, R1
@@ -184,9 +186,32 @@ runs_key_escape_saved:
 	MOVD $1, R1
 	MOVB R1, WB_ISKEY(R19)
 	JMP runs_error_capacity
+runs_key_colon_space:
+	MOVD R2, 8(RSP)
+	CALL runs_space<>(SB)
+	CMP $58, R0
+	BNE runs_error_colon
+	MOVD 8(RSP), R2
+	JMP runs_key_colon_ok
 
 runs_object_value:
 	MOVD $const_cParityRunsContextObject, R17
+	MOVBU (R22), R0
+	CMP $32, R0
+	BHI runs_object_value_0sp
+	BNE runs_object_value_space
+	MOVBU 1(R22), R0
+	CMP $32, R0
+	BLS runs_object_value_space
+	SUB R25, R22, R16
+	ADD $1, R16
+	ADD $2, R22
+	JMP runs_value
+runs_object_value_0sp:
+	SUB R25, R22, R16
+	ADD $1, R22
+	JMP runs_value
+runs_object_value_space:
 	CALL runs_space<>(SB)
 	SUB R25, R22, R16
 	SUB $1, R16
@@ -250,11 +275,27 @@ runs_value_array:
 	BHI runs_error_capacity
 	JMP runs_open_array
 runs_open_object:
+	MOVBU (R22), R0
+	CMP $32, R0
+	BLS runs_open_object_space
+	ADD $1, R22
+	CMP $125, R0
+	BNE runs_object_key
+	JMP runs_close_container
+runs_open_object_space:
 	CALL runs_space<>(SB)
 	CMP $125, R0
 	BNE runs_object_key
 	JMP runs_close_container
 runs_open_array:
+	MOVBU (R22), R0
+	CMP $32, R0
+	BLS runs_open_array_space
+	ADD $1, R22
+	CMP $93, R0
+	BNE runs_array_value
+	JMP runs_close_container
+runs_open_array_space:
 	CALL runs_space<>(SB)
 	CMP $93, R0
 	BNE runs_array_value
@@ -404,6 +445,14 @@ runs_after_scalar:
 	RUNS_CAPACITY
 	BHI runs_error_capacity
 	CBZ R17, runs_ok
+	MOVBU (R22), R0
+	CMP $32, R0
+	BLS runs_after_scalar_space
+	ADD $1, R22
+	CMP $const_cParityRunsContextObject, R17
+	BEQ runs_object_continue
+	JMP runs_array_continue
+runs_after_scalar_space:
 	CALL runs_space<>(SB)
 	CMP $const_cParityRunsContextObject, R17
 	BEQ runs_object_continue
@@ -419,6 +468,12 @@ runs_object_continue:
 	BNE runs_error_object_end
 	JMP runs_close_container
 runs_next_key:
+	MOVBU (R22), R0
+	CMP $32, R0
+	BLS runs_next_key_space
+	ADD $1, R22
+	JMP runs_object_key
+runs_next_key_space:
 	CALL runs_space<>(SB)
 	JMP runs_object_key
 runs_array_continue:
@@ -485,6 +540,19 @@ runs_error_stack_overflow:
 	MOVD $const_SONIC_STACK_OVERFLOW, R0
 	JMP runs_done
 runs_next_array_value:
+	MOVBU (R22), R0
+	CMP $32, R0
+	BHI runs_next_array_0sp
+	BNE runs_next_array_value_space
+	MOVBU 1(R22), R0
+	CMP $32, R0
+	BLS runs_next_array_value_space
+	ADD $2, R22
+	JMP runs_array_value
+runs_next_array_0sp:
+	ADD $1, R22
+	JMP runs_array_value
+runs_next_array_value_space:
 	CALL runs_space<>(SB)
 	JMP runs_array_value
 
@@ -856,19 +924,43 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	VCMEQ V22.B16, V8.B16, V8.B16
 	VORR V8.B16, V4.B16, V4.B16
 runs_string_short_events:
-	CP_RUNS_PACK(V4, R6)
-	CBZ R6, runs_string_scan
+	VMOV V4.D[0], R6
+	CBNZ R6, runs_string_short_lo
+	VMOV V4.D[1], R7
+	CBZ R7, runs_string_short_miss
+	RBIT R7, R9
+	CLZ R9, R9
+	LSR $3, R9, R9
+	ADD $8, R9, R9
+	B runs_string_short_check
+runs_string_short_lo:
 	RBIT R6, R9
 	CLZ R9, R9
+	LSR $3, R9, R9
+runs_string_short_check:
 	MOVBU (R22)(R9), R11
 	CMP $34, R11
 	BEQ runs_string_plain_at
+	TBZ $5, R21, runs_string_first_escape_at
+	B runs_string_scan_val
 
-runs_string_scan:
+runs_string_short_miss:
+	TBNZ $5, R21, runs_string_scan_val
+	ADD $16, R22
+runs_string_scan_fast:
 	CP_RUNS_STRING_MASKS
-	TBZ $5, R21, runs_string_scan_events
+	SUBW $1, R6, R9
+	TSTW R7, R9
+	BNE runs_string_plain_done
+	SUBW $1, R7, R9
+	TSTW R6, R9
+	BNE runs_string_first_escape
+	ADD $32, R22
+	B runs_string_scan_fast
+
+runs_string_scan_val:
+	CP_RUNS_STRING_MASKS
 	CP_RUNS_CONTROL_MASK
-runs_string_scan_events:
 	ORRW R6, R8, R9
 	SUBW $1, R9, R9
 	TSTW R7, R9
@@ -880,7 +972,7 @@ runs_string_scan_events:
 	TSTW R8, R9
 	BNE runs_string_plain_control_error
 	ADD $32, R22
-	B runs_string_scan
+	B runs_string_scan_val
 
 runs_string_plain_done:
 	RBIT R7, R9
@@ -895,6 +987,7 @@ runs_string_plain_at:
 runs_string_first_escape:
 	RBIT R6, R9
 	CLZ R9, R9
+runs_string_first_escape_at:
 	ADD R9, R22
 	MOVD R22, R1
 	// Keep the caller's LR: ASCII decoding and Unicode resumes share one
