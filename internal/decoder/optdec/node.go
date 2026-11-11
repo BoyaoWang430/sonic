@@ -59,22 +59,16 @@ func canUseFastMap(opts uint64, root reflect.Type) bool {
 	return envs.UseFastMap && (opts&(1<<_F_use_int64)) == 0 && (root == anyType || root == mapEfaceType || root == sliceEfaceType)
 }
 
-func NewContext(json string, pos int, opts uint64, root reflect.Type) (Context, error) {
-	return NewContextWithSession(json, pos, opts, root, nil)
-}
-
-func NewContextWithSession(json string, pos int, opts uint64, root reflect.Type, sess *InputSession) (Context, error) {
-	ctx := Context{
-		Parser: newParserFromSession(json, pos, opts, sess),
-	}
+func newContextOnParser(p *Parser, opts uint64, root reflect.Type) (*Context, error) {
+	ctx := &p.ctx
+	ctx.Parser = p
 	if root == anyType || root == mapEfaceType || root == sliceEfaceType {
-		ctx.Parser.isEface = true
+		p.isEface = true
 	}
 
-	ecode := ctx.Parser.parse()
-
+	ecode := p.parse()
 	if ecode != 0 {
-		return ctx, ctx.Parser.fixError(ecode)
+		return ctx, p.fixError(ecode)
 	}
 
 	if canUseFastMap(opts, root) {
@@ -84,9 +78,21 @@ func NewContextWithSession(json string, pos int, opts uint64, root reflect.Type,
 	return ctx, nil
 }
 
+func NewContext(json string, pos int, opts uint64, root reflect.Type) (Context, error) {
+	return NewContextWithSession(json, pos, opts, root, nil)
+}
+
+func NewContextWithSession(json string, pos int, opts uint64, root reflect.Type, sess *InputSession) (Context, error) {
+	p := newParserFromSession(json, pos, opts, sess)
+	ctx, err := newContextOnParser(p, opts, root)
+	return *ctx, err
+}
+
 func (ctx *Context) Delete() {
-	ctx.Parser.free()
-	ctx.Parser = nil
+	if ctx.Parser != nil {
+		ctx.Parser.free()
+		ctx.Parser = nil
+	}
 	ctx.sliceArena = nil
 	ctx.sliceIdx = 0
 }
@@ -888,6 +894,108 @@ func (node *Node) AsSliceString(ctx *Context, vp unsafe.Pointer) error {
 		if !ok {
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), stringType)
+			}
+			next = val.Next()
+		} else {
+			s[i] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceF64(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceF64Type)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]float64)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsF64(ctx)
+		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), float64Type)
+			}
+			next = val.Next()
+		} else {
+			s[i] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceF32(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceF32Type)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]float32)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsF64(ctx)
+		if !ok || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), float32Type)
+			}
+			next = val.Next()
+		} else {
+			s[i] = float32(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceBool(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceBoolType)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]bool)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsBool()
+		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), boolType)
 			}
 			next = val.Next()
 		} else {

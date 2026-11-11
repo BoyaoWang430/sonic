@@ -41,19 +41,11 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 	}
 
 	rv := reflect.NewAt(d.typ, vp).Elem()
-	var elems unsafe.Pointer
-	var newSlice reflect.Value
-	reuse := !rv.IsNil() && rv.Cap() >= size
-	if reuse {
-		rv.SetLen(size)
-		elems = rv.UnsafePointer()
-	} else {
-		newSlice = reflect.MakeSlice(d.typ, size, size)
-		if !rv.IsNil() && rv.Len() > 0 {
-			reflect.Copy(newSlice, rv)
-		}
-		elems = newSlice.UnsafePointer()
+	if rv.Cap() < size {
+		rv.Grow(size - rv.Len())
 	}
+	rv.SetLen(size)
+	elems := rv.UnsafePointer()
 
 	elemSize := d.size
 	next := arr.Children()
@@ -79,10 +71,6 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 			}
 			next = val.Next()
 		}
-	}
-
-	if !reuse {
-		rv.Set(newSlice)
 	}
 	return gerr
 }
@@ -218,6 +206,42 @@ func (d *sliceStringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context)
 	}
 
 	return node.AsSliceString(ctx, vp)
+}
+
+type sliceF64Decoder struct {
+}
+
+func (d *sliceF64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]float64)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceF64(ctx, vp)
+}
+
+type sliceF32Decoder struct {
+}
+
+func (d *sliceF32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]float32)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceF32(ctx, vp)
+}
+
+type sliceBoolDecoder struct {
+}
+
+func (d *sliceBoolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]bool)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceBool(ctx, vp)
 }
 
 type sliceBytesDecoder struct {

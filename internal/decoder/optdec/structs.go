@@ -29,6 +29,9 @@ const (
 	fieldKindSliceI32
 	fieldKindSliceU64
 	fieldKindSliceU32
+	fieldKindSliceF64
+	fieldKindSliceF32
+	fieldKindSliceBool
 	fieldKindSliceString
 	fieldKindWideOffset
 )
@@ -91,6 +94,12 @@ func newFieldEntry(name string, offset uintptr, dec decFunc) fieldEntry {
 		fe.kind = fieldKindSliceU64
 	case *sliceU32Decoder:
 		fe.kind = fieldKindSliceU32
+	case *sliceF64Decoder:
+		fe.kind = fieldKindSliceF64
+	case *sliceF32Decoder:
+		fe.kind = fieldKindSliceF32
+	case *sliceBoolDecoder:
+		fe.kind = fieldKindSliceBool
 	case *sliceStringDecoder:
 		fe.kind = fieldKindSliceString
 	}
@@ -196,6 +205,15 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 				continue
 			case fieldKindSliceU32:
 				*(*[]uint32)(elem) = nil
+				continue
+			case fieldKindSliceF64:
+				*(*[]float64)(elem) = nil
+				continue
+			case fieldKindSliceF32:
+				*(*[]float32)(elem) = nil
+				continue
+			case fieldKindSliceBool:
+				*(*[]bool)(elem) = nil
 				continue
 			case fieldKindSliceString:
 				*(*[]string)(elem) = nil
@@ -384,6 +402,45 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 					}
 					n := Node{ptr: vptr}
 					err := n.AsSliceU32(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
+			case fieldKindSliceF64:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]float64)(elem) = []float64{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceF64(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
+			case fieldKindSliceF32:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]float32)(elem) = []float32{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceF32(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
+			case fieldKindSliceBool:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]bool)(elem) = []bool{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceBool(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
 					}

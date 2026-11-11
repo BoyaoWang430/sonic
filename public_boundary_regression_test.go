@@ -951,3 +951,73 @@ func TestPureStructSliceSpecAndFusedIntKeys(t *testing.T) {
 		t.Fatalf("unexpected NoNullSliceOrMap / EncodeNullForInfOrNan output: %s", gotNoNull)
 	}
 }
+
+type customFloat64Slice []float64
+type customStructSlice []struct {
+	A int `json:"a"`
+	B int `json:"b"`
+}
+
+type stepD1SliceHolder struct {
+	F64   []float64          `json:"f64"`
+	F32   []float32          `json:"f32"`
+	Bools []bool             `json:"bools"`
+	Named customFloat64Slice `json:"named"`
+	Items customStructSlice  `json:"items"`
+}
+
+func TestStepD1SliceGrowAndInlineTypedSlices(t *testing.T) {
+	makeSeed := func() stepD1SliceHolder {
+		items := make(customStructSlice, 2, 3)
+		items[0] = struct {
+			A int `json:"a"`
+			B int `json:"b"`
+		}{A: 10, B: 100}
+		items[1] = struct {
+			A int `json:"a"`
+			B int `json:"b"`
+		}{A: 20, B: 200}
+		return stepD1SliceHolder{
+			F64:   []float64{9.1, 9.2, 9.3},
+			F32:   []float32{8.1, 8.2, 8.3},
+			Bools: []bool{true, true, true},
+			Named: customFloat64Slice{7.1, 7.2},
+			Items: items,
+		}
+	}
+
+	inputs := []string{
+		`{"f64":null,"f32":null,"bools":null,"named":null,"items":null}`,
+		`{"f64":[],"f32":[],"bools":[],"named":[],"items":[]}`,
+		`{"f64":[1.25,null,3.5],"f32":[-2.5,null,4.0],"bools":[false,null,false],"named":[1.0,null,2.0,3.0],"items":[{"a":1},{"b":2},{"a":3,"b":30},{"a":4,"b":40}]}`,
+		`{"f64":[42.5],"f32":[12.5],"bools":[false],"named":[5.5],"items":[{"a":99}]}`,
+	}
+
+	for idx, raw := range inputs {
+		stdVal := makeSeed()
+		sonicVal := makeSeed()
+		errStd := json.Unmarshal([]byte(raw), &stdVal)
+		errSonic := ConfigStd.UnmarshalFromString(raw, &sonicVal)
+		if (errStd == nil) != (errSonic == nil) {
+			t.Fatalf("case %d error mismatch: std=%v sonic=%v", idx, errStd, errSonic)
+		}
+		if !reflect.DeepEqual(sonicVal, stdVal) {
+			t.Fatalf("case %d value mismatch:\ngot:  %+v\nwant: %+v", idx, sonicVal, stdVal)
+		}
+		if idx == 1 {
+			if sonicVal.F64 == nil || cap(sonicVal.F64) != 0 ||
+				sonicVal.F32 == nil || cap(sonicVal.F32) != 0 ||
+				sonicVal.Bools == nil || cap(sonicVal.Bools) != 0 ||
+				sonicVal.Named == nil || cap(sonicVal.Named) != 0 ||
+				sonicVal.Items == nil || cap(sonicVal.Items) != 0 {
+				t.Fatalf("case 1 empty slice cap/nil violation: %+v", sonicVal)
+			}
+		}
+	}
+
+	// Trailing non-whitespace must fail cleanly in UnmarshalFromString.
+	var dst stepD1SliceHolder
+	if err := ConfigDefault.UnmarshalFromString(`{"f64":[1.0]} trailing`, &dst); err == nil {
+		t.Fatalf("expected error on trailing non-whitespace tokens")
+	}
+}

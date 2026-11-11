@@ -164,6 +164,27 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 	return DecodeWithSession(s, i, f, val, nil)
 }
 
+// DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
+func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
+	etp, vp, dec, err := unpackAndCompileRoot(val)
+	if err != nil {
+		return s, 0, err
+	}
+
+	p := newParserImpl(s, 0, f)
+	defer p.free()
+
+	ctx, err := newContextOnParser(p, f, etp)
+	if p.Utf8Inv {
+		s = p.Json
+	}
+	if err == nil {
+		err = dec.FromDom(vp, ctx.Root(), ctx)
+	}
+	err = fix_error(s, 0, err)
+	return s, p.Pos(), err
+}
+
 func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **InputSession) error {
 	var sess *InputSession
 	if sessPtr != nil {
@@ -177,10 +198,12 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 
 	/* parse into document */
 	origPos := *i
-	ctx, err := NewContextWithSession(*s, origPos, uint64(f), etp, sess)
-	defer ctx.Delete()
-	if ctx.Parser.Utf8Inv {
-		*s = parserCorrectedSource(ctx.Parser, *s, origPos)
+	p := newParserFromSession(*s, origPos, uint64(f), sess)
+	defer p.free()
+
+	ctx, err := newContextOnParser(p, uint64(f), etp)
+	if p.Utf8Inv {
+		*s = parserCorrectedSource(p, *s, origPos)
 	}
 	if err != nil {
 		if sess != nil {
@@ -188,31 +211,31 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		}
 		goto fix_error
 	}
-	err = dec.FromDom(vp, ctx.Root(), &ctx)
+	err = dec.FromDom(vp, ctx.Root(), ctx)
 
 fix_error:
 	err = fix_error(*s, origPos, err)
 
-	newPos := origPos + ctx.Parser.Pos()
+	newPos := origPos + p.Pos()
 	if sessPtr != nil {
 		if err != nil {
 			*sessPtr = nil
 		} else if hasMoreJSONTokens(*s, newPos) {
-			if ctx.Parser.sessionPadded == nil {
+			if p.sessionPadded == nil {
 				if sess == nil {
 					sess = &InputSession{}
 					*sessPtr = sess
 				}
 				sess.src = *s
 				sess.base = origPos
-				sess.padded = ctx.Parser.padded
+				sess.padded = p.padded
 				sess.utf8Checked = (f & (1 << _F_validate_string)) != 0
-				ctx.Parser.padded = ctx.Parser.paddedBackup
-				ctx.Parser.paddedBackup = nil
+				p.padded = p.paddedBackup
+				p.paddedBackup = nil
 			}
 		} else if sess != nil {
-			if sess.padded != nil && uintptr(cap(sess.padded)) <= maxPooledJsonPaddedCap && ctx.Parser.padded == nil {
-				ctx.Parser.padded = sess.padded[:0]
+			if sess.padded != nil && uintptr(cap(sess.padded)) <= maxPooledJsonPaddedCap && p.padded == nil {
+				p.padded = sess.padded[:0]
 			}
 			*sessPtr = nil
 		}

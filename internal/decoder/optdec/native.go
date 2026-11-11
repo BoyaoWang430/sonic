@@ -121,6 +121,7 @@ type Parser struct {
 	paddedBackup  []byte
 	sessionPadded []byte
 	unesc         []byte
+	ctx           Context
 }
 
 // only when parse non-empty object/array are needed.
@@ -238,6 +239,7 @@ func (p *Parser) reset() {
 	p.isEface = false
 	p.sessionPadded = nil
 	p.unesc = nil
+	p.ctx = Context{}
 }
 
 func (p *Parser) free() {

@@ -25,6 +25,7 @@ import (
 
 	"github.com/bytedance/sonic/decoder"
 	"github.com/bytedance/sonic/encoder"
+	"github.com/bytedance/sonic/internal/decoder/api"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
@@ -116,16 +117,7 @@ func (cfg frozenConfig) MarshalIndent(val interface{}, prefix, indent string) ([
 
 // UnmarshalFromString is implemented by sonic
 func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
-	dec := decoder.NewDecoder(buf)
-	dec.SetOptions(cfg.decoderOpts)
-	err := dec.Decode(val)
-
-	/* check for errors */
-	if err != nil {
-		return err
-	}
-
-	return dec.CheckTrailings()
+	return api.UnmarshalString(buf, uint64(cfg.decoderOpts), val)
 }
 
 // Unmarshal is implemented by sonic

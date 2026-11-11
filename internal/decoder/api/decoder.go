@@ -116,6 +116,28 @@ func (self *Decoder) Decode(val interface{}) error {
 	return decodeSessionImpl(&self.s, &self.i, self.f, val, &self.sess)
 }
 
+// UnmarshalString decodes a single JSON document from buf and checks for trailing non-whitespace bytes
+// without heap-allocating a Decoder wrapper.
+func UnmarshalString(buf string, flags uint64, val interface{}) error {
+	updated, pos, err := decodeOneImpl(buf, flags, val)
+	if err != nil {
+		return err
+	}
+	if pos != len(updated) {
+		for pos < len(updated) && (types.SPACE_MASK&(1<<updated[pos])) != 0 {
+			pos++
+		}
+		if pos != len(updated) {
+			return SyntaxError{
+				Src:  updated,
+				Pos:  pos,
+				Code: types.ERR_INVALID_CHAR,
+			}
+		}
+	}
+	return nil
+}
+
 // UseInt64 indicates the Decoder to unmarshal an integer into an interface{} as an
 // int64 instead of as a float64.
 func (self *Decoder) UseInt64() {

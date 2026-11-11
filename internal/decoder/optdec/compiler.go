@@ -270,8 +270,15 @@ func (c *compiler) compileSlice(vt reflect.Type) decFunc {
 		return dec
 	}
 
-	if vt == sliceEfaceType {
+	switch vt {
+	case sliceEfaceType:
 		return &sliceEfaceDecoder{}
+	case sliceF64Type:
+		return &sliceF64Decoder{}
+	case sliceF32Type:
+		return &sliceF32Decoder{}
+	case sliceBoolType:
+		return &sliceBoolDecoder{}
 	}
 	switch et.Kind() {
 	case reflect.Int32:

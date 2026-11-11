@@ -25,14 +25,21 @@ import (
 )
 
 var (
-	pretouchImpl     = optdec.Pretouch
-	pretouchManyImpl = optdec.PretouchMany
+	pretouchImpl                 = optdec.Pretouch
+	pretouchManyImpl             = optdec.PretouchMany
 	decodeImpl                   = optdec.Decode
-	decodeSessionImpl            = optdec.DecodeWithSession
 	decodeStreamImpl             = optdec.DecodeStream
 	freeStreamSessionImpl        = optdec.FreeStreamSession
 	RegisterNoCopyRawMessageType = optdec.RegisterNoCopyRawMessageType
 )
+
+func decodeSessionImpl(s *string, i *int, f uint64, val interface{}, sessPtr **inputSession) error {
+	return optdec.DecodeWithSession(s, i, f, val, sessPtr)
+}
+
+func decodeOneImpl(s string, f uint64, val interface{}) (string, int, error) {
+	return optdec.DecodeOne(s, f, val)
+}
 
 func init() {
 	// ARM64 and native RISC-V share optdec and enable all its optimizations.

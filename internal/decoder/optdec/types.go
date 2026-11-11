@@ -51,6 +51,9 @@ var (
 	sliceI64Type            = reflect.TypeOf([]int64(nil))
 	sliceU32Type            = reflect.TypeOf([]uint32(nil))
 	sliceU64Type            = reflect.TypeOf([]uint64(nil))
+	sliceF32Type            = reflect.TypeOf([]float32(nil))
+	sliceF64Type            = reflect.TypeOf([]float64(nil))
+	sliceBoolType           = reflect.TypeOf([]bool(nil))
 	sliceStringType         = reflect.TypeOf([]string(nil))
 )
 
