@@ -81,3 +81,43 @@ func BenchmarkNativeScanStringMasks(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkNativeShortQuoteAndScan(b *testing.B) {
+	b.Run("QuoteShort10", func(b *testing.B) {
+		src := "created_at"
+		dst := make([]byte, 32)
+		b.SetBytes(int64(len(src)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			c, w := Quote(src, dst, 0)
+			if c != len(src) || w != len(src) {
+				b.Fatalf("quote=(%d,%d)", c, w)
+			}
+		}
+	})
+	b.Run("ScanShortKeyRelaxed", func(b *testing.B) {
+		src := `"id_str":1234567890,"text":"hello"}`
+		b.SetBytes(8)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			end, esc, _, err := ScanString(src, 0, false)
+			if end != 8 || esc != -1 || err != 0 {
+				b.Fatalf("scan=(%d,%d,%v)", end, esc, err)
+			}
+		}
+	})
+	b.Run("ScanShortKeyStrict", func(b *testing.B) {
+		src := `"id_str":1234567890,"text":"hello"}`
+		b.SetBytes(8)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			end, esc, _, err := ScanString(src, 0, true)
+			if end != 8 || esc != -1 || err != 0 {
+				b.Fatalf("scan=(%d,%d,%v)", end, esc, err)
+			}
+		}
+	})
+}

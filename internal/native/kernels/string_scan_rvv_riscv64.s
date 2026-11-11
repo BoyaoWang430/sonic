@@ -22,6 +22,47 @@ TEXT ·scanStringRelaxed(SB), NOSPLIT, $0-48
 	MOV	$92, X17
 	MOV	$32, X18
 	MOV	$0, X19                 // relaxed-mode odd backslash carry
+	BEQZ	X11, eof
+	MOV	$8, X5
+	BLTU	X11, X5, relaxed_short_tail
+	MOV	0(X10), X5
+	MOV	$0x2222222222222222, X6
+	XOR	X5, X6, X6
+	ORCB	X6, X6
+	MOV	$0x5c5c5c5c5c5c5c5c, X7
+	XOR	X5, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	XOR	$-1, X6, X6
+	BNEZ	X6, relaxed_word0_event
+	ADD	$8, X10
+	MOV	$8, X13
+	SUB	$8, X11
+	JMP	scan
+relaxed_word0_event:
+	CTZ	X6, X20
+	SRL	X20, X5, X7
+	AND	$0xff, X7
+	BNE	X7, X16, scan
+	SRL	$3, X20, X5
+	ADD	$1, X5
+	MOV	$-1, X6
+	MOV	$0, X7
+	JMP	done
+relaxed_short_tail:
+	MOVBU	0(X10), X7
+	BEQ	X7, X16, relaxed_short_quote
+	BEQ	X7, X17, scan
+	ADD	$1, X10
+	ADD	$1, X13
+	SUB	$1, X11
+	BNEZ	X11, relaxed_short_tail
+	JMP	eof
+relaxed_short_quote:
+	ADD	$1, X13, X5
+	MOV	$-1, X6
+	MOV	$0, X7
+	JMP	done
 
 scan:
 	BEQZ	X11, eof
@@ -210,6 +251,62 @@ TEXT ·scanStringStrict(SB), NOSPLIT, $0-48
 	MOV	$92, X17
 	MOV	$32, X18
 	MOV	$0, X19                 // relaxed-mode odd backslash carry
+	BEQZ	X11, eof
+	MOV	$8, X5
+	BLTU	X11, X5, strict_short_tail
+	MOV	0(X10), X5
+	MOV	$0x2222222222222222, X6
+	XOR	X5, X6, X6
+	ORCB	X6, X6
+	MOV	$0x5c5c5c5c5c5c5c5c, X7
+	XOR	X5, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0xe0e0e0e0e0e0e0e0, X7
+	AND	X5, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	XOR	$-1, X6, X6
+	BNEZ	X6, strict_word0_event
+	ADD	$8, X10
+	MOV	$8, X13
+	SUB	$8, X11
+	JMP	scan
+strict_word0_event:
+	CTZ	X6, X20
+	SRL	X20, X5, X7
+	AND	$0xff, X7
+	BEQ	X7, X17, scan
+	SRL	$3, X20, X5
+	BLTU	X7, X18, strict_word0_invalid
+	ADD	$1, X5
+	MOV	$-1, X6
+	MOV	$0, X7
+	JMP	done
+strict_word0_invalid:
+	MOV	X5, X6
+	MOV	$2, X7
+	JMP	done
+strict_short_tail:
+	MOVBU	0(X10), X7
+	BLTU	X7, X18, strict_short_invalid
+	BEQ	X7, X16, strict_short_quote
+	BEQ	X7, X17, scan
+	ADD	$1, X10
+	ADD	$1, X13
+	SUB	$1, X11
+	BNEZ	X11, strict_short_tail
+	JMP	eof
+strict_short_quote:
+	ADD	$1, X13, X5
+	MOV	$-1, X6
+	MOV	$0, X7
+	JMP	done
+strict_short_invalid:
+	MOV	X13, X5
+	MOV	X13, X6
+	MOV	$2, X7
+	JMP	done
 
 scan:
 	BEQZ	X11, eof

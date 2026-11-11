@@ -24,6 +24,8 @@ scan:
 	BLEU	X11, X13, bounded
 	MOV	X13, X20
 bounded:
+	MOV	$16, X5
+	BLTU	X20, X5, short_bounded
 	// Both the load and any plain-byte store fit their logical ranges.
 	VSETVLI	X20, E8, M4, TA, MA, X5
 	VLE8V	(X10), V8
@@ -41,6 +43,64 @@ bounded:
 	SUB	X5, X13
 	JMP	scan
 
+short_bounded:
+	MOV	$8, X5
+	BLTU	X20, X5, short_byte_loop
+	MOV	0(X10), X21
+	MOV	$0x2222222222222222, X6
+	XOR	X21, X6, X6
+	ORCB	X6, X6
+	MOV	$0x5c5c5c5c5c5c5c5c, X7
+	XOR	X21, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0xe0e0e0e0e0e0e0e0, X7
+	AND	X21, X7, X7
+	ORCB	X7, X7
+	AND	X7, X6
+	MOV	$0x8080808080808080, X7
+	ANDN	X6, X7, X6
+	BNEZ	X6, short_word_special
+	MOV	X21, 0(X12)
+	ADD	$8, X10
+	SUB	$8, X11
+	ADD	$8, X12
+	SUB	$8, X13
+	SUB	$8, X20
+	BNEZ	X20, short_byte_loop
+	BEQZ	X11, success
+	JMP	exhausted
+
+short_word_special:
+	CTZ	X6, X6
+	SRL	$3, X6
+	BEQZ	X6, classify
+short_word_prefix:
+	MOVBU	0(X10), X7
+	MOVB	X7, 0(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$1, X12
+	SUB	$1, X13
+	SUB	$1, X6
+	BNEZ	X6, short_word_prefix
+	JMP	classify
+
+short_byte_loop:
+	MOVBU	0(X10), X7
+	BLTU	X7, X17, classify_loaded
+	BEQ	X7, X18, classify_loaded
+	BEQ	X7, X19, classify_loaded
+	MOVB	X7, 0(X12)
+	ADD	$1, X10
+	SUB	$1, X11
+	ADD	$1, X12
+	SUB	$1, X13
+	SUB	$1, X20
+	BNEZ	X20, short_byte_loop
+	BEQZ	X11, success
+	JMP	exhausted
+
 special:
 	BEQZ	X6, classify
 	// Store only the plain prefix; no output from the escape is committed yet.
@@ -52,6 +112,7 @@ special:
 	SUB	X5, X13
 classify:
 	MOVBU	0(X10), X7
+classify_loaded:
 	BGEU	X7, X17, quote_or_backslash
 	MOV	$9, X6
 	BEQ	X7, X6, tab
