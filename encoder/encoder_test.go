@@ -23,6 +23,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -631,4 +633,82 @@ func TestLongStructKeysAndDeepStack(t *testing.T) {
 	if string(gotDeep) != string(wantDeep) {
 		t.Fatalf("deep stack mismatch: len(got)=%d len(want)=%d", len(gotDeep), len(wantDeep))
 	}
+}
+
+func TestRootSizeHintShrinkAndConcurrent(t *testing.T) {
+	type payloadStruct struct {
+		ID   int64    `json:"id"`
+		Body string   `json:"body"`
+		Tags []string `json:"tags"`
+	}
+
+	large := payloadStruct{
+		ID:   1,
+		Body: strings.Repeat("x", 16384),
+		Tags: []string{"a", "b", "c"},
+	}
+	small := payloadStruct{
+		ID:   2,
+		Body: "tiny",
+		Tags: []string{"z"},
+	}
+
+	// 1. Prime sizeHint with a 16KB payload and verify subsequent large encode.
+	for i := 0; i < 3; i++ {
+		out, err := Encode(&large, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := json.Marshal(large)
+		if !bytes.Equal(out, want) {
+			t.Fatalf("large mismatch at iter %d", i)
+		}
+	}
+
+	// 2. Nil pointer and empty slice must not corrupt output or panic.
+	var nilPtr *payloadStruct
+	if out, err := Encode(nilPtr, 0); err != nil || string(out) != "null" {
+		t.Fatalf("nilPtr = %q, %v", out, err)
+	}
+	if out, err := Encode([]payloadStruct{}, 0); err != nil || string(out) != "[]" {
+		t.Fatalf("empty slice = %q, %v", out, err)
+	}
+
+	// 3. Regime shift to a tiny payload must shrink-copy so callers never retain >2x backing arrays.
+	outSmall, err := Encode(&small, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSmall, _ := json.Marshal(small)
+	if !bytes.Equal(outSmall, wantSmall) {
+		t.Fatalf("small mismatch: %s", outSmall)
+	}
+	if cap(outSmall) > 1024 {
+		t.Fatalf("expected shrunk backing slice, got len=%d cap=%d", len(outSmall), cap(outSmall))
+	}
+
+	// 4. Concurrent encodes across goroutines mixing sizes.
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if (id+i)%2 == 0 {
+					got, err := Encode(&large, 0)
+					if err != nil || len(got) < 16384 {
+						t.Errorf("concurrent large err=%v len=%d", err, len(got))
+						return
+					}
+				} else {
+					got, err := Encode(&small, 0)
+					if err != nil || !bytes.Equal(got, wantSmall) {
+						t.Errorf("concurrent small err=%v", err)
+						return
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }

@@ -20,7 +20,9 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
@@ -48,16 +50,33 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 	return Execute(buf, p, sb, fv, pp.(*ir.Program))
 }
 
+const (
+	minDirectRootHint = 512
+	maxDirectRootHint = 32 << 10
+)
+
 type rootEncPlan struct {
 	prog          *ir.Program
 	boxPool       *sync.Pool
 	pureSpecs     []ir.StructFieldSpec
 	denseSpecs    []ir.StructFieldSpec
 	elemSize      uintptr
+	sizeHint      atomic.Uint32
 	isDirectPtr   bool
 	hasPureSpecs  bool
 	hasDenseSpecs bool
 	isPureSlice   bool
+	allowSizeHint bool
+}
+
+func clampRootSizeHint(n int) uint32 {
+	if n <= 0 {
+		return 0
+	}
+	if n > maxDirectRootHint {
+		return maxDirectRootHint + 1
+	}
+	return uint32(n)
 }
 
 func growSliceBufAfterFirst(buf []byte, startOff int, n int) []byte {
@@ -258,6 +277,7 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			isDirectPtr:   isDirectPtr,
 			hasPureSpecs:  hasPureSpecs,
 			hasDenseSpecs: hasDenseSpecs,
+			allowSizeHint: vt.Kind() == reflect.Ptr && vt.Elem().Kind() == reflect.Struct,
 		}, nil
 	case reflect.Slice:
 		if pureSpecs, ok := extractPureSliceSpecs(prog); ok {
@@ -269,11 +289,13 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 				elemSize:      vt.Elem().Size(),
 				hasDenseSpecs: hasDenseSpecs,
 				isPureSlice:   true,
+				allowSizeHint: true,
 			}, nil
 		}
 		return &rootEncPlan{
-			prog:    prog,
-			boxPool: newValueBoxPool(vt),
+			prog:          prog,
+			boxPool:       newValueBoxPool(vt),
+			allowSizeHint: vt.Elem().Kind() == reflect.Struct,
 		}, nil
 	default:
 		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
@@ -289,6 +311,7 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			denseSpecs:    denseSpecs,
 			hasPureSpecs:  hasPureSpecs,
 			hasDenseSpecs: hasDenseSpecs,
+			allowSizeHint: vt.Kind() == reflect.Struct,
 		}, nil
 	}
 }
@@ -562,17 +585,25 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	// Values unpacked from an interface{} are not addressable at top level;
 	// pointer types will re-enable pv=true inside compilePtrBody after OP_deref.
 	fv &^= (1 << alg.BitPointerValue)
-	vt := rv.Type()
-	var plan *rootEncPlan
-	if cached := vars.GetRootPlan(vt); cached != nil {
-		plan = cached.(*rootEncPlan)
-	} else {
-		computed, err := vars.ComputeRootPlan(vt, buildRootEncPlan)
-		if err != nil {
-			return err
-		}
-		plan = computed.(*rootEncPlan)
+	plan, err := getOrBuildRootPlan(rv.Type())
+	if err != nil {
+		return err
 	}
+	return encodeWithRootPlan(buf, rv, plan, sb, fv)
+}
+
+func getOrBuildRootPlan(vt reflect.Type) (*rootEncPlan, error) {
+	if cached := vars.GetRootPlan(vt); cached != nil {
+		return cached.(*rootEncPlan), nil
+	}
+	computed, err := vars.ComputeRootPlan(vt, buildRootEncPlan)
+	if err != nil {
+		return nil, err
+	}
+	return computed.(*rootEncPlan), nil
+}
+
+func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *vars.Stack, fv uint64) error {
 	if plan.isPureSlice {
 		return encodePureStructSliceRoot(buf, rv, plan.elemSize, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
 	}
@@ -617,4 +648,108 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	elem.SetZero()
 	plan.boxPool.Put(box)
 	return err
+}
+
+// EncodeRoot encodes top-level struct and struct-slice values directly into a pre-sized output slice
+// once the schema's steady-state payload size (>=512B) has been observed, avoiding pooled buffer
+// contention and post-encode memcpy under multi-goroutine workloads.
+func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
+	switch val.(type) {
+	case nil, string, []byte, json.RawMessage, json.Number, bool,
+		int, int64, int32, int16, int8,
+		uint, uint64, uint32, uint16, uint8, uintptr,
+		float64, float32,
+		map[string]any, []any, []float64, []float32, []string, []int, []int64:
+		return nil, false, nil
+	}
+
+	rv := reflect.ValueOf(val)
+	if !rv.IsValid() {
+		return []byte{'n', 'u', 'l', 'l'}, true, nil
+	}
+	fv &^= (1 << alg.BitPointerValue)
+	plan, err := getOrBuildRootPlan(rv.Type())
+	if err != nil {
+		return nil, true, err
+	}
+
+	if plan.allowSizeHint {
+		if plan.isDirectPtr && rv.UnsafePointer() == nil {
+			return []byte{'n', 'u', 'l', 'l'}, true, nil
+		}
+		if plan.isPureSlice {
+			if rv.IsNil() {
+				if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
+					return []byte{'[', ']'}, true, nil
+				}
+				return []byte{'n', 'u', 'l', 'l'}, true, nil
+			}
+			if rv.Len() == 0 {
+				return []byte{'[', ']'}, true, nil
+			}
+		}
+
+		hint := int(plan.sizeHint.Load())
+		if hint >= minDirectRootHint && hint <= maxDirectRootHint {
+			capHint := hint + (hint >> 5) + 96
+			out := make([]byte, 0, capHint)
+			stk := vars.NewStack()
+			err := encodeWithRootPlan(&out, rv, plan, stk, fv)
+			if err != nil {
+				vars.ResetStack(stk)
+				vars.FreeStack(stk)
+				runtime.KeepAlive(val)
+				return nil, true, err
+			}
+			vars.FreeStack(stk)
+			runtime.KeepAlive(val)
+
+			if len(out) > capHint || len(out)*2 < hint {
+				plan.sizeHint.Store(clampRootSizeHint(len(out)))
+			}
+			if cap(out) > len(out)*2 && cap(out) > 1024 {
+				shrunk := make([]byte, len(out))
+				copy(shrunk, out)
+				return shrunk, true, nil
+			}
+			return out, true, nil
+		}
+	}
+
+	buf := vars.NewBytes()
+	origBuf := (*buf)[:0]
+	stk := vars.NewStack()
+	err = encodeWithRootPlan(buf, rv, plan, stk, fv)
+	if err != nil {
+		vars.ResetStack(stk)
+		vars.FreeStack(stk)
+		if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			*buf = origBuf
+		}
+		vars.FreeBytes(buf)
+		runtime.KeepAlive(val)
+		return nil, true, err
+	}
+	vars.FreeStack(stk)
+	runtime.KeepAlive(val)
+
+	if plan.allowSizeHint && len(*buf) >= minDirectRootHint {
+		plan.sizeHint.Store(clampRootSizeHint(len(*buf)))
+	}
+
+	var ret []byte
+	if rt.CanSizeResue(cap(*buf)) {
+		ret = make([]byte, len(*buf))
+		copy(ret, *buf)
+		vars.FreeBytes(buf)
+	} else {
+		ret = *buf
+		if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			*buf = origBuf
+			vars.FreeBytes(buf)
+		} else {
+			*buf = nil
+		}
+	}
+	return ret, true, nil
 }

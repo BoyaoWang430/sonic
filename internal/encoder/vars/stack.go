@@ -40,7 +40,7 @@ type MapKVEntry struct {
 
 const (
 	maxPooledMapKV = 4096
-	inlineStackCap = 64
+	inlineStackCap = 16
 )
 
 type Stack struct {
@@ -50,7 +50,7 @@ type Stack struct {
 	kvOrderSp int
 	sb        [inlineStackCap]State
 	sbExtra   []State
-	ptrSlots  [64]unsafe.Pointer
+	ptrSlots  [8]unsafe.Pointer
 	KVBuf     []MapKVEntry
 	KVOrder   []int
 	ValPtr    unsafe.Pointer

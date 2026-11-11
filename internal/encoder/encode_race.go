@@ -25,6 +25,8 @@ import (
 	"github.com/bytedance/sonic/internal/rt"
 )
 
+const raceEnabled = true
+
 func helpDetectDataRace(val interface{}) {
 	var out []byte
 	defer func() {
