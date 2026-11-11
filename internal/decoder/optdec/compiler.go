@@ -427,11 +427,26 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 		}
 	}
 
-	// Most common map, use a decoder, to avoid function calls
-	if vt == mapEfaceType {
+	// Exact unnamed built-in map fast paths (never match named map types).
+	switch vt {
+	case mapEfaceType:
 		return &mapEfaceDecoder{}
-	} else if vt == mapStringType {
+	case mapStringType:
 		return &mapStringDecoder{}
+	case mapStrIntType:
+		return &mapStrIntDecoder{}
+	case mapStrI64Type:
+		return &mapStrI64Decoder{}
+	case mapStrU64Type:
+		return &mapStrU64Decoder{}
+	case mapStrF64Type:
+		return &mapStrF64Decoder{}
+	case mapStrBoolType:
+		return &mapStrBoolDecoder{}
+	case mapIntStrType:
+		return &mapIntStrDecoder{}
+	case mapI64StrType:
+		return &mapI64StrDecoder{}
 	}
 
 	if kt.Kind() == reflect.String && kt != jsonNumberType {
@@ -440,6 +455,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			typ:       vt,
@@ -454,6 +470,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			freshElem: freshElem,
@@ -464,6 +481,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			freshElem: freshElem,
@@ -475,6 +493,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 				keyType:   kt,
 				elemType:  et,
 				zeroMap:   reflect.Zero(vt),
+				zeroKey:   reflect.Zero(kt),
 				zeroElem:  reflect.Zero(et),
 				elemDec:   c.compile(et),
 				freshElem: freshElem,
@@ -485,6 +504,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			freshElem: freshElem,
@@ -495,6 +515,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			freshElem: freshElem,
@@ -505,6 +526,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			freshElem: freshElem,
@@ -516,6 +538,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 				keyType:   kt,
 				elemType:  et,
 				zeroMap:   reflect.Zero(vt),
+				zeroKey:   reflect.Zero(kt),
 				zeroElem:  reflect.Zero(et),
 				elemDec:   c.compile(et),
 				freshElem: freshElem,
@@ -526,6 +549,7 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 			keyType:   kt,
 			elemType:  et,
 			zeroMap:   reflect.Zero(vt),
+			zeroKey:   reflect.Zero(kt),
 			zeroElem:  reflect.Zero(et),
 			elemDec:   c.compile(et),
 			freshElem: freshElem,

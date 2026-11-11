@@ -37,17 +37,54 @@ type MapIterState struct {
 	V unsafe.Pointer
 }
 
-type MapIterator struct {
-	It      MapIterState
-	ki      int
-	kvs     []_MapPair
-	anyVals []any
-	vals    reflect.Value
-	iter    reflect.MapIter
+type mapIterPooledSlots struct {
 	keySlot reflect.Value
 	valSlot [2]reflect.Value
-	slotIdx uint8
-	sorted  bool
+}
+
+type mapIterTypeInfo struct {
+	sliceType reflect.Type
+	zeroKey   reflect.Value
+	zeroVal   reflect.Value
+	canPool   bool
+	slotPool  sync.Pool
+}
+
+var mapIterTypeCache sync.Map // map[reflect.Type]*mapIterTypeInfo
+
+func getMapIterTypeInfo(vt reflect.Type) *mapIterTypeInfo {
+	if v, ok := mapIterTypeCache.Load(vt); ok {
+		return v.(*mapIterTypeInfo)
+	}
+	kt := vt.Key()
+	et := vt.Elem()
+	var st reflect.Type
+	if !(et.Kind() == reflect.Interface && et.NumMethod() == 0) {
+		st = reflect.SliceOf(et)
+	}
+	info := &mapIterTypeInfo{
+		sliceType: st,
+		zeroKey:   reflect.Zero(kt),
+		zeroVal:   reflect.Zero(et),
+		canPool:   !vars.TypeMayEscapeValueSlot(kt) && !vars.TypeMayEscapeValueSlot(et),
+	}
+	actual, _ := mapIterTypeCache.LoadOrStore(vt, info)
+	return actual.(*mapIterTypeInfo)
+}
+
+type MapIterator struct {
+	It          MapIterState
+	ki          int
+	kvs         []_MapPair
+	anyVals     []any
+	vals        reflect.Value
+	iter        reflect.MapIter
+	keySlot     reflect.Value
+	valSlot     [2]reflect.Value
+	pooledSlots *mapIterPooledSlots
+	typeInfo    *mapIterTypeInfo
+	slotIdx     uint8
+	sorted      bool
 	platformMapOrder
 }
 
@@ -69,6 +106,17 @@ func resetIterator(p *MapIterator) *MapIterator {
 	p.slotIdx = 0
 	p.sorted = false
 	p.iter.Reset(reflect.Value{})
+	if p.pooledSlots != nil && p.typeInfo != nil {
+		s := p.pooledSlots
+		s.keySlot.Set(p.typeInfo.zeroKey)
+		if s.valSlot[0].IsValid() {
+			s.valSlot[0].Set(p.typeInfo.zeroVal)
+			s.valSlot[1].Set(p.typeInfo.zeroVal)
+		}
+		p.typeInfo.slotPool.Put(s)
+	}
+	p.pooledSlots = nil
+	p.typeInfo = nil
 	p.keySlot = reflect.Value{}
 	p.valSlot[0] = reflect.Value{}
 	p.valSlot[1] = reflect.Value{}
@@ -220,6 +268,7 @@ func IteratorStartValue(mapVal reflect.Value, fv uint64) (*MapIterator, error) {
 	}
 
 	it := newIterator()
+	info := getMapIterTypeInfo(vt)
 	if (fv & (1 << BitSortMapKeys)) == 0 {
 		it.iter.Reset(mapVal)
 		if !it.iter.Next() {
@@ -228,9 +277,25 @@ func IteratorStartValue(mapVal reflect.Value, fv uint64) (*MapIterator, error) {
 		}
 		kt := vt.Key()
 		et := vt.Elem()
-		it.keySlot = reflect.New(kt).Elem()
-		it.valSlot[0] = reflect.New(et).Elem()
-		it.valSlot[1] = reflect.New(et).Elem()
+		if info.canPool {
+			var slots *mapIterPooledSlots
+			if v := info.slotPool.Get(); v != nil {
+				slots = v.(*mapIterPooledSlots)
+			} else {
+				slots = &mapIterPooledSlots{
+					keySlot: reflect.New(kt).Elem(),
+					valSlot: [2]reflect.Value{reflect.New(et).Elem(), reflect.New(et).Elem()},
+				}
+			}
+			it.pooledSlots = slots
+			it.typeInfo = info
+			it.keySlot = slots.keySlot
+			it.valSlot = slots.valSlot
+		} else {
+			it.keySlot = reflect.New(kt).Elem()
+			it.valSlot[0] = reflect.New(et).Elem()
+			it.valSlot[1] = reflect.New(et).Elem()
+		}
 		it.slotIdx = 0
 		it.sorted = false
 		it.keySlot.SetIterKey(&it.iter)
@@ -247,14 +312,30 @@ func IteratorStartValue(mapVal reflect.Value, fv uint64) (*MapIterator, error) {
 	it.iter.Reset(mapVal)
 	kt := vt.Key()
 	et := vt.Elem()
-	keySlot := reflect.New(kt).Elem()
+	var keySlot reflect.Value
+	if info.canPool {
+		var slots *mapIterPooledSlots
+		if v := info.slotPool.Get(); v != nil {
+			slots = v.(*mapIterPooledSlots)
+		} else {
+			slots = &mapIterPooledSlots{
+				keySlot: reflect.New(kt).Elem(),
+				valSlot: [2]reflect.Value{reflect.New(et).Elem(), reflect.New(et).Elem()},
+			}
+		}
+		it.pooledSlots = slots
+		it.typeInfo = info
+		keySlot = slots.keySlot
+	} else {
+		keySlot = reflect.New(kt).Elem()
+	}
 	it.kvs = ensurePairs(it.kvs, count)
 
 	useAnyVals := et.Kind() == reflect.Interface && et.NumMethod() == 0
 	if useAnyVals {
 		it.anyVals = ensureAnyVals(it.anyVals, count)
 	} else {
-		it.vals = reflect.MakeSlice(reflect.SliceOf(et), count, count)
+		it.vals = reflect.MakeSlice(info.sliceType, count, count)
 	}
 
 	i := 0
@@ -275,7 +356,7 @@ func IteratorStartValue(mapVal reflect.Value, fv uint64) (*MapIterator, error) {
 					it.kvs[j].v = unsafe.Pointer(&it.anyVals[j])
 				}
 			} else {
-				newVals := reflect.MakeSlice(reflect.SliceOf(et), i+1, newCap)
+				newVals := reflect.MakeSlice(info.sliceType, i+1, newCap)
 				reflect.Copy(newVals, it.vals)
 				it.vals = newVals
 				for j := 0; j < i; j++ {

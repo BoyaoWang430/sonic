@@ -4,10 +4,13 @@ import (
 	"encoding"
 	"math"
 	"reflect"
+	"sync"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/rt"
 )
+
+const is32BitInt = ^uint(0)>>63 == 0
 
 /** Decoder for most common map types: map[string]interface{}, map[string]string **/
 
@@ -35,15 +38,356 @@ func (d *mapStringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	return node.AsMapString(ctx, vp)
 }
 
+type mapStrIntDecoder struct{}
+
+func (d *mapStrIntDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]int)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapStrIntType)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]int, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsI64(ctx)
+		if !ok || (is32BitInt && (ret > math.MaxInt32 || ret < math.MinInt32)) {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, intType)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = 0
+			}
+			next = val.Next()
+		} else {
+			m[key] = int(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapStrI64Decoder struct{}
+
+func (d *mapStrI64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]int64)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapStrI64Type)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]int64, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsI64(ctx)
+		if !ok {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, int64Type)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = 0
+			}
+			next = val.Next()
+		} else {
+			m[key] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapStrU64Decoder struct{}
+
+func (d *mapStrU64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]uint64)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapStrU64Type)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]uint64, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsU64(ctx)
+		if !ok {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, uint64Type)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = 0
+			}
+			next = val.Next()
+		} else {
+			m[key] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapStrF64Decoder struct{}
+
+func (d *mapStrF64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]float64)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapStrF64Type)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]float64, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsF64(ctx)
+		if !ok {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, float64Type)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = 0
+			}
+			next = val.Next()
+		} else {
+			m[key] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapStrBoolDecoder struct{}
+
+func (d *mapStrBoolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]bool)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapStrBoolType)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]bool, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsBool()
+		if !ok {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, boolType)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = false
+			}
+			next = val.Next()
+		} else {
+			m[key] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapIntStrDecoder struct{}
+
+func (d *mapIntStrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[int]string)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapIntStrType)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[int]string, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		k, ok := knode.ParseI64(ctx)
+		if !ok || (is32BitInt && (k > math.MaxInt32 || k < math.MinInt32)) {
+			if gerr == nil {
+				gerr = error_mismatch(knode, ctx, mapIntStrType)
+			}
+			val := NewNode(PtrOffset(next, 1))
+			next = val.Next()
+			continue
+		}
+		key := int(k)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsStr(ctx)
+		if !ok {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, stringType)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = ""
+			}
+			next = val.Next()
+		} else {
+			m[key] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapI64StrDecoder struct{}
+
+func (d *mapI64StrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[int64]string)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapI64StrType)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[int64]string, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, ok := knode.ParseI64(ctx)
+		if !ok {
+			if gerr == nil {
+				gerr = error_mismatch(knode, ctx, mapI64StrType)
+			}
+			val := NewNode(PtrOffset(next, 1))
+			next = val.Next()
+			continue
+		}
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsStr(ctx)
+		if !ok {
+			if !val.IsNull() && gerr == nil {
+				gerr = error_mismatch(val, ctx, stringType)
+			}
+			if _, exists := m[key]; !exists {
+				m[key] = ""
+			}
+			next = val.Next()
+		} else {
+			m[key] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapReflectSlots struct {
+	kv reflect.Value
+	ev reflect.Value
+	ep unsafe.Pointer
+}
+
+func acquireMapSlots(pool *sync.Pool, keyType, elemType reflect.Type, freshElem bool) (kv, ev reflect.Value, ep unsafe.Pointer, pooled *mapReflectSlots) {
+	if !freshElem {
+		if v := pool.Get(); v != nil {
+			s := v.(*mapReflectSlots)
+			return s.kv, s.ev, s.ep, s
+		}
+		evVal := reflect.New(elemType).Elem()
+		s := &mapReflectSlots{
+			kv: reflect.New(keyType).Elem(),
+			ev: evVal,
+			ep: evVal.Addr().UnsafePointer(),
+		}
+		return s.kv, s.ev, s.ep, s
+	}
+	return reflect.New(keyType).Elem(), reflect.Value{}, nil, nil
+}
+
+func releaseMapSlots(pool *sync.Pool, pooled *mapReflectSlots, zeroKey, zeroElem reflect.Value) {
+	if pooled != nil {
+		pooled.kv.Set(zeroKey)
+		pooled.ev.Set(zeroElem)
+		pool.Put(pooled)
+	}
+}
+
 func decodeMapEntry(mv, kv, ev, zeroElem reflect.Value, ep unsafe.Pointer, elemType reflect.Type, freshElem bool, elemDec decFunc, valn Node, ctx *context) error {
 	if freshElem {
 		ev = reflect.New(elemType).Elem()
 		ep = ev.Addr().UnsafePointer()
+		if mv.Len() > 0 {
+			if existing := mv.MapIndex(kv); existing.IsValid() {
+				ev.Set(existing)
+			}
+		}
+	} else if mv.Len() > 0 {
 		if existing := mv.MapIndex(kv); existing.IsValid() {
 			ev.Set(existing)
+		} else {
+			ev.Set(zeroElem)
 		}
-	} else if existing := mv.MapIndex(kv); existing.IsValid() {
-		ev.Set(existing)
 	} else {
 		ev.Set(zeroElem)
 	}
@@ -59,10 +403,12 @@ type mapStrKeyDecoder struct {
 	keyType   reflect.Type
 	elemType  reflect.Type
 	zeroMap   reflect.Value
+	zeroKey   reflect.Value
 	zeroElem  reflect.Value
 	elemDec   decFunc
 	typ       reflect.Type
 	freshElem bool
+	slotPool  sync.Pool
 }
 
 func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -90,13 +436,7 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	kv := reflect.New(d.keyType).Elem()
-	var ev reflect.Value
-	var ep unsafe.Pointer
-	if !d.freshElem {
-		ev = reflect.New(d.elemType).Elem()
-		ep = ev.Addr().UnsafePointer()
-	}
+	kv, ev, ep, pooled := acquireMapSlots(&d.slotPool, d.keyType, d.elemType, d.freshElem)
 
 	var gerr error
 	next := obj.Children()
@@ -113,6 +453,7 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		next = valn.Next()
 	}
 
+	releaseMapSlots(&d.slotPool, pooled, d.zeroKey, d.zeroElem)
 	if wasNil {
 		rv.Set(mv)
 	}
@@ -126,9 +467,11 @@ type mapI32KeyDecoder struct {
 	keyType   reflect.Type
 	elemType  reflect.Type
 	zeroMap   reflect.Value
+	zeroKey   reflect.Value
 	zeroElem  reflect.Value
 	elemDec   decFunc
 	freshElem bool
+	slotPool  sync.Pool
 }
 
 func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -156,13 +499,7 @@ func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	kv := reflect.New(d.keyType).Elem()
-	var ev reflect.Value
-	var ep unsafe.Pointer
-	if !d.freshElem {
-		ev = reflect.New(d.elemType).Elem()
-		ep = ev.Addr().UnsafePointer()
-	}
+	kv, ev, ep, pooled := acquireMapSlots(&d.slotPool, d.keyType, d.elemType, d.freshElem)
 
 	next := obj.Children()
 	var gerr error
@@ -188,6 +525,7 @@ func (d *mapI32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		next = valn.Next()
 	}
 
+	releaseMapSlots(&d.slotPool, pooled, d.zeroKey, d.zeroElem)
 	if wasNil {
 		rv.Set(mv)
 	}
@@ -199,9 +537,11 @@ type mapI64KeyDecoder struct {
 	keyType   reflect.Type
 	elemType  reflect.Type
 	zeroMap   reflect.Value
+	zeroKey   reflect.Value
 	zeroElem  reflect.Value
 	elemDec   decFunc
 	freshElem bool
+	slotPool  sync.Pool
 }
 
 func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -229,13 +569,7 @@ func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	kv := reflect.New(d.keyType).Elem()
-	var ev reflect.Value
-	var ep unsafe.Pointer
-	if !d.freshElem {
-		ev = reflect.New(d.elemType).Elem()
-		ep = ev.Addr().UnsafePointer()
-	}
+	kv, ev, ep, pooled := acquireMapSlots(&d.slotPool, d.keyType, d.elemType, d.freshElem)
 
 	var gerr error
 	next := obj.Children()
@@ -261,6 +595,7 @@ func (d *mapI64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		next = valn.Next()
 	}
 
+	releaseMapSlots(&d.slotPool, pooled, d.zeroKey, d.zeroElem)
 	if wasNil {
 		rv.Set(mv)
 	}
@@ -274,9 +609,11 @@ type mapU32KeyDecoder struct {
 	keyType   reflect.Type
 	elemType  reflect.Type
 	zeroMap   reflect.Value
+	zeroKey   reflect.Value
 	zeroElem  reflect.Value
 	elemDec   decFunc
 	freshElem bool
+	slotPool  sync.Pool
 }
 
 func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -304,13 +641,7 @@ func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	kv := reflect.New(d.keyType).Elem()
-	var ev reflect.Value
-	var ep unsafe.Pointer
-	if !d.freshElem {
-		ev = reflect.New(d.elemType).Elem()
-		ep = ev.Addr().UnsafePointer()
-	}
+	kv, ev, ep, pooled := acquireMapSlots(&d.slotPool, d.keyType, d.elemType, d.freshElem)
 
 	var gerr error
 	next := obj.Children()
@@ -335,6 +666,7 @@ func (d *mapU32KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		next = valn.Next()
 	}
 
+	releaseMapSlots(&d.slotPool, pooled, d.zeroKey, d.zeroElem)
 	if wasNil {
 		rv.Set(mv)
 	}
@@ -346,9 +678,11 @@ type mapU64KeyDecoder struct {
 	keyType   reflect.Type
 	elemType  reflect.Type
 	zeroMap   reflect.Value
+	zeroKey   reflect.Value
 	zeroElem  reflect.Value
 	elemDec   decFunc
 	freshElem bool
+	slotPool  sync.Pool
 }
 
 func (d *mapU64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -376,13 +710,7 @@ func (d *mapU64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	kv := reflect.New(d.keyType).Elem()
-	var ev reflect.Value
-	var ep unsafe.Pointer
-	if !d.freshElem {
-		ev = reflect.New(d.elemType).Elem()
-		ep = ev.Addr().UnsafePointer()
-	}
+	kv, ev, ep, pooled := acquireMapSlots(&d.slotPool, d.keyType, d.elemType, d.freshElem)
 
 	var gerr error
 	next := obj.Children()
@@ -407,6 +735,7 @@ func (d *mapU64KeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		next = valn.Next()
 	}
 
+	releaseMapSlots(&d.slotPool, pooled, d.zeroKey, d.zeroElem)
 	if wasNil {
 		rv.Set(mv)
 	}

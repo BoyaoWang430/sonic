@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic/ast"
@@ -1127,4 +1128,236 @@ func TestStepD2StringArenaAndUnmarshalBytesSafety(t *testing.T) {
 			t.Fatalf("stream doc %d slab overwritten by later decode: %+v", i, d)
 		}
 	}
+}
+
+type customStructMap map[string]pureLeafSpecItem
+
+type stepD4MapHolder struct {
+	SS      map[string]string            `json:"ss"`
+	SI      map[string]int               `json:"si"`
+	SI64    map[string]int64             `json:"si64"`
+	SU64    map[string]uint64            `json:"su64"`
+	SF64    map[string]float64           `json:"sf64"`
+	SB      map[string]bool              `json:"sb"`
+	IS      map[int]string               `json:"is"`
+	I64S    map[int64]string             `json:"i64s"`
+	NamedSI customStringIntMap           `json:"named_si"`
+	NamedSt customStructMap              `json:"named_st"`
+	U64St   map[uint64]pureLeafSpecItem  `json:"u64_st"`
+}
+
+func TestStepD4BuiltinAndPooledMaps(t *testing.T) {
+	sample := stepD4MapHolder{
+		SS:      map[string]string{"z": "last", "a<b": "x&y", "m": "mid"},
+		SI:      map[string]int{"k2": -42, "k1": 0, "k3": 999},
+		SI64:    map[string]int64{"min": math.MinInt64, "max": math.MaxInt64, "zero": 0},
+		SU64:    map[string]uint64{"max": math.MaxUint64, "one": 1, "zero": 0},
+		SF64:    map[string]float64{"pi": 3.1415926535, "neg": -0.5, "z": 0},
+		SB:      map[string]bool{"t": true, "f": false},
+		IS:      map[int]string{-10: "neg10", -2: "neg2", 1: "one", 10: "ten", 2: "two"},
+		I64S:    map[int64]string{-100: "a", -20: "b", 3: "c", 30: "d", 4: "e"},
+		NamedSI: customStringIntMap{"b": 2, "a": 1},
+		NamedSt: customStructMap{"s2": {Opt: "two", ID: 2}, "s1": {ID: 1}},
+		U64St:   map[uint64]pureLeafSpecItem{10: {Opt: "ten", ID: 10}, 2: {ID: 2}},
+	}
+
+	// 1. Exact byte-for-byte parity with encoding/json under ConfigStd (sorted keys + HTML escape).
+	wantStd, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotStd, err := ConfigStd.Marshal(sample)
+	if err != nil {
+		t.Fatalf("ConfigStd.Marshal failed: %v", err)
+	}
+	if !bytes.Equal(gotStd, wantStd) {
+		t.Fatalf("ConfigStd.Marshal map mismatch:\ngot:  %s\nwant: %s", gotStd, wantStd)
+	}
+
+	// 2. Round-trip under ConfigDefault and ConfigStd.
+	for _, cfg := range []API{ConfigDefault, ConfigStd} {
+		raw, err := cfg.Marshal(&sample)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		var decoded stepD4MapHolder
+		if err := cfg.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if !reflect.DeepEqual(decoded, sample) {
+			t.Fatalf("round-trip mismatch:\ngot:  %+v\nwant: %+v", decoded, sample)
+		}
+	}
+
+	// 3. Pre-populated map + JSON null values: UseSonicJSON preserves existing map entry (MAP-VALUE-REPLACE),
+	// whereas SONIC_BACKEND=stdlib replaces with zero value.
+	rawNulls := `{"si":{"keep":null,"new":null},"si64":{"keep":null,"new":null},"su64":{"keep":null,"new":null},"sf64":{"keep":null,"new":null},"sb":{"keep":null,"new":null},"is":{"1":null,"2":null},"i64s":{"1":null,"2":null},"named_si":{"keep":null,"new":null}}`
+	seed := func() stepD4MapHolder {
+		return stepD4MapHolder{
+			SI:      map[string]int{"keep": 7},
+			SI64:    map[string]int64{"keep": -7},
+			SU64:    map[string]uint64{"keep": 7},
+			SF64:    map[string]float64{"keep": 7.5},
+			SB:      map[string]bool{"keep": true},
+			IS:      map[int]string{1: "kept"},
+			I64S:    map[int64]string{1: "kept64"},
+			NamedSI: customStringIntMap{"keep": 9},
+		}
+	}
+	gotNulls := seed()
+	if err := ConfigStd.UnmarshalFromString(rawNulls, &gotNulls); err != nil {
+		t.Fatalf("ConfigStd.UnmarshalFromString nulls failed: %v", err)
+	}
+	if APIKind == UseSonicJSON {
+		wantSonic := stepD4MapHolder{
+			SI:      map[string]int{"keep": 7, "new": 0},
+			SI64:    map[string]int64{"keep": -7, "new": 0},
+			SU64:    map[string]uint64{"keep": 7, "new": 0},
+			SF64:    map[string]float64{"keep": 7.5, "new": 0},
+			SB:      map[string]bool{"keep": true, "new": false},
+			IS:      map[int]string{1: "kept", 2: ""},
+			I64S:    map[int64]string{1: "kept64", 2: ""},
+			NamedSI: customStringIntMap{"keep": 9, "new": 0},
+		}
+		if !reflect.DeepEqual(gotNulls, wantSonic) {
+			t.Fatalf("pre-populated null map Sonic merge mismatch:\ngot:  %+v\nwant: %+v", gotNulls, wantSonic)
+		}
+	} else {
+		wantStd := seed()
+		if err := json.Unmarshal([]byte(rawNulls), &wantStd); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotNulls, wantStd) {
+			t.Fatalf("pre-populated null map stdlib mismatch:\ngot:  %+v\nwant: %+v", gotNulls, wantStd)
+		}
+	}
+
+	// 4. NaN/Inf handling on map[string]float64.
+	nanHolder := stepD4MapHolder{SF64: map[string]float64{"a": 1.0, "bad": math.NaN()}}
+	if _, err := ConfigDefault.Marshal(nanHolder); err == nil {
+		t.Fatalf("expected error on NaN in map[string]float64")
+	}
+	if _, err := ConfigStd.Marshal(nanHolder); err == nil {
+		t.Fatalf("expected error on NaN in sorted map[string]float64")
+	}
+	if APIKind == UseSonicJSON {
+		cfgNullNan := Config{EncodeNullForInfOrNan: true, SortMapKeys: true}.Froze()
+		b, err := cfgNullNan.Marshal(map[string]float64{"b": math.Inf(1), "a": 1.5})
+		if err != nil || string(b) != `{"a":1.5,"b":null}` {
+			t.Fatalf("EncodeNullForInfOrNan map[string]float64 = %s, err=%v", b, err)
+		}
+	}
+
+	// 5. Concurrent -race stress test for pooled reflection map slots (encoder + decoder).
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for iter := 0; iter < 40; iter++ {
+				local := stepD4MapHolder{
+					NamedSI: customStringIntMap{"a": id*100 + iter, "b": iter},
+					NamedSt: customStructMap{
+						"x": {Opt: fmt.Sprintf("g%d-%d", id, iter), ID: int64(iter)},
+						"y": {Opt: "const", ID: int64(id)},
+					},
+					U64St: map[uint64]pureLeafSpecItem{
+						1: {Opt: "one", ID: int64(id)},
+						2: {Opt: "two", ID: int64(iter)},
+					},
+				}
+				bDef, err := ConfigDefault.Marshal(&local)
+				if err != nil {
+					t.Errorf("Marshal default failed: %v", err)
+					return
+				}
+				bStd, err := ConfigStd.Marshal(&local)
+				if err != nil {
+					t.Errorf("Marshal std failed: %v", err)
+					return
+				}
+				var outDef, outStd stepD4MapHolder
+				if err := ConfigDefault.Unmarshal(bDef, &outDef); err != nil {
+					t.Errorf("Unmarshal default failed: %v", err)
+					return
+				}
+				if err := ConfigStd.Unmarshal(bStd, &outStd); err != nil {
+					t.Errorf("Unmarshal std failed: %v", err)
+					return
+				}
+				if !reflect.DeepEqual(outDef, local) || !reflect.DeepEqual(outStd, local) {
+					t.Errorf("concurrent map round-trip mismatch")
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+}
+
+type benchD4Payload struct {
+	StrStr  map[string]string           `json:"str_str"`
+	StrI64  map[string]int64            `json:"str_i64"`
+	I64Str  map[int64]string            `json:"i64_str"`
+	NamedSt customStructMap             `json:"named_st"`
+}
+
+func makeBenchD4Payload() benchD4Payload {
+	p := benchD4Payload{
+		StrStr:  make(map[string]string, 16),
+		StrI64:  make(map[string]int64, 16),
+		I64Str:  make(map[int64]string, 16),
+		NamedSt: make(customStructMap, 16),
+	}
+	for i := 0; i < 16; i++ {
+		k := fmt.Sprintf("metric_key_%02d", i)
+		p.StrStr[k] = fmt.Sprintf("val_%02d_ok", i)
+		p.StrI64[k] = int64(i*1000 - 500)
+		p.I64Str[int64(1000+i)] = fmt.Sprintf("tag_%02d", i)
+		p.NamedSt[k] = pureLeafSpecItem{Opt: fmt.Sprintf("opt_%02d", i), ID: int64(i)}
+	}
+	return p
+}
+
+func BenchmarkStepD4Maps(b *testing.B) {
+	payload := makeBenchD4Payload()
+	rawBytes, err := ConfigStd.Marshal(&payload)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("Default/Marshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := ConfigDefault.Marshal(&payload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Std/Marshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := ConfigStd.Marshal(&payload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Default/Unmarshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var out benchD4Payload
+			if err := ConfigDefault.Unmarshal(rawBytes, &out); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Std/Unmarshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var out benchD4Payload
+			if err := ConfigStd.Unmarshal(rawBytes, &out); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

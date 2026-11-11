@@ -3,6 +3,8 @@ package vm
 import (
 	"encoding/json"
 	"math"
+	"reflect"
+	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/encoder/vars"
@@ -197,4 +199,350 @@ func encodeAnyValue(b *[]byte, val any, s *vars.Stack, flags uint64) error {
 	default:
 		return EncodeValue(b, val, s, flags&^uint64(1<<alg.BitPointerValue))
 	}
+}
+
+func sortStrKeys[V any](m map[string]V, s *vars.Stack) (baseKV int, baseOrd int, count int) {
+	n := len(m)
+	baseKV, baseOrd = s.ReserveMapKV(n)
+	kvSlice := s.KVBuf[baseKV : baseKV+n]
+	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+	for k := range m {
+		if count < len(kvSlice) {
+			kvSlice[count] = vars.MapKVEntry{K: k}
+			ordSlice[count] = count
+		} else {
+			s.GrowMapKVOne(k, nil, count)
+			kvSlice = s.KVBuf[baseKV:]
+			ordSlice = s.KVOrder[baseOrd:]
+		}
+		count++
+	}
+	if count == 0 {
+		s.ReleaseMapKV(baseKV, n, baseOrd)
+		return 0, 0, 0
+	}
+	if count < n {
+		kvSlice, ordSlice = s.TrimMapKV(baseKV, baseOrd, count)
+	}
+	alg.SortMapKVOrder(ordSlice, kvSlice)
+	return baseKV, baseOrd, count
+}
+
+func encodeStringStringMap(b *[]byte, m map[string]string, s *vars.Stack, flags uint64) {
+	sanitize := flags & alg.SanitizeMask
+	if flags&(1<<alg.BitSortMapKeys) != 0 {
+		if len(m) <= 1 {
+			first := true
+			for k, v := range m {
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, k, sanitize)
+				*b = alg.QuoteFlags(*b, v, false, sanitize)
+			}
+			return
+		}
+		baseKV, baseOrd, count := sortStrKeys(m, s)
+		if count == 0 {
+			return
+		}
+		first := true
+		for idx := 0; idx < count; idx++ {
+			k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
+			v, ok := m[k]
+			if !ok {
+				continue
+			}
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKeyFlags(*b, k, sanitize)
+			*b = alg.QuoteFlags(*b, v, false, sanitize)
+		}
+		s.ReleaseMapKV(baseKV, count, baseOrd)
+		return
+	}
+	first := true
+	if sanitize == 0 {
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKey(*b, k)
+			*b = alg.Quote(*b, v, false)
+		}
+		return
+	}
+	for k, v := range m {
+		if !first {
+			*b = append(*b, ',')
+		}
+		first = false
+		*b = alg.QuoteKeyFlags(*b, k, sanitize)
+		*b = alg.QuoteFlags(*b, v, false, sanitize)
+	}
+}
+
+//go:noinline
+func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flags uint64) error {
+	sanitize := flags & alg.SanitizeMask
+	sorted := flags&(1<<alg.BitSortMapKeys) != 0
+	switch kind {
+	case vars.MapBuiltinStrStr:
+		encodeStringStringMap(b, *(*map[string]string)(p), s, flags)
+		return nil
+	case vars.MapBuiltinStrInt:
+		m := *(*map[string]int)(p)
+		if sorted && len(m) > 1 {
+			baseKV, baseOrd, count := sortStrKeys(m, s)
+			if count == 0 {
+				return nil
+			}
+			first := true
+			for idx := 0; idx < count; idx++ {
+				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
+				v, ok := m[k]
+				if !ok {
+					continue
+				}
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, k, sanitize)
+				*b = alg.I64toa(*b, int64(v))
+			}
+			s.ReleaseMapKV(baseKV, count, baseOrd)
+			return nil
+		}
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKeyFlags(*b, k, sanitize)
+			*b = alg.I64toa(*b, int64(v))
+		}
+		return nil
+	case vars.MapBuiltinStrI64:
+		m := *(*map[string]int64)(p)
+		if sorted && len(m) > 1 {
+			baseKV, baseOrd, count := sortStrKeys(m, s)
+			if count == 0 {
+				return nil
+			}
+			first := true
+			for idx := 0; idx < count; idx++ {
+				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
+				v, ok := m[k]
+				if !ok {
+					continue
+				}
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, k, sanitize)
+				*b = alg.I64toa(*b, v)
+			}
+			s.ReleaseMapKV(baseKV, count, baseOrd)
+			return nil
+		}
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKeyFlags(*b, k, sanitize)
+			*b = alg.I64toa(*b, v)
+		}
+		return nil
+	case vars.MapBuiltinStrU64:
+		m := *(*map[string]uint64)(p)
+		if sorted && len(m) > 1 {
+			baseKV, baseOrd, count := sortStrKeys(m, s)
+			if count == 0 {
+				return nil
+			}
+			first := true
+			for idx := 0; idx < count; idx++ {
+				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
+				v, ok := m[k]
+				if !ok {
+					continue
+				}
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, k, sanitize)
+				*b = alg.U64toa(*b, v)
+			}
+			s.ReleaseMapKV(baseKV, count, baseOrd)
+			return nil
+		}
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKeyFlags(*b, k, sanitize)
+			*b = alg.U64toa(*b, v)
+		}
+		return nil
+	case vars.MapBuiltinStrF64:
+		m := *(*map[string]float64)(p)
+		nullInfNan := flags&(1<<alg.BitEncodeNullForInfOrNan) != 0
+		if sorted && len(m) > 1 {
+			baseKV, baseOrd, count := sortStrKeys(m, s)
+			if count == 0 {
+				return nil
+			}
+			first := true
+			for idx := 0; idx < count; idx++ {
+				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
+				v, ok := m[k]
+				if !ok {
+					continue
+				}
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, k, sanitize)
+				if math.IsNaN(v) || math.IsInf(v, 0) {
+					if !nullInfNan {
+						s.ReleaseMapKV(baseKV, count, baseOrd)
+						return vars.ERR_nan_or_infinite
+					}
+					*b = append(*b, 'n', 'u', 'l', 'l')
+				} else {
+					*b = alg.F64toa(*b, v)
+				}
+			}
+			s.ReleaseMapKV(baseKV, count, baseOrd)
+			return nil
+		}
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKeyFlags(*b, k, sanitize)
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				if !nullInfNan {
+					return vars.ERR_nan_or_infinite
+				}
+				*b = append(*b, 'n', 'u', 'l', 'l')
+			} else {
+				*b = alg.F64toa(*b, v)
+			}
+		}
+		return nil
+	case vars.MapBuiltinStrBool:
+		m := *(*map[string]bool)(p)
+		if sorted && len(m) > 1 {
+			baseKV, baseOrd, count := sortStrKeys(m, s)
+			if count == 0 {
+				return nil
+			}
+			first := true
+			for idx := 0; idx < count; idx++ {
+				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
+				v, ok := m[k]
+				if !ok {
+					continue
+				}
+				if !first {
+					*b = append(*b, ',')
+				}
+				first = false
+				*b = alg.QuoteKeyFlags(*b, k, sanitize)
+				if v {
+					*b = append(*b, 't', 'r', 'u', 'e')
+				} else {
+					*b = append(*b, 'f', 'a', 'l', 's', 'e')
+				}
+			}
+			s.ReleaseMapKV(baseKV, count, baseOrd)
+			return nil
+		}
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = alg.QuoteKeyFlags(*b, k, sanitize)
+			if v {
+				*b = append(*b, 't', 'r', 'u', 'e')
+			} else {
+				*b = append(*b, 'f', 'a', 'l', 's', 'e')
+			}
+		}
+		return nil
+	case vars.MapBuiltinIntStr:
+		if sorted {
+			return encodeSortedStringElemMapViaIter(b, vars.IntStringMapType, p, flags, sanitize)
+		}
+		m := *(*map[int]string)(p)
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = append(*b, '"')
+			*b = alg.I64toa(*b, int64(k))
+			*b = append(*b, '"', ':')
+			*b = alg.QuoteFlags(*b, v, false, sanitize)
+		}
+		return nil
+	case vars.MapBuiltinI64Str:
+		if sorted {
+			return encodeSortedStringElemMapViaIter(b, vars.Int64StringMapType, p, flags, sanitize)
+		}
+		m := *(*map[int64]string)(p)
+		first := true
+		for k, v := range m {
+			if !first {
+				*b = append(*b, ',')
+			}
+			first = false
+			*b = append(*b, '"')
+			*b = alg.I64toa(*b, k)
+			*b = append(*b, '"', ':')
+			*b = alg.QuoteFlags(*b, v, false, sanitize)
+		}
+		return nil
+	}
+	return nil
+}
+
+func encodeSortedStringElemMapViaIter(b *[]byte, vt reflect.Type, p unsafe.Pointer, flags uint64, sanitize uint64) error {
+	it, err := alg.IteratorStart(vt, p, flags)
+	if err != nil {
+		return err
+	}
+	first := true
+	for it.It.K != nil {
+		if !first {
+			*b = append(*b, ',')
+		}
+		first = false
+		k := *(*string)(it.It.K)
+		v := *(*string)(it.It.V)
+		*b = alg.QuoteKeyFlags(*b, k, sanitize)
+		*b = alg.QuoteFlags(*b, v, false, sanitize)
+		alg.IteratorNext(it)
+	}
+	alg.IteratorStop(it)
+	return nil
 }

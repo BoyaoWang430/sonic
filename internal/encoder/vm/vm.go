@@ -307,14 +307,20 @@ func ExecuteRange(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog
 			}
 			buf = *b
 		case ir.OP_is_zero_map:
-			if reflect.NewAt(ins.Vr(), p).Elem().Len() == 0 {
+			if isEmptyMap(p, ins.Vr()) {
 				pc = ins.Vi()
 				continue
 			}
 		case ir.OP_map_string_any:
 			*b = buf
-			if err := encodeStringAnyMap(b, *(*map[string]any)(p), s, flags); err != nil {
-				return err
+			if kind := ins.Vi(); kind == vars.MapBuiltinStrAny {
+				if err := encodeStringAnyMap(b, *(*map[string]any)(p), s, flags); err != nil {
+					return err
+				}
+			} else {
+				if err := encodeBuiltinMap(b, p, kind, s, flags); err != nil {
+					return err
+				}
 			}
 			buf = *b
 		case ir.OP_map_iter:
@@ -494,6 +500,22 @@ func is_nil(p unsafe.Pointer, vt reflect.Type) bool {
 		return *(*any)(p) == nil
 	case vars.StringAnyMapType:
 		return *(*map[string]any)(p) == nil
+	case vars.StringStringMapType:
+		return *(*map[string]string)(p) == nil
+	case vars.StringIntMapType:
+		return *(*map[string]int)(p) == nil
+	case vars.StringInt64MapType:
+		return *(*map[string]int64)(p) == nil
+	case vars.StringUint64MapType:
+		return *(*map[string]uint64)(p) == nil
+	case vars.StringFloat64MapType:
+		return *(*map[string]float64)(p) == nil
+	case vars.StringBoolMapType:
+		return *(*map[string]bool)(p) == nil
+	case vars.IntStringMapType:
+		return *(*map[int]string)(p) == nil
+	case vars.Int64StringMapType:
+		return *(*map[int64]string)(p) == nil
 	case vars.ByteSliceType:
 		return *(*[]byte)(p) == nil
 	case vars.StringSliceType:
@@ -510,6 +532,31 @@ func is_nil(p unsafe.Pointer, vt reflect.Type) bool {
 		return *(*[]any)(p) == nil
 	default:
 		return reflect.NewAt(vt, p).Elem().IsNil()
+	}
+}
+
+func isEmptyMap(p unsafe.Pointer, vt reflect.Type) bool {
+	switch vt {
+	case vars.StringAnyMapType:
+		return len(*(*map[string]any)(p)) == 0
+	case vars.StringStringMapType:
+		return len(*(*map[string]string)(p)) == 0
+	case vars.StringIntMapType:
+		return len(*(*map[string]int)(p)) == 0
+	case vars.StringInt64MapType:
+		return len(*(*map[string]int64)(p)) == 0
+	case vars.StringUint64MapType:
+		return len(*(*map[string]uint64)(p)) == 0
+	case vars.StringFloat64MapType:
+		return len(*(*map[string]float64)(p)) == 0
+	case vars.StringBoolMapType:
+		return len(*(*map[string]bool)(p)) == 0
+	case vars.IntStringMapType:
+		return len(*(*map[int]string)(p)) == 0
+	case vars.Int64StringMapType:
+		return len(*(*map[int64]string)(p)) == 0
+	default:
+		return reflect.NewAt(vt, p).Elem().Len() == 0
 	}
 }
 

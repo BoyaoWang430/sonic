@@ -346,13 +346,15 @@ func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
 	e := p.PC()
 	p.Rtt(ir.OP_is_zero_map, vt)
 	p.Add(ir.OP_save)
-	if self.useVM && vt == vars.StringAnyMapType {
-		p.Add(ir.OP_save)
-		p.Add(ir.OP_map_string_any)
-		p.Add(ir.OP_drop_2)
-		p.Pin(e)
-		p.Int(ir.OP_byte, '}')
-		return
+	if self.useVM {
+		if kind, ok := vars.BuiltinMapKind(vt); ok {
+			p.Add(ir.OP_save)
+			p.Int(ir.OP_map_string_any, kind)
+			p.Add(ir.OP_drop_2)
+			p.Pin(e)
+			p.Int(ir.OP_byte, '}')
+			return
+		}
 	}
 	p.Rtt(ir.OP_map_iter, vt)
 	p.Add(ir.OP_save)

@@ -9,6 +9,7 @@ import (
 )
 
 type plainGenericMap map[string]any
+type namedIntGenericMap map[string]int
 
 func TestGenericMapCompilation(t *testing.T) {
 	previous := vars.UseVM
@@ -20,8 +21,17 @@ func TestGenericMapCompilation(t *testing.T) {
 			fast  bool
 		}{
 			{map[string]any{}, true},
-			{map[string]int{}, false},
+			{map[string]string{}, true},
+			{map[string]int{}, true},
+			{map[string]int64{}, true},
+			{map[string]uint64{}, true},
+			{map[string]float64{}, true},
+			{map[string]bool{}, true},
+			{map[int]string{}, true},
+			{map[int64]string{}, true},
 			{plainGenericMap{}, false},
+			{namedIntGenericMap{}, false},
+			{map[string]struct{}{}, false},
 		} {
 			typ := reflect.TypeOf(tc.value)
 			p, err := NewCompiler().Compile(typ, false)
