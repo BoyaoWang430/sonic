@@ -119,6 +119,59 @@ func (self *Node) encodeInterface(buf *[]byte) error {
 }
 
 func (self *Parser) skipFast() (int, types.ParsingError) {
+	s := self.s
+	p := self.p
+	n := len(s)
+	if uint(p) < uint(n) && s[p] == ' ' && p+1 < n && s[p+1] > ' ' {
+		p++
+	}
+	if uint(p) < uint(n) {
+		switch s[p] {
+		case '"':
+			limit := p + 1 + 16
+			if limit > n {
+				limit = n
+			}
+			for i := p + 1; i < limit; i++ {
+				b := s[i]
+				if b == '"' {
+					self.p = i + 1
+					return p, 0
+				}
+				if b == '\\' {
+					break
+				}
+			}
+		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			limit := p + 1 + 16
+			if limit > n {
+				limit = n
+			}
+			i := p + 1
+			for i < limit {
+				b := s[i]
+				if b == ',' || b == '}' || b == ']' || b == ' ' || b == '\n' || b == '\r' || b == '\t' {
+					self.p = i
+					return p, 0
+				}
+				i++
+			}
+			if i == n {
+				self.p = n
+				return p, 0
+			}
+		case 't', 'n':
+			if n-p >= 4 {
+				self.p = p + 4
+				return p, 0
+			}
+		case 'f':
+			if n-p >= 5 {
+				self.p = p + 5
+				return p, 0
+			}
+		}
+	}
 	start := native.SkipOneFast(&self.s, &self.p)
 	if start < 0 {
 		return self.p, types.ParsingError(-start)

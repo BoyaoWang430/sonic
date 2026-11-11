@@ -136,8 +136,61 @@ func getByPath(src string, pos int, path []interface{}, m *types.StateMachine, v
 	}
 	// Only strings and whitespace can reuse the path's string classifications.
 	// Other targets enter their validator without an extra token probe.
-	if len(path) != 0 && uint(pos) < uint(len(src)) && (src[pos] == '"' || src[pos] <= ' ') {
-		return block.validateTarget(src, pos, m)
+	if len(path) != 0 && uint(pos) < uint(len(src)) {
+		c := src[pos]
+		if c == '"' || c <= ' ' {
+			return block.validateTarget(src, pos, m)
+		}
+		if m == nil {
+			switch c {
+			case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+				p := pos + 1
+				limit := p + 18
+				if limit > len(src) {
+					limit = len(src)
+				}
+				for p < limit && src[p]-'0' <= 9 {
+					p++
+				}
+				if p == len(src) {
+					return pos, p
+				}
+				if p < len(src) {
+					switch src[p] {
+					case ',', '}', ']', ' ', '\n', '\r', '\t':
+						return pos, p
+					}
+				}
+			case '0':
+				if pos+1 == len(src) {
+					return pos, pos + 1
+				}
+				switch src[pos+1] {
+				case ',', '}', ']', ' ', '\n', '\r', '\t':
+					return pos, pos + 1
+				}
+			case 't':
+				if len(src)-pos >= 4 && src[pos+1:pos+4] == "rue" {
+					return pos, pos + 4
+				}
+			case 'n':
+				if len(src)-pos >= 4 && src[pos+1:pos+4] == "ull" {
+					return pos, pos + 4
+				}
+			case 'f':
+				if len(src)-pos >= 5 && src[pos+1:pos+5] == "alse" {
+					return pos, pos + 5
+				}
+			case '{':
+				if end := tokenObject(src, pos+1, 1); end >= 0 {
+					return pos, end
+				}
+			case '[':
+				if end := tokenArray(src, pos+1, 1); end >= 0 {
+					return pos, end
+				}
+			}
+		}
 	}
 	p := pos
 	ret := SkipOne(&src, &p, m, 0)

@@ -741,6 +741,44 @@ func (self *Node) Cap() (int, error) {
 //
 // If self is V_NONE or V_NULL, it becomes V_OBJECT and sets the node at the key.
 func (self *Node) Set(key string, node Node) (bool, error) {
+	if self != nil && self.m == nil && self.t == (types.V_OBJECT|_V_RAW) {
+		if node.t == V_ERROR {
+			return false, node
+		}
+		raw := self.toString()
+		if len(raw) >= 2 && raw[0] == '{' {
+			if raw[1] == '}' {
+				lp := new(linkedPairs)
+				lp.head[0] = Pair{Key: key, Value: node}
+				lp.size = 1
+				*self = Node{t: types.V_OBJECT, l: 1, p: unsafe.Pointer(lp)}
+				return false, nil
+			}
+			if raw[1] == '"' {
+				st := new(parseObjectStack)
+				st.parser.s = raw
+				st.parser.p = 1
+				self.t = _V_OBJECT_LAZY
+				self.l = 0
+				self.p = unsafe.Pointer(st)
+				p, _ := self.skipKeyLazy(key, 0)
+				if !p.Exists() {
+					if self.len() == 0 {
+						*self = newObject(new(linkedPairs))
+					}
+					s := (*linkedPairs)(self.p)
+					s.Push(NewPair(key, node))
+					self.l++
+					return false, nil
+				} else if p.t == V_ERROR {
+					return false, &Node{t: p.t, l: p.l, p: p.p, m: p.m}
+				}
+				*p = node
+				return true, nil
+			}
+		}
+	}
+
 	if err := self.checkRaw(); err != nil {
 		return false, err
 	}
@@ -1665,17 +1703,135 @@ func (self *Node) skipKey(key string) (*Node, int) {
 		return nil, -1
 	}
 
-	// lazy load
-	for last, i := self.skipNextPair(), nb; last != nil; last, i = self.skipNextPair(), i+1 {
-		if last.Value.Check() != nil {
+	return self.skipKeyLazy(key, nb)
+}
+
+func (self *Node) skipKeyLazy(key string, i int) (*Node, int) {
+	parser, stack := self.getParserAndObjectStack()
+	ret := &stack.v
+	s := parser.s
+	p := parser.p
+	ns := len(s)
+outer:
+	for {
+		if uint(p) < uint(ns) && s[p] == '"' {
+			kStart := p + 1
+			limit := kStart + 16
+			if limit > ns {
+				limit = ns
+			}
+			kp := kStart
+			for kp < limit {
+				c := s[kp]
+				if c == '"' {
+					if kp+1 < ns && s[kp+1] == ':' {
+						vp := kp + 2
+						if vp < ns && s[vp] == ' ' && vp+1 < ns && s[vp+1] > ' ' {
+							vp++
+						}
+						if vp < ns {
+							vStart := vp
+							vc := s[vp]
+							vEnd := -1
+							var vt types.ValueType
+							switch vc {
+							case '"':
+								vt = types.V_STRING
+								vlim := vp + 1 + 16
+								if vlim > ns {
+									vlim = ns
+								}
+								for vi := vp + 1; vi < vlim; vi++ {
+									b := s[vi]
+									if b == '"' {
+										vEnd = vi + 1
+										break
+									}
+									if b == '\\' {
+										break
+									}
+								}
+							case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
+								vt = _V_NUMBER
+								vlim := vp + 1 + 16
+								if vlim > ns {
+									vlim = ns
+								}
+								vi := vp + 1
+								for vi < vlim {
+									b := s[vi]
+									if b == ',' || b == '}' || b == ']' || b == ' ' || b == '\n' || b == '\r' || b == '\t' {
+										vEnd = vi
+										break
+									}
+									vi++
+								}
+							case 't':
+								if ns-vp >= 4 {
+									vt = types.V_TRUE
+									vEnd = vp + 4
+								}
+							case 'f':
+								if ns-vp >= 5 {
+									vt = types.V_FALSE
+									vEnd = vp + 5
+								}
+							case 'n':
+								if ns-vp >= 4 {
+									vt = types.V_NULL
+									vEnd = vp + 4
+								}
+							}
+							if vEnd >= 0 && vEnd < ns {
+								sep := s[vEnd]
+								if sep == ',' || sep == '}' {
+									pairKey := s[kStart:kp]
+									val := newRawNode(s[vStart:vEnd], vt, false)
+									ret.push(pairKey, val)
+									self.l++
+									p = vEnd + 1
+									parser.p = p
+									if sep == '}' {
+										self.setObject(ret)
+										if pairKey == key {
+											return &ret.At(ret.size - 1).Value, i
+										}
+										return nil, -1
+									}
+									if pairKey == key {
+										return &ret.At(ret.size - 1).Value, i
+									}
+									i++
+									continue outer
+								}
+							}
+						}
+					}
+					break
+				}
+				if c == '\\' {
+					break
+				}
+				kp++
+			}
+		}
+		parser.p = p
+		last := self.skipNextPair()
+		if last == nil {
+			return nil, -1
+		}
+		if last.Value.t == V_ERROR {
 			return &last.Value, -1
 		}
 		if last.Key == key {
 			return &last.Value, i
 		}
+		if !self.isLazy() {
+			return nil, -1
+		}
+		p = parser.p
+		i++
 	}
-
-	return nil, -1
 }
 
 func (self *Node) skipIndex(index int) *Node {

@@ -3,6 +3,7 @@
 package native
 
 import (
+	"encoding/binary"
 	"math/bits"
 	"unsafe"
 
@@ -138,9 +139,43 @@ func (b *pathBlock) validateTargetAtDepth(src string, origPos int, m *types.Stat
 }
 
 func (b *pathBlock) matchKey(src string, begin int, key string) (int, bool, types.ParsingError) {
-	// Establish a short plain key's boundary and equality in one pass,
-	// including mismatches. Quotes and backslashes still need the scanner.
-	if len(key) <= 16 && len(src)-begin > len(key) && src[begin+len(key)] == '"' {
+	// Single-word SWAR fast path: handles every plain key of length 0..7
+	// (both matched and mismatched!) without function calls or slice compares on length mismatch.
+	if len(src)-begin >= 8 {
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(unsafe.Pointer(rt.StringData(src)), begin))[:])
+		q := x ^ ('"' * tokenByteOnes)
+		quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
+		if quotes != 0 {
+			s := x ^ ('\\' * tokenByteOnes)
+			slashes := (s - tokenByteOnes) &^ s & tokenByteHighBits
+			qtz := bits.TrailingZeros64(quotes)
+			if slashes == 0 || qtz < bits.TrailingZeros64(slashes) {
+				k := qtz >> 3
+				if k != len(key) {
+					return begin + k + 1, false, 0
+				}
+				return begin + k + 1, src[begin:begin+k] == key, 0
+			}
+		} else if len(src)-begin >= 16 {
+			s0 := x ^ ('\\' * tokenByteOnes)
+			if ((s0 - tokenByteOnes) &^ s0 & tokenByteHighBits) == 0 {
+				x1 := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(unsafe.Pointer(rt.StringData(src)), begin+8))[:])
+				q1 := x1 ^ ('"' * tokenByteOnes)
+				if quotes1 := (q1 - tokenByteOnes) &^ q1 & tokenByteHighBits; quotes1 != 0 {
+					s1 := x1 ^ ('\\' * tokenByteOnes)
+					slashes1 := (s1 - tokenByteOnes) &^ s1 & tokenByteHighBits
+					qtz1 := bits.TrailingZeros64(quotes1)
+					if slashes1 == 0 || qtz1 < bits.TrailingZeros64(slashes1) {
+						k := 8 + (qtz1 >> 3)
+						if k != len(key) {
+							return begin + k + 1, false, 0
+						}
+						return begin + k + 1, src[begin:begin+k] == key, 0
+					}
+				}
+			}
+		}
+	} else if len(key) <= 16 && len(src)-begin > len(key) && src[begin+len(key)] == '"' {
 		var diff byte
 		for i := 0; i < len(key); i++ {
 			c := src[begin+i]
@@ -191,6 +226,17 @@ func (b *pathBlock) skipValue(src string, pos int) (end, ret int) {
 		return end, start
 	case '"':
 		if pos < b.base || pos >= b.end {
+			if len(src)-pos >= 8 {
+				p := unsafe.Add(unsafe.Pointer(rt.StringData(src)), pos)
+				x := binary.LittleEndian.Uint64((*[8]byte)(p)[:])
+				q := x ^ ('"' * tokenByteOnes)
+				quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
+				s := x ^ ('\\' * tokenByteOnes)
+				slashes := (s - tokenByteOnes) &^ s & tokenByteHighBits
+				if quotes != 0 && (slashes == 0 || bits.TrailingZeros64(quotes) < bits.TrailingZeros64(slashes)) {
+					return pos + (bits.TrailingZeros64(quotes) >> 3) + 1, start
+				}
+			}
 			end, _, err := b.stringTail(src, pos)
 			if err != 0 {
 				return end, -int(err)
@@ -221,7 +267,23 @@ func (b *pathBlock) skipValue(src string, pos int) (end, ret int) {
 			}
 			pos = b.end
 		}
-		return pathNumberTail(src, pos), start
+		limit := len(src)
+		if pos+12 < limit {
+			limit = pos + 12
+		}
+		for pos < limit {
+			c := src[pos]
+			if c == ',' || c == ']' || c == '}' || c <= ' ' {
+				if c == ',' || c == ']' || c == '}' || utils.IsSpace(c) {
+					return pos, start
+				}
+			}
+			pos++
+		}
+		if pos == len(src) {
+			return pos, start
+		}
+		return kernels.SkipNumber(src, pos), start
 	case 'n', 't', 'f':
 		width := 4
 		if ch == 'f' {

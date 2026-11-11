@@ -175,26 +175,35 @@ func tokenObject(src string, pos, depth int) int {
 		if src[pos] != '"' {
 			return -1
 		}
-		if pos+3 < len(src) {
-			c0 := src[pos+1]
-			if c0 != '"' && c0 != '\\' {
-				if src[pos+2] == '"' && src[pos+3] == ':' {
-					pos += 4
-					goto afterColon
-				}
-				if pos+4 < len(src) {
-					c1 := src[pos+2]
-					if c1 != '"' && c1 != '\\' && src[pos+3] == '"' && src[pos+4] == ':' {
-						pos += 5
+		{
+			limit := pos + 1 + 16
+			if limit > len(src) {
+				limit = len(src)
+			}
+			for p := pos + 1; p < limit; p++ {
+				c := src[p]
+				if c == '"' {
+					if p+1 < len(src) && src[p+1] == ':' {
+						pos = p + 2
 						goto afterColon
 					}
+					pos = p + 1
+					goto expectColon
+				}
+				if c == '\\' {
+					pos = tokenString(src, p)
+					if pos < 0 {
+						return -1
+					}
+					goto expectColon
 				}
 			}
+			pos = tokenString(src, limit)
+			if pos < 0 {
+				return -1
+			}
 		}
-		pos = tokenString(src, pos+1)
-		if pos < 0 {
-			return -1
-		}
+	expectColon:
 		if uint(pos) >= uint(len(src)) || src[pos] != ':' {
 			pos = tokenSpace(src, pos)
 			if pos < 0 || src[pos] != ':' {
@@ -215,7 +224,23 @@ func tokenObject(src string, pos, depth int) int {
 		}
 		switch src[pos] {
 		case '"':
-			pos = tokenString(src, pos+1)
+			limit := pos + 1 + 16
+			if limit > len(src) {
+				limit = len(src)
+			}
+			p := pos + 1
+			for p < limit {
+				c := src[p]
+				if c == '"' {
+					pos = p + 1
+					goto afterObjVal
+				}
+				if c == '\\' {
+					break
+				}
+				p++
+			}
+			pos = tokenString(src, p)
 		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			p := pos + 1
 			limit := p + 18

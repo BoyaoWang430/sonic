@@ -38,11 +38,16 @@ func validateOneState(s *string, p *int, m *types.StateMachine, flags uint64) in
 }
 
 func validateOneStateAtDepth(s *string, p *int, m *types.StateMachine, flags uint64, baseDepth int) int {
-	if m == nil {
-		m = types.NewStateMachine()
-		defer types.FreeStateMachine(m)
+	var localVt [64]int
+	var pooled *types.StateMachine
+	var vt []int
+	maxDepth := types.MAX_RECURSE - baseDepth
+	if m != nil {
+		maxDepth = len(m.Vt) - baseDepth
+		vt = m.Vt[:maxDepth]
+	} else {
+		vt = localVt[:]
 	}
-	maxDepth := len(m.Vt) - baseDepth
 	// Container frames survive between values. The key/colon/value phase is
 	// temporary, so keep it separate instead of pushing and popping a stack
 	// slot for each token. A return publishes the same logical grammar stack,
@@ -179,7 +184,7 @@ firstArrayReady:
 	if ch == ']' {
 		depth--
 		if depth > 0 {
-			state = m.Vt[depth-1]
+			state = vt[depth-1]
 		}
 		goto afterValue
 	}
@@ -200,7 +205,7 @@ firstObjectReady:
 	if ch == '}' {
 		depth--
 		if depth > 0 {
-			state = m.Vt[depth-1]
+			state = vt[depth-1]
 		}
 		goto afterValue
 	}
@@ -305,7 +310,12 @@ value:
 				goto finish
 			}
 			if depth > 0 {
-				m.Vt[depth-1] = state
+				if depth-1 >= len(vt) {
+					pooled = types.NewStateMachine()
+					copy(pooled.Vt[:len(vt)], vt)
+					vt = pooled.Vt[:maxDepth]
+				}
+				vt[depth-1] = state
 			}
 			depth++
 			if ch == '[' {
@@ -352,7 +362,7 @@ containerReady:
 		if ch == ']' {
 			depth--
 			if depth > 0 {
-				state = m.Vt[depth-1]
+				state = vt[depth-1]
 			}
 			goto afterValue
 		}
@@ -370,7 +380,7 @@ containerReady:
 	if ch == '}' {
 		depth--
 		if depth > 0 {
-			state = m.Vt[depth-1]
+			state = vt[depth-1]
 		}
 		goto afterValue
 	}
@@ -390,13 +400,17 @@ eof:
 	result = -int(types.ERR_EOF)
 
 finish:
-	if depth > 0 {
-		m.Vt[depth-1] = state
-	}
-	m.Sp = depth
-	if pending >= 0 && m.Sp < len(m.Vt) {
-		m.Vt[m.Sp] = pending
-		m.Sp++
+	if m != nil {
+		if depth > 0 {
+			m.Vt[depth-1] = state
+		}
+		m.Sp = depth
+		if pending >= 0 && m.Sp < len(m.Vt) {
+			m.Vt[m.Sp] = pending
+			m.Sp++
+		}
+	} else if pooled != nil {
+		types.FreeStateMachine(pooled)
 	}
 	*p = pos
 	return result
