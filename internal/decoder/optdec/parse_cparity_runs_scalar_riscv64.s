@@ -36,13 +36,9 @@
 #define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
 
 // Match C's reservation of one spare node after every scalar/key write:
-// X15 is the next-but-one node and X16 the end of the node buffer.
+// X16 loads nodesLast (last spare-safe node) cached at 16(X2).
 #define RUNS_CAPACITY \
-	MOV nodesBase+24(FP), X16; \
-	MOV WB_CAP(X9), X15; \
-	SLL $4, X15; \
-	ADD X15, X16, X16; \
-	ADD $16, X22, X15
+	MOV 16(X2), X16
 
 // These constants survive the entire parser invocation; cold Go returns
 // reinitialize them on the next entry.
@@ -52,7 +48,7 @@
 
 // The assembly handles contiguous scalar/key runs. Go owns container entry,
 // closure, allocation, Unicode decoding and cold numeric/literal handling.
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $24-40
 	NO_LOCAL_POINTERS
 	MOV p+0(FP), X9
 	MOV state+8(FP), X18
@@ -63,6 +59,11 @@ TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
 	MOV Parser_end(X9), X25
 	ADD X24, X25, X25
 	MOV nodesBase+24(FP), X11
+	MOV WB_CAP(X9), X15
+	ADD $-1, X15
+	SLL $4, X15
+	ADD X11, X15, X15
+	MOV X15, 16(X2)
 	MOV WB_LEN(X9), X22
 	SLL $4, X22
 	ADD X11, X22, X22
@@ -128,7 +129,7 @@ runs_key_escape_saved:
 	MOV X12, 8(X22)
 	ADD $16, X22
 	RUNS_CAPACITY
-	BLEU X15, X16, runs_object_value
+	BLEU X22, X16, runs_object_value
 	MOV $1, X11
 	MOVB X11, WB_ISKEY(X9)
 	JMP runs_error_capacity
@@ -181,7 +182,7 @@ runs_value_object:
 	ADD $1, X14
 	MOV X14, WB_DEPTH(X9)
 	RUNS_CAPACITY
-	BGTU X15, X16, runs_error_capacity
+	BGTU X22, X16, runs_error_capacity
 	JMP runs_open_object
 runs_value_array:
 	SLL $32, X26, X11
@@ -199,7 +200,7 @@ runs_value_array:
 	ADD $1, X14
 	MOV X14, WB_DEPTH(X9)
 	RUNS_CAPACITY
-	BGTU X15, X16, runs_error_capacity
+	BGTU X22, X16, runs_error_capacity
 	JMP runs_open_array
 runs_open_object:
 	CALL runs_space<>(SB)
@@ -355,7 +356,7 @@ runs_literal_yield:
 runs_after_scalar:
 	BNEZ X10, runs_done
 	RUNS_CAPACITY
-	BLTU X16, X15, runs_error_capacity
+	BLTU X16, X22, runs_error_capacity
 	BEQZ X28, runs_ok
 	CALL runs_space<>(SB)
 	MOV $const_cParityRunsContextObject, X19

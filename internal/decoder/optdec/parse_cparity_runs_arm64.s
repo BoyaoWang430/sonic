@@ -5,9 +5,10 @@
 #include "go_asm.h"
 
 // Private register convention for cParityParseRunsAsm and its static helpers.
-// R12 whitespace cache; R16 token position; R17 root/object/array/key context.
+// R12 whitespace cache; R13 nodesBase; R14 nodesLast (last spare-safe node);
+// R16 token position; R17 root/object/array/key context.
 // R19 Parser; R20 continuation; R21 options; R22 input; R23 tape; R24 parent;
-// R25 input start; R26 input end. Helpers update R22 and preserve R12, R16/R17,
+// R25 input start; R26 input end. Helpers update R22 and preserve R12-R14, R16/R17,
 // R19-R21 and R23-R26. They are stackless leaves using only private registers;
 // Go calls only the outer parser. R18/R28/R29 are reserved, R27 is scratch.
 #define WB_LEN (Parser_nbuf+nodeBuf_nlen)
@@ -27,11 +28,7 @@
 
 // Match C's reservation of one spare node after every scalar/key write.
 #define RUNS_CAPACITY \
-	MOVD nodesBase+24(FP), R5; \
-	MOVD WB_CAP(R19), R6; \
-	ADD R6<<4, R5, R6; \
-	ADD $16, R23, R5; \
-	CMP R6, R5
+	CMP R14, R23
 
 // These constants survive the entire parser invocation. Helpers and the core
 // preserve V20/V21/V22/V25/V29/V30/V31; cold Go returns reinitialize them.
@@ -117,14 +114,17 @@ TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
 	ADD R25, R22, R22
 	MOVD Parser_end(R19), R26
 	ADD R25, R26, R26
-	MOVD nodesBase+24(FP), R1
+	MOVD nodesBase+24(FP), R13
+	MOVD WB_CAP(R19), R14
+	SUB $1, R14, R14
+	ADD R14<<4, R13, R14
 	MOVD WB_LEN(R19), R23
-	ADD R23<<4, R1, R23
+	ADD R23<<4, R13, R23
 	MOVD $const_KNull, R24
 	MOVD WB_PARENT(R19), R0
 	CMN $1, R0
 	BEQ runs_parent_loaded
-	ADD R0<<4, R1, R24
+	ADD R0<<4, R13, R24
 runs_parent_loaded:
 	RUNS_SCAN_INIT
 	MOVD cParityRunsState_phase(R20), R0
@@ -222,8 +222,7 @@ runs_value_object:
 	ORR R16<<32, R1, R1
 	MOVD WB_PARENT(R19), R2
 	STP (R1, R2), (R23)
-	MOVD nodesBase+24(FP), R3
-	SUB R3, R23, R3
+	SUB R13, R23, R3
 	LSR $4, R3
 	MOVD R3, WB_PARENT(R19)
 	MOVD R23, R24
@@ -239,8 +238,7 @@ runs_value_array:
 	ORR R16<<32, R1, R1
 	MOVD WB_PARENT(R19), R2
 	STP (R1, R2), (R23)
-	MOVD nodesBase+24(FP), R3
-	SUB R3, R23, R3
+	SUB R13, R23, R3
 	LSR $4, R3
 	MOVD R3, WB_PARENT(R19)
 	MOVD R23, R24
@@ -478,8 +476,7 @@ runs_close_depth_ok:
 	ADD R5, R7, R5
 	TST $0xfff, R5
 	BEQ runs_close_yield
-	MOVD nodesBase+24(FP), R1
-	ADD R2<<4, R1, R24
+	ADD R2<<4, R13, R24
 	JMP runs_parent_continue
 runs_close_yield:
 	MOVD $const_cParityRunsCloseContainer, R0
@@ -517,8 +514,7 @@ runs_yield:
 runs_done:
 	SUB R25, R22, R22
 	MOVD R22, Parser_pos(R19)
-	MOVD nodesBase+24(FP), R1
-	SUB R1, R23, R23
+	SUB R13, R23, R23
 	LSR $4, R23, R23
 	MOVD R23, WB_LEN(R19)
 	MOVD R0, event+32(FP)

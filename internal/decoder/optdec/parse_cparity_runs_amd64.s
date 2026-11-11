@@ -9,12 +9,15 @@
 // R13: state (*cParityRunsState)
 // SI:  cur (Parser_cur(p) input cursor)
 // BP:  ncur (WB_CUR(p) tape cursor)
-// Stack frame of cParityParseRunsAsm ($48-24):
+// Stack frame of cParityParseRunsAsm ($64-40):
 //   0(SP): saved BP
 //   8(SP): saved key string length
 //  16(SP): parent node pointer
 //  24(SP): pos (active token position)
 //  32(SP): context (cParityRunsContext*)
+//  40(SP): scratch for runs_number<>
+//  48(SP): rawBase
+//  56(SP): nodesLast (last spare-safe node)
 // Persistent SIMD registers (256-bit YMM, never touching Y15/X15 or R14):
 //  Y11: broadcast 0x1f (control char threshold)
 //  Y12: cParityRunsSpaceTables<> (VPSHUFB whitespace LUT)
@@ -39,12 +42,7 @@
 #define NBK_BITS (Parser__nbk+cParityNonspaceBlock_bits)
 
 #define RUNS_CAPACITY \
-	MOVQ nodesBase+24(FP), AX; \
-	MOVQ WB_CAP(R12), CX; \
-	SHLQ $4, CX; \
-	ADDQ AX, CX; \
-	LEAQ 16(BP), AX; \
-	CMPQ AX, CX
+	CMPQ BP, 56(SP)
 
 #define RUNS_SCAN_INIT \
 	CMPB ·hasAVX2(SB), $0; \
@@ -62,7 +60,7 @@ runs_scan_init_sse: \
 runs_scan_init_done:
 
 // func cParityParseRunsAsm(p *Parser, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $56-40
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $64-40
 	NO_LOCAL_POINTERS
 	MOVQ BP, 0(SP)
 	MOVQ p+0(FP), R12
@@ -71,6 +69,11 @@ TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $56-40
 	MOVQ SI, 48(SP)
 	ADDQ Parser_pos(R12), SI
 	MOVQ nodesBase+24(FP), AX
+	MOVQ WB_CAP(R12), CX
+	DECQ CX
+	SHLQ $4, CX
+	ADDQ AX, CX
+	MOVQ CX, 56(SP)
 	MOVQ WB_LEN(R12), BP
 	SHLQ $4, BP
 	ADDQ AX, BP
