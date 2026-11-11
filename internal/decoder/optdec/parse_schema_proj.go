@@ -93,7 +93,7 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		return false, false
 	}
 	oldOpts := p.options
-	if !p.isEface {
+	if !p.isEface && !p.keepUseNumber {
 		p.options &^= 1 << _F_use_number
 	}
 	sc := schemaScanner{
@@ -435,7 +435,10 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 	slowKey:
 		{
 			cur := unsafe.Add(rawPtr, keyStart)
-			dlen := cParityParseString(&cur, &hasEsc, sc.opts)
+			dlen := cParityParseStringOpt(&cur, &hasEsc, sc.opts, sc.p.strictURC)
+			if hasEsc {
+				sc.mutatedPadded = true
+			}
 			if dlen < 0 {
 				return false
 			}
@@ -446,7 +449,6 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 			sc.pos = afterQuote
 			klen = dlen
 			if hasEsc {
-				sc.mutatedPadded = true
 				keyTyp = KStringEscaped | uint64(keyStart)<<PosBits
 			} else {
 				keyTyp = KStringCommon | uint64(keyStart)<<PosBits
@@ -878,6 +880,10 @@ func (sc *schemaScanner) scanFullSubtree(c byte, valStart int) bool {
 	p.nbuf.parent = -1
 	p.nbuf.depth = 0
 	p.nbuf.stat.max_depth = 0
+	// cParityParseWithPadding decodes any escaped strings in place inside p.padded
+	// (or p.sessionPadded); mark mutatedPadded before invoking it so any fallback
+	// or dense-slice bailout restores pristine source bytes first.
+	sc.mutatedPadded = true
 
 	err := cParityParseWithPadding(p)
 	for classifyScanStop(err) == scanStopNodeCapExhausted {
@@ -982,7 +988,10 @@ func (sc *schemaScanner) scanStringScalar(valStart int) bool {
 
 	cur := unsafe.Add(rawPtr, contentStart)
 	var hasEsc bool
-	dlen := cParityParseString(&cur, &hasEsc, sc.opts)
+	dlen := cParityParseStringOpt(&cur, &hasEsc, sc.opts, sc.p.strictURC)
+	if hasEsc {
+		sc.mutatedPadded = true
+	}
 	if dlen < 0 {
 		return false
 	}
@@ -993,7 +1002,6 @@ func (sc *schemaScanner) scanStringScalar(valStart int) bool {
 	sc.pos = afterQuote
 	typ := uint64(KStringCommon)
 	if hasEsc {
-		sc.mutatedPadded = true
 		typ = KStringEscaped
 	}
 	sc.ensureNodes(2)
@@ -1009,6 +1017,17 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 	rawPtr := unsafe.Pointer(sc.rawPtr)
 	pos := sc.pos
 	end := sc.end
+	if sc.opts&(1<<_F_use_number) != 0 {
+		numEnd, ok := skipNumberAt(rawPtr, first, pos, end, false)
+		if !ok {
+			return false
+		}
+		sc.pos = numEnd
+		sc.ensureNodes(2)
+		sc.p.nodes[sc.nIdx] = node{typ: KRawNumber | uint64(valStart)<<PosBits, val: uint64(numEnd - valStart)}
+		sc.nIdx++
+		return true
+	}
 
 	if first >= '1' && first <= '9' {
 		uval := uint64(first - '0')
@@ -1656,10 +1675,21 @@ func skipStringBodyAt(rawPtr unsafe.Pointer, pos, end int, opts uint64) (int, bo
 				if pos+6 > end {
 					return pos, false
 				}
-				if _, ok := cParityReadHex16(unsafe.Add(rawPtr, pos+2)); !ok {
+				u, ok := cParityReadHex16(unsafe.Add(rawPtr, pos+2))
+				if !ok {
 					return pos, false
 				}
 				pos += 6
+				if opts&(1<<_F_disable_urc) != 0 && u >= 0xd800 && u <= 0xdfff {
+					if u > 0xdbff || pos+6 > end || *(*byte)(unsafe.Add(rawPtr, pos)) != '\\' || *(*byte)(unsafe.Add(rawPtr, pos+1)) != 'u' {
+						return pos, false
+					}
+					u2, ok2 := cParityReadHex16(unsafe.Add(rawPtr, pos+2))
+					if !ok2 || u2 < 0xdc00 || u2 > 0xdfff {
+						return pos, false
+					}
+					pos += 6
+				}
 				if *(*byte)(unsafe.Add(rawPtr, pos)) != '\\' || *(*byte)(unsafe.Add(rawPtr, pos+1)) != 'u' {
 					break
 				}

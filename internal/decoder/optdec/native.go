@@ -129,6 +129,8 @@ type Parser struct {
 	// Per-decode typed pointer slabs for optional *Scalar / *string struct fields.
 	// Placed after ctx so assembly-referenced Parser offsets remain unchanged.
 	hasProjHints   bool
+	strictURC      bool
+	keepUseNumber  bool
 	scalarSlab     []uint64
 	scalarSlabOff  int
 	scalarSlabNext int
@@ -442,6 +444,8 @@ func (p *Parser) reset() {
 	p.Utf8Inv = false
 	p.isEface = false
 	p.hasProjHints = false
+	p.strictURC = false
+	p.keepUseNumber = false
 	p.sessionPadded = nil
 	p.unesc = nil
 	p.resetSlabs()
@@ -464,6 +468,9 @@ func (p *Parser) fixError(code ErrorCode) error {
 	}
 
 	pos := p.Pos() - 1
+	if pos > len(p.Json) {
+		pos = len(p.Json)
+	}
 	return error_syntax(pos, p.Json, ParsingErrors[code])
 }
 

@@ -176,7 +176,7 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 	s.phase = streamPhaseValue
 	s.active = true
 	s.utf8Invalid = false
-	s.useNumber = isEface && (opts&(1<<_F_use_number)) != 0
+	s.useNumber = (opts & (1 << _F_use_number)) != 0
 	s.validateStr = (opts & (1 << _F_validate_string)) != 0
 	if opts&(1<<_F_disable_urc) != 0 {
 		s.unquoteFlags = 0
@@ -328,11 +328,29 @@ func safeStringResumeOffset(src string, floor int) int {
 
 func mapUnquoteError(perr types.ParsingError) ErrorCode {
 	switch perr {
-	case types.ERR_INVALID_UNICODE, types.ERR_INVALID_CHAR:
+	case types.ERR_INVALID_UNICODE, types.ERR_INVALID_CHAR, types.ERR_EOF:
 		return SONIC_INVALID_ESCAPED_UTF
 	default:
 		return SONIC_INVALID_ESCAPED
 	}
+}
+
+// Open containers store (uint32(parentIdx) << 32) | uint32(elemCount) in node.val
+// until closed, preserving all 32 bits for element/pair counts (instead of 24 bits
+// in node.typ) while keeping node.typ untouched as (pos << 32) | kind.
+func packOpenContainerVal(parentIdx int64) uint64 {
+	return uint64(uint32(parentIdx)) << 32
+}
+
+func unpackOpenParentIdx(openVal uint64) int64 {
+	return int64(int32(uint32(openVal >> 32)))
+}
+
+func eofCursor(n int) int {
+	if n > 0 {
+		return n + 1
+	}
+	return 0
 }
 
 // isValidNumberPrefixToEnd reports whether src[pos:] is a syntactically valid
@@ -423,7 +441,7 @@ func (s *StreamSession) scanStringStep(src string, eof bool, isKey bool) (bool, 
 			return false, scanStopNeedMore, SONIC_OK
 		}
 		if perr == types.ERR_EOF {
-			s.cur = len(src)
+			s.cur = eofCursor(len(src))
 			return false, scanStopSyntaxError, SONIC_EOF
 		}
 		errPos := pos + errRel
@@ -504,12 +522,13 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			ch := src[pos]
 			switch ch {
 			case '{':
-				idx := s.emitNode(KObject|uint64(pos)<<PosBits, uint64(p.nbuf.parent))
+				idx := s.emitNode(KObject|uint64(pos)<<PosBits, packOpenContainerVal(p.nbuf.parent))
 				p.nbuf.parent = int64(idx)
 				p.nbuf.depth++
 				if p.nbuf.depth > consts.MaxStack {
@@ -521,7 +540,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				continue
 
 			case '[':
-				idx := s.emitNode(KArray|uint64(pos)<<PosBits, uint64(p.nbuf.parent))
+				idx := s.emitNode(KArray|uint64(pos)<<PosBits, packOpenContainerVal(p.nbuf.parent))
 				p.nbuf.parent = int64(idx)
 				p.nbuf.depth++
 				if p.nbuf.depth > consts.MaxStack {
@@ -572,7 +591,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 					if !eof {
 						return scanStopNeedMore, SONIC_OK
 					}
-					s.cur = len(src)
+					s.cur = eofCursor(len(src))
 					return scanStopSyntaxError, SONIC_INVALID_LITERAL
 				}
 				// Mismatch occurred within full length.
@@ -704,6 +723,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			if src[pos] != ':' {
@@ -721,6 +741,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			ch := src[pos]
@@ -746,6 +767,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			if src[pos] != '"' {
@@ -766,6 +788,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			if src[pos] == ']' {
@@ -782,6 +805,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			ch := src[pos]
@@ -802,6 +826,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
+				s.cur = eofCursor(len(src))
 				return scanStopSyntaxError, SONIC_EOF
 			}
 			ch := src[pos]
@@ -821,7 +846,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 			return scanStopDone, SONIC_OK
 		}
 		parent = &p.nodes[p.nbuf.parent]
-		parent.typ += 1 << 8
+		parent.val++
 		if uint8(parent.typ) == KObject {
 			s.phase = streamPhaseObjectAfterVal
 		} else {
@@ -832,7 +857,8 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 	closeContainer:
 		pIdx := int(p.nbuf.parent)
 		cnode := &p.nodes[pIdx]
-		count := uint32((cnode.typ >> 8) & 0xffffff)
+		openVal := cnode.val
+		count := uint32(openVal)
 		kind := uint8(cnode.typ)
 		if kind == KObject {
 			p.nbuf.stat.object++
@@ -841,10 +867,9 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 			p.nbuf.stat.array++
 			p.nbuf.stat.array_elems += count
 		}
-		prevParent := int64(cnode.val)
+		prevParent := unpackOpenParentIdx(openVal)
 		p.nbuf.parent = prevParent
 		span := uint64(s.nodeLen - pIdx)
-		cnode.typ &= 0xffffffff000000ff
 		cnode.val = (span << 32) | uint64(count)
 		if uint32(p.nbuf.depth) > p.nbuf.stat.max_depth {
 			p.nbuf.stat.max_depth = uint32(p.nbuf.depth)
@@ -854,7 +879,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 			return scanStopDone, SONIC_OK
 		}
 		outer := &p.nodes[prevParent]
-		outer.typ += 1 << 8
+		outer.val++
 		if uint8(outer.typ) == KObject {
 			s.phase = streamPhaseObjectAfterVal
 		} else {
@@ -1185,7 +1210,7 @@ scanValue:
 			nodes = p.nodes
 		}
 		idx := nlen
-		nodes[idx] = node{typ: KObject | uint64(pos)<<PosBits, val: uint64(parentIdx)}
+		nodes[idx] = node{typ: KObject | uint64(pos)<<PosBits, val: packOpenContainerVal(parentIdx)}
 		nlen = idx + 1
 		parentIdx = int64(idx)
 		depth++
@@ -1239,7 +1264,7 @@ scanValue:
 			nodes = p.nodes
 		}
 		idx := nlen
-		nodes[idx] = node{typ: KArray | uint64(pos)<<PosBits, val: uint64(parentIdx)}
+		nodes[idx] = node{typ: KArray | uint64(pos)<<PosBits, val: packOpenContainerVal(parentIdx)}
 		nlen = idx + 1
 		parentIdx = int64(idx)
 		depth++
@@ -1617,7 +1642,7 @@ afterValue:
 		p.pos = pos
 		return SONIC_OK
 	}
-	nodes[parentIdx].typ += 1 << 8
+	nodes[parentIdx].val++
 	if uint8(nodes[parentIdx].typ) == KObject {
 		if pos < n {
 			ch := b[pos]
@@ -1691,14 +1716,14 @@ closeContainer:
 	{
 		pIdx := int(parentIdx)
 		cnode := &nodes[pIdx]
-		count := uint32((cnode.typ >> 8) & 0xffffff)
+		openVal := cnode.val
+		count := uint32(openVal)
 		if uint8(cnode.typ) != KObject {
 			arrElems += count
 		}
-		prevParent := int64(cnode.val)
+		prevParent := unpackOpenParentIdx(openVal)
 		parentIdx = prevParent
 		span := uint64(nlen - pIdx)
-		cnode.typ &= 0xffffffff000000ff
 		cnode.val = (span << 32) | uint64(count)
 		depth--
 		goto afterValue
@@ -1751,7 +1776,11 @@ func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Poin
 	sess.beginGiant(f, isEface, s, true)
 	code := sess.scanComplete(s)
 	if code != SONIC_OK {
-		return s, sess.cur, fix_error(s, 0, giantSyntaxError(s, sess.cur, code))
+		endPos := sess.cur
+		if endPos > len(s) {
+			endPos = len(s)
+		}
+		return s, endPos, fix_error(s, 0, giantSyntaxError(s, sess.cur, code))
 	}
 
 	p := sess.p
@@ -1768,7 +1797,11 @@ func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Poin
 	sess.ctx.Parser = nil
 	sess.ctx.sliceArena = nil
 	err := fix_error(s, 0, merr)
-	return s, sess.cur, err
+	endPos := sess.cur
+	if endPos > len(s) {
+		endPos = len(s)
+	}
+	return s, endPos, err
 }
 
 func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Type, vp unsafe.Pointer, dec decFunc, sessPtr **InputSession) error {
@@ -1798,7 +1831,11 @@ func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Typ
 		if sessPtr != nil {
 			*sessPtr = nil
 		}
-		*i = origPos + sess.cur
+		newPos := origPos + sess.cur
+		if newPos > len(*s) {
+			newPos = len(*s)
+		}
+		*i = newPos
 		return fix_error(*s, origPos, giantSyntaxError(sub, sess.cur, code))
 	}
 
@@ -1818,6 +1855,9 @@ func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Typ
 	err := fix_error(*s, origPos, merr)
 
 	newPos := origPos + sess.cur
+	if newPos > len(*s) {
+		newPos = len(*s)
+	}
 	if sessPtr != nil && err != nil {
 		*sessPtr = nil
 	}

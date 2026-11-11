@@ -77,7 +77,13 @@ func cParityUnicodeReplacement(dst *unsafe.Pointer) {
 // This follows handle_unicode, which always replaces unpaired surrogates and
 // does not consult F_DIS_URC. A bad second escape keeps the cursor at that escape.
 func cParityHandleUnicode(src, dst *unsafe.Pointer) int {
-	s, d, code := cParityDecodeUnicode(*src, *dst, false)
+	s, d, code := cParityDecodeUnicodeOpt(*src, *dst, false, false)
+	*src, *dst = s, d
+	return code
+}
+
+func cParityHandleUnicodeOpt(src, dst *unsafe.Pointer, strictURC bool) int {
+	s, d, code := cParityDecodeUnicodeOpt(*src, *dst, false, strictURC)
 	*src, *dst = s, d
 	return code
 }
@@ -87,6 +93,10 @@ func cParityHandleUnicode(src, dst *unsafe.Pointer) int {
 // and their write-barrier checks for every code point. The caller owns the
 // padded input and publishes both cursors once, including on malformed input.
 func cParityDecodeUnicode(src, dst unsafe.Pointer, consecutive bool) (unsafe.Pointer, unsafe.Pointer, int) {
+	return cParityDecodeUnicodeOpt(src, dst, consecutive, false)
+}
+
+func cParityDecodeUnicodeOpt(src, dst unsafe.Pointer, consecutive bool, strictURC bool) (unsafe.Pointer, unsafe.Pointer, int) {
 	for {
 		r0, valid := cParityReadHex16(unsafe.Add(src, 2))
 		if !valid {
@@ -113,6 +123,9 @@ func cParityDecodeUnicode(src, dst unsafe.Pointer, consecutive bool) (unsafe.Poi
 				break
 			}
 			if r0 > 0xdbff || *(*byte)(src) != '\\' || *(*byte)(unsafe.Add(src, 1)) != 'u' {
+				if strictURC {
+					return unsafe.Add(src, -3), dst, SONIC_INVALID_ESCAPED_UTF
+				}
 				*(*byte)(dst) = 0xef
 				*(*byte)(unsafe.Add(dst, 1)) = 0xbf
 				*(*byte)(unsafe.Add(dst, 2)) = 0xbd
@@ -125,6 +138,9 @@ func cParityDecodeUnicode(src, dst unsafe.Pointer, consecutive bool) (unsafe.Poi
 			}
 			src = unsafe.Add(src, 6)
 			if r1 < 0xdc00 || r1 > 0xdfff {
+				if strictURC {
+					return unsafe.Add(src, -3), dst, SONIC_INVALID_ESCAPED_UTF
+				}
 				r0 = r1
 				*(*byte)(dst) = 0xef
 				*(*byte)(unsafe.Add(dst, 1)) = 0xbf

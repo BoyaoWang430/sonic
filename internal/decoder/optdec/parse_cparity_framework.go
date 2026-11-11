@@ -34,6 +34,11 @@ func hasMoreJSONTokens(s string, pos int) bool {
 
 // The immutable source and mutable padded buffer share the token-offset origin.
 func newParserImpl(data string, pos int, opt uint64) *Parser {
+	if pos < 0 {
+		pos = 0
+	} else if pos > len(data) {
+		pos = len(data)
+	}
 	p := parsePool.Get().(*Parser)
 	p.Json = data[pos:]
 	if opt&(1<<_F_validate_string) != 0 && !utf8.ValidateString(p.Json) {
@@ -121,7 +126,7 @@ func (p *Parser) growNodeTape() {
 
 func parseImpl(p *Parser) ErrorCode {
 	old := p.options
-	if !p.isEface {
+	if !p.isEface && !p.keepUseNumber {
 		p.options &^= 1 << _F_use_number
 	}
 	err := cParityParseWithPadding(p)

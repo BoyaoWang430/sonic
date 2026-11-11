@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"runtime"
@@ -15,6 +16,8 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/decoder"
+	decerrors "github.com/bytedance/sonic/internal/decoder/errors"
 	"github.com/bytedance/sonic/internal/encoder/ir"
 	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/option"
@@ -1501,5 +1504,393 @@ func TestPhase1ReviewFixes(t *testing.T) {
 			t.Fatalf("round %d dynamic ptr Marshal = %s, err=%v, want %s", round, gotPtr, err, wantDyn)
 		}
 		vars.ResetProgramCache()
+	}
+}
+
+type schemaSubtreeFallbackItem struct {
+	Data any     `json:"data"`
+	B    int     `json:"b"`
+	C    int     `json:"c"`
+	D    int     `json:"d"`
+	Note string  `json:"note,omitempty"`
+	Big  float64 `json:"big,omitempty"`
+}
+
+func TestSchemaFullSubtreeMutatedPaddedFallback(t *testing.T) {
+	// 1. Dense-slice bailout in scanSlice after scanFullSubtree unescaped a string in place.
+	// Elements 0..11 match all 4 fields, triggering denseBailout at element 8.
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := 0; i < 12; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `{"data":{"msg":"x\"y\nz-%d"},"b":%d,"c":%d,"d":%d}`, i, i+1, i+2, i+3)
+	}
+	sb.WriteByte(']')
+	denseSliceJSON := sb.String()
+
+	var gotSlice []schemaSubtreeFallbackItem
+	if err := UnmarshalString(denseSliceJSON, &gotSlice); err != nil {
+		t.Fatalf("UnmarshalString dense slice after scanFullSubtree escape failed: %v", err)
+	}
+	if len(gotSlice) != 12 {
+		t.Fatalf("len(gotSlice) = %d, want 12", len(gotSlice))
+	}
+	for i, item := range gotSlice {
+		m, ok := item.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("item %d Data type = %T, want map[string]any", i, item.Data)
+		}
+		wantMsg := fmt.Sprintf("x\"y\nz-%d", i)
+		if m["msg"] != wantMsg || item.B != i+1 || item.C != i+2 || item.D != i+3 {
+			t.Fatalf("item %d = %+v, want msg=%q b=%d c=%d d=%d", i, item, wantMsg, i+1, i+2, i+3)
+		}
+	}
+
+	// 2. Fallback to resetAndRunFullParse when a later field triggers skipNumberAt(checkFloatInf)
+	// bailout (1e300 has 3 exponent digits -> bailout, yet is a valid finite float64!).
+	validExpJSON := `{"note":"pre\"ok","data":{"msg":"a\"b\nc"},"b":7,"big":1e300}`
+	var gotSingle schemaSubtreeFallbackItem
+	if err := UnmarshalString(validExpJSON, &gotSingle); err != nil {
+		t.Fatalf("UnmarshalString fallback on 1e300 after scanFullSubtree failed: %v", err)
+	}
+	if gotSingle.Note != "pre\"ok" || gotSingle.B != 7 || gotSingle.Big != 1e300 {
+		t.Fatalf("gotSingle = %+v", gotSingle)
+	}
+	if m, _ := gotSingle.Data.(map[string]any); m["msg"] != "a\"b\nc" {
+		t.Fatalf("gotSingle.Data = %#v, want msg=%q", gotSingle.Data, "a\"b\nc")
+	}
+
+	// 3. Multi-document Decoder (InputSession): document 1 primes sessionPadded, document 2
+	// mutates via scanFullSubtree then falls back on 1e300, document 3 decodes cleanly after it.
+	multiDoc := validExpJSON + "\n" + validExpJSON + "\n" + `{"note":"tail\"ok","data":{"k":"v\"w"},"b":9,"big":2.5}`
+	dec := decoder.NewDecoder(multiDoc)
+	for idx := 0; idx < 3; idx++ {
+		var item schemaSubtreeFallbackItem
+		if err := dec.Decode(&item); err != nil {
+			t.Fatalf("multiDoc Decode #%d failed: %v", idx, err)
+		}
+		if idx < 2 {
+			if m, _ := item.Data.(map[string]any); m["msg"] != "a\"b\nc" || item.Big != 1e300 {
+				t.Fatalf("multiDoc #%d = %+v", idx, item)
+			}
+		} else {
+			if m, _ := item.Data.(map[string]any); m["k"] != "v\"w" || item.Note != "tail\"ok" || item.B != 9 {
+				t.Fatalf("multiDoc #2 = %+v", item)
+			}
+		}
+	}
+
+	// 4. Partial unescape before invalid escape in slowKey and scanStringScalar must report the
+	// exact same escape error position as a non-schema-projected full parse (proving padded was
+	// restored before resetAndRunFullParse).
+	if APIKind != UseStdJSON {
+		for _, bad := range []string{
+			`{"n\"ame\q":1,"b":2}`,
+			`{"note":"a\"b\q","b":2}`,
+		} {
+			var ref map[string]any
+			refErr := UnmarshalString(bad, &ref)
+			refSE, ok := refErr.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("expected reference SyntaxError on %s, got %T (%v)", bad, refErr, refErr)
+			}
+
+			var tmp schemaSubtreeFallbackItem
+			err := UnmarshalString(bad, &tmp)
+			if err == nil {
+				t.Fatalf("expected error on %s, got nil", bad)
+			}
+			se, ok := err.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("expected decerrors.SyntaxError on %s, got %T (%v)", bad, err, err)
+			}
+			if se.Pos != refSE.Pos || se.Src != bad {
+				t.Fatalf("%s: SyntaxError = (Pos=%d, Src=%q), want (Pos=%d, Src=%q)", bad, se.Pos, se.Src, refSE.Pos, bad)
+			}
+		}
+	}
+}
+
+type unicodeErrUnmarshaler struct {
+	Raw string
+}
+
+func (u *unicodeErrUnmarshaler) UnmarshalJSON(b []byte) error {
+	u.Raw = string(b)
+	return nil
+}
+
+type unicodeErrEnvelope struct {
+	Direct string                `json:"direct,omitempty"`
+	Keep   int                   `json:"keep,omitempty"`
+	Any    any                   `json:"any,omitempty"`
+	Raw    json.RawMessage       `json:"raw,omitempty"`
+	NoCopy NoCopyRawMessage      `json:"nocopy,omitempty"`
+	Custom unicodeErrUnmarshaler `json:"custom,omitempty"`
+	Pad    string                `json:"pad,omitempty"`
+}
+
+type tinyChunkReader struct {
+	s    string
+	pos  int
+	step int
+}
+
+func (r *tinyChunkReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.s) {
+		return 0, io.EOF
+	}
+	n := r.step
+	if n > len(p) {
+		n = len(p)
+	}
+	if r.pos+n > len(r.s) {
+		n = len(r.s) - r.pos
+	}
+	copy(p[:n], r.s[r.pos:r.pos+n])
+	r.pos += n
+	return n, nil
+}
+
+func TestUseUnicodeErrorsAcrossAllPaths(t *testing.T) {
+	if APIKind == UseStdJSON {
+		t.Skip("UseUnicodeErrors is not supported by encoding/json fallback")
+	}
+	strictValidate := Config{UseUnicodeErrors: true, ValidateString: true}.Froze()
+	strictFast := Config{UseUnicodeErrors: true, ValidateString: false}.Froze()
+
+	badCases := []string{
+		`"\ud800"`,
+		`"\udfff"`,
+		`"\ud800x"`,
+		`"\ud800\u0041"`,
+		`"\ud800\ud800\udc00"`,
+		`{"direct":"\ud800","keep":1}`,
+		`{"ignored":"\ud800","keep":1}`,
+		`{"ignored":{"nested":["\udc00"]},"keep":1}`,
+		`{"any":["\ud800"],"keep":1}`,
+		`{"raw":"\ud800","keep":1}`,
+		`{"nocopy":"\ud800","keep":1}`,
+		`{"custom":"\ud800","keep":1}`,
+		`{"di\ud800rect":"ok","keep":1}`,
+	}
+
+	for _, cfg := range []API{strictValidate, strictFast} {
+		for _, tc := range badCases {
+			if tc[0] == '"' {
+				var s string
+				if err := cfg.UnmarshalFromString(tc, &s); err == nil {
+					t.Fatalf("expected UseUnicodeErrors failure on root string %s, got %q", tc, s)
+				}
+			} else {
+				var env unicodeErrEnvelope
+				if err := cfg.UnmarshalFromString(tc, &env); err == nil {
+					t.Fatalf("expected UseUnicodeErrors failure on %s, got %+v", tc, env)
+				}
+			}
+			// StreamDecoder with tiny 3-byte chunks splitting \uXXXX across reads.
+			var dst any
+			if tc[0] == '{' {
+				dst = &unicodeErrEnvelope{}
+			} else {
+				var s string
+				dst = &s
+			}
+			sdec := cfg.NewDecoder(&tinyChunkReader{s: tc, step: 3})
+			if err := sdec.Decode(dst); err == nil {
+				t.Fatalf("expected StreamDecoder UseUnicodeErrors failure on %s", tc)
+			}
+		}
+
+		// > 4 MiB giant read-only scan path with lone surrogate.
+		giantBad := `{"pad":"` + strings.Repeat("p", (4<<20)+4096) + `","direct":"\ud800","keep":1}`
+		var giantEnv unicodeErrEnvelope
+		if err := cfg.UnmarshalFromString(giantBad, &giantEnv); err == nil {
+			t.Fatalf("expected >4MiB UseUnicodeErrors failure, got %+v", giantEnv.Direct)
+		}
+
+		// Valid astral surrogate pair (\uD83D\uDE00 == "😀") must succeed across all paths.
+		validCases := []string{
+			`{"direct":"\ud83d\ude00","ignored":"\ud83d\ude00","any":"\ud83d\ude00","raw":"\ud83d\ude00","nocopy":"\ud83d\ude00","keep":42}`,
+			`{"pad":"` + strings.Repeat("p", (4<<20)+4096) + `","direct":"\ud83d\ude00","keep":42}`,
+		}
+		for _, vtc := range validCases {
+			var env unicodeErrEnvelope
+			if err := cfg.UnmarshalFromString(vtc, &env); err != nil {
+				t.Fatalf("valid surrogate pair failed on len=%d: %v", len(vtc), err)
+			}
+			if env.Direct != "😀" || env.Keep != 42 {
+				t.Fatalf("got Direct=%q Keep=%d, want 😀 / 42", env.Direct, env.Keep)
+			}
+		}
+	}
+
+	// Default config (UseUnicodeErrors: false) must continue replacing lone surrogates with U+FFFD.
+	var defEnv unicodeErrEnvelope
+	if err := ConfigDefault.UnmarshalFromString(`{"direct":"\ud800","ignored":"\ud800","keep":7}`, &defEnv); err != nil {
+		t.Fatalf("ConfigDefault should replace lone surrogate, got error: %v", err)
+	}
+	if defEnv.Direct != "\ufffd" || defEnv.Keep != 7 {
+		t.Fatalf("ConfigDefault Direct=%q Keep=%d, want U+FFFD / 7", defEnv.Direct, defEnv.Keep)
+	}
+}
+
+func TestContainerCountOver24Bits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping >16M-element container test in -short mode")
+	}
+	const wantLen = (1 << 24) + 5 // 16,777,221 > 2^24
+	buf := make([]byte, 2*wantLen+1)
+	buf[0] = '['
+	for i := 0; i < wantLen; i++ {
+		buf[1+2*i] = '1'
+		buf[2+2*i] = ','
+	}
+	buf[len(buf)-1] = ']'
+	bigJSON := unsafe.String(unsafe.SliceData(buf), len(buf))
+
+	// 1. > 4 MiB UnmarshalString (scanComplete).
+	var got []uint8
+	if err := UnmarshalString(bigJSON, &got); err != nil {
+		t.Fatalf("UnmarshalString 16.77M-element array failed: %v", err)
+	}
+	if len(got) != wantLen || got[0] != 1 || got[wantLen-1] != 1 {
+		t.Fatalf("UnmarshalString len=%d, want %d", len(got), wantLen)
+	}
+	got = nil
+
+	// 2. StreamDecoder (StreamSession.Step).
+	var gotStream []uint8
+	if err := ConfigDefault.NewDecoder(strings.NewReader(bigJSON)).Decode(&gotStream); err != nil {
+		t.Fatalf("StreamDecoder 16.77M-element array failed: %v", err)
+	}
+	if len(gotStream) != wantLen || gotStream[0] != 1 || gotStream[wantLen-1] != 1 {
+		t.Fatalf("StreamDecoder len=%d, want %d", len(gotStream), wantLen)
+	}
+}
+
+type useNumberNestedHolder struct {
+	V   any            `json:"v"`
+	N   json.Number    `json:"n"`
+	B   []byte         `json:"b"`
+	M   map[string]any `json:"m"`
+	Pad string         `json:"pad,omitempty"`
+}
+
+func TestUseNumberNestedTypedContainersAcrossThresholds(t *testing.T) {
+	smallJSON := `{"v":1e500,"n":9007199254740993,"b":[1,2,255],"m":{"huge":1e500,"int":9007199254740993}}`
+	giantJSON := `{"pad":"` + strings.Repeat("x", (4<<20)+4096) + `","v":1e500,"n":9007199254740993,"b":[1,2,255],"m":{"huge":1e500,"int":9007199254740993}}`
+
+	check := func(name string, got useNumberNestedHolder) {
+		t.Helper()
+		if got.V != json.Number("1e500") {
+			t.Fatalf("%s: V = %#v (%T), want json.Number(\"1e500\")", name, got.V, got.V)
+		}
+		if got.N != json.Number("9007199254740993") {
+			t.Fatalf("%s: N = %q, want 9007199254740993", name, got.N)
+		}
+		if !bytes.Equal(got.B, []byte{1, 2, 255}) {
+			t.Fatalf("%s: B = %v, want [1 2 255]", name, got.B)
+		}
+		if got.M["huge"] != json.Number("1e500") || got.M["int"] != json.Number("9007199254740993") {
+			t.Fatalf("%s: M = %#v", name, got.M)
+		}
+	}
+
+	useNumCfg := Config{UseNumber: true, ValidateString: true}.Froze()
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"small", smallJSON},
+		{"giant", giantJSON},
+	} {
+		var h1 useNumberNestedHolder
+		if err := useNumCfg.UnmarshalFromString(tc.src, &h1); err != nil {
+			t.Fatalf("%s useNumCfg.UnmarshalFromString failed: %v", tc.name, err)
+		}
+		check(tc.name+"/UnmarshalFromString", h1)
+
+		var h2 useNumberNestedHolder
+		d := decoder.NewDecoder(tc.src)
+		d.UseNumber()
+		if err := d.Decode(&h2); err != nil {
+			t.Fatalf("%s decoder.NewDecoder.UseNumber failed: %v", tc.name, err)
+		}
+		check(tc.name+"/StringDecoder", h2)
+
+		var h3 useNumberNestedHolder
+		if err := useNumCfg.NewDecoder(strings.NewReader(tc.src)).Decode(&h3); err != nil {
+			t.Fatalf("%s StreamDecoder failed: %v", tc.name, err)
+		}
+		check(tc.name+"/StreamDecoder", h3)
+	}
+}
+
+func TestDecoderRepeatedDecodeAfterEOFAndPos(t *testing.T) {
+	giantSpaces := strings.Repeat(" ", (4<<20)+1024)
+	giantUnclosedStr := `"` + strings.Repeat("a", (4<<20)+1024)
+	giantValidStr := `"` + strings.Repeat("b", (4<<20)+1024) + `"`
+
+	eofInputs := []struct {
+		name    string
+		src     string
+		wantOK1 bool
+	}{
+		{"empty", "", false},
+		{"spaces", "   ", false},
+		{"unclosed_str", `"abc`, false},
+		{"unclosed_arr", `[1, 2`, false},
+		{"valid_then_eof", `123`, true},
+		{"valid_spaces_then_eof", `123   `, true},
+		{"giant_spaces", giantSpaces, false},
+		{"giant_unclosed_str", giantUnclosedStr, false},
+		{"giant_valid_then_eof", giantValidStr, true},
+	}
+
+	for _, tc := range eofInputs {
+		dec := decoder.NewDecoder(tc.src)
+		for call := 0; call < 3; call++ {
+			var v any
+			err := dec.Decode(&v)
+			if call == 0 && tc.wantOK1 {
+				if err != nil {
+					t.Fatalf("%s call 0 unexpected error: %v", tc.name, err)
+				}
+			} else if err == nil {
+				t.Fatalf("%s call %d expected EOF error, got nil (v=%#v)", tc.name, call, v)
+			}
+			if dec.Pos() < 0 || dec.Pos() > len(tc.src) {
+				t.Fatalf("%s call %d left out-of-bounds Pos=%d for len=%d", tc.name, call, dec.Pos(), len(tc.src))
+			}
+		}
+	}
+
+	// Verify consistent SyntaxError.Pos == len(src) on truncated/unclosed inputs across
+	// < 4 MiB, > 4 MiB, and StreamDecoder.
+	if APIKind != UseStdJSON {
+		for _, trunc := range []string{`"abc`, `[2, 3`, `{"a"`, `tru`, giantUnclosedStr} {
+			var v1 any
+			err1 := UnmarshalString(trunc, &v1)
+			se1, ok := err1.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("len=%d UnmarshalString expected SyntaxError, got %T (%v)", len(trunc), err1, err1)
+			}
+			if se1.Pos != len(trunc) {
+				t.Fatalf("len=%d UnmarshalString SyntaxError.Pos = %d, want %d", len(trunc), se1.Pos, len(trunc))
+			}
+
+			var v2 any
+			err2 := ConfigDefault.NewDecoder(&tinyChunkReader{s: trunc, step: 7}).Decode(&v2)
+			se2, ok := err2.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("len=%d StreamDecoder expected SyntaxError, got %T (%v)", len(trunc), err2, err2)
+			}
+			if se2.Pos != len(trunc) {
+				t.Fatalf("len=%d StreamDecoder SyntaxError.Pos = %d, want %d", len(trunc), se2.Pos, len(trunc))
+			}
+		}
 	}
 }

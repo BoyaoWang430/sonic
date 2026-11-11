@@ -11,11 +11,12 @@
 // BP:  ncur (WB_CUR(p) tape cursor)
 // Stack frame of cParityParseRunsAsm ($64-40):
 //   0(SP): saved BP
-//   8(SP): saved key string length
-//  16(SP): parent node pointer
+//   8(SP): saved key string length (dead during runs_value_number; aliased as
+//          16(SP) inside NOSPLIT|NOFRAME runs_number<> because CALL pushes 8B)
+//  16(SP): parent node pointer (sits at 24(SP) inside runs_number<>)
 //  24(SP): pos (active token position)
 //  32(SP): context (cParityRunsContext*)
-//  40(SP): scratch for runs_number<>
+//  40(SP): scratch (sits at 48(SP) inside runs_number<>)
 //  48(SP): rawBase
 //  56(SP): nodesLast (last spare-safe node)
 // Persistent SIMD registers (256-bit YMM, never touching Y15/X15 or R14):
@@ -950,6 +951,9 @@ runs_number_el_pack:
 	JZ   runs_number_el_done
 	CMPQ R11, $1
 	JNE  runs_number_el_check_trunc
+	// runs_number<> is NOSPLIT|NOFRAME ($0-0), so CALL pushed an 8-byte return
+	// address: 16(SP) here aliases caller 8(SP) (saved key length, already
+	// consumed before runs_value_number), NOT caller 16(SP) (parent node ptr).
 	MOVQ DX, 16(SP)
 	INCQ DI
 	MOVQ $2, R11

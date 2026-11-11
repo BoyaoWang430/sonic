@@ -69,6 +69,8 @@ func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj 
 	if root == anyType || root == mapEfaceType || root == sliceEfaceType {
 		p.isEface = true
 	}
+	p.strictURC = (opts & (1 << _F_disable_urc)) != 0
+	p.keepUseNumber = (opts & (1 << _F_use_number)) != 0
 
 	var ecode ErrorCode
 	if proj != nil {
@@ -257,6 +259,16 @@ func (self Node) AsByte(ctx *Context) (uint8, bool) {
 		return uint8(self.U64()), true
 	} else if typ == KSint && self.I64() == 0 {
 		return 0, true
+	} else if typ == KRawNumber {
+		raw := self.Raw(ctx)
+		if raw == "-0" {
+			return 0, true
+		}
+		num, err := ParseU64(raw)
+		if err != nil || num > math.MaxUint8 {
+			return 0, false
+		}
+		return uint8(num), true
 	} else {
 		return 0, false
 	}

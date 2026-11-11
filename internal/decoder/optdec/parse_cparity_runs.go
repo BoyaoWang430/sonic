@@ -122,7 +122,7 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 			base := unsafe.Pointer(rawBase)
 			srcPtr := unsafe.Add(base, p.pos)
 			dstPtr := unsafe.Add(base, state.stringDst)
-			nextSrc, nextDst, stringCode := cParityDecodeUnicode(srcPtr, dstPtr, true)
+			nextSrc, nextDst, stringCode := cParityDecodeUnicodeOpt(srcPtr, dstPtr, true, p.strictURC)
 			p.pos += int(uintptr(nextSrc) - uintptr(srcPtr))
 			state.stringDst += int(uintptr(nextDst) - uintptr(dstPtr))
 			state.stringErr = stringCode

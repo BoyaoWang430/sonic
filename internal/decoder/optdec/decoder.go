@@ -193,7 +193,11 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 		err = dec.FromDom(vp, ctx.Root(), ctx)
 	}
 	err = fix_error(s, 0, err)
-	return s, p.Pos(), err
+	endPos := p.Pos()
+	if endPos > len(s) {
+		endPos = len(s)
+	}
+	return s, endPos, err
 }
 
 func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **InputSession) error {
@@ -208,11 +212,16 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	}
 
 	origPos := *i
+	if origPos < 0 {
+		origPos = 0
+	} else if origPos > len(*s) {
+		origPos = len(*s)
+	}
 	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
 		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
-		origPos >= 0 && origPos <= len(*s) &&
 		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
 		(proj == nil || !proj.hasRawSubtree) {
+		*i = origPos
 		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
 
@@ -236,6 +245,9 @@ fix_error:
 	err = fix_error(*s, origPos, err)
 
 	newPos := origPos + p.Pos()
+	if newPos > len(*s) {
+		newPos = len(*s)
+	}
 	if sessPtr != nil {
 		if err != nil {
 			*sessPtr = nil

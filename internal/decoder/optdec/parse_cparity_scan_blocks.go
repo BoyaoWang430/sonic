@@ -53,8 +53,12 @@ func cParitySkipSpace(base unsafe.Pointer, block *cParityNonspaceBlock, cur *uns
 
 // cParityParseString starts after the opening quote. Success consumes its closing
 // quote and returns decoded length; errors return the negative C error code.
-//go:nocheckptr
 func cParityParseString(cur *unsafe.Pointer, hasEsc *bool, opts uint64) int {
+	return cParityParseStringOpt(cur, hasEsc, opts, false)
+}
+
+//go:nocheckptr
+func cParityParseStringOpt(cur *unsafe.Pointer, hasEsc *bool, opts uint64, strictURC bool) int {
 	start := *cur
 	p := start
 	var dst unsafe.Pointer
@@ -91,7 +95,7 @@ escape:
 		p = unsafe.Add(p, 2)
 		*(*byte)(dst) = cParityEscaped[esc]
 		dst = unsafe.Add(dst, 1)
-	} else if cParityHandleUnicode(&p, &dst) != 0 {
+	} else if cParityHandleUnicodeOpt(&p, &dst, strictURC) != 0 {
 		*cur = p
 		return -SONIC_INVALID_ESCAPED_UTF
 	}
