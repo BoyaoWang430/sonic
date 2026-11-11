@@ -170,10 +170,14 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 	var ret []byte
 
 	buf := vars.NewBytes()
+	origBuf := (*buf)[:0]
 	err := encodeIntoCheckRace(buf, val, opts)
 
 	/* check for errors */
 	if err != nil {
+		if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			*buf = origBuf
+		}
 		vars.FreeBytes(buf)
 		return nil, err
 	}
@@ -182,6 +186,9 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 		if (opts&ValidateString != 0) && !utf8.Validate(*buf) {
 			if opts&EscapeHTML == 0 {
 				ret = utf8.CorrectWith(make([]byte, 0, len(*buf)+32), *buf, `\ufffd`)
+				if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+					*buf = origBuf
+				}
 				vars.FreeBytes(buf)
 				return ret, nil
 			}
@@ -192,6 +199,9 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 
 		if opts&EscapeHTML != 0 {
 			ret = HTMLEscape(make([]byte, 0, len(*buf)+len(*buf)>>3+32), *buf)
+			if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+				*buf = origBuf
+			}
 			vars.FreeBytes(buf)
 			return ret, nil
 		}
@@ -204,7 +214,12 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 		vars.FreeBytes(buf)
 	} else {
 		ret = *buf
-		*buf = nil
+		if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			*buf = origBuf
+			vars.FreeBytes(buf)
+		} else {
+			*buf = nil
+		}
 	}
 
 	/* return the buffer into pool */

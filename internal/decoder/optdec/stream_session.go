@@ -3,7 +3,9 @@
 package optdec
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"math/bits"
 	"reflect"
 	"strconv"
@@ -87,6 +89,7 @@ type StreamSession struct {
 	validateStr  bool
 	lastIsNamed  bool
 	lastIsEface  bool
+	unquoteFlags uint64
 	trav         streamTraversalBlock
 }
 
@@ -175,6 +178,11 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 	s.utf8Invalid = false
 	s.useNumber = isEface && (opts&(1<<_F_use_number)) != 0
 	s.validateStr = (opts & (1 << _F_validate_string)) != 0
+	if opts&(1<<_F_disable_urc) != 0 {
+		s.unquoteFlags = 0
+	} else {
+		s.unquoteFlags = types.F_UNICODE_REPLACE
+	}
 	s.trav.reset()
 }
 
@@ -458,7 +466,7 @@ func (s *StreamSession) scanStringStep(src string, eof bool, isKey bool) (bool, 
 		s.unesc = append(s.unesc, src[rawStart:firstEsc]...)
 		escTail := src[firstEsc:rawContentEnd]
 		dst := s.unesc[uoff+prefixLen : uoff+maxOut]
-		written, errOff, uerr := kernels.Unquote(escTail, dst, types.F_UNICODE_REPLACE)
+		written, errOff, uerr := kernels.Unquote(escTail, dst, s.unquoteFlags)
 		if uerr != 0 {
 			s.unesc = s.unesc[:uoff]
 			s.cur = firstEsc + errOff + 1
@@ -1051,4 +1059,768 @@ func detachStreamError(err error, rawVal []byte) error {
 	default:
 		return err
 	}
+}
+
+var giantPow10 = [...]float64{
+	1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
+	1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+	1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+}
+
+func swarPlainQuoteLen64(b []byte, rawStart int) int {
+	rem := len(b) - rawStart
+	if rem < 8 {
+		return -1
+	}
+	maxWords := rem >> 3
+	if maxWords > 8 {
+		maxWords = 8
+	}
+	off := rawStart
+	for wIdx := 0; wIdx < maxWords; wIdx++ {
+		w := binary.LittleEndian.Uint64(b[off : off+8 : off+8])
+		xq := w ^ 0x2222222222222222
+		q := (xq - 0x0101010101010101) & ^xq & 0x8080808080808080
+		xb := w ^ 0x5c5c5c5c5c5c5c5c
+		bs := (xb - 0x0101010101010101) & ^xb & 0x8080808080808080
+		ctrl := (w - 0x2020202020202020) & ^w & 0x8080808080808080
+		if q != 0 {
+			lsb := q & -q
+			if (bs|ctrl)&(lsb-1) == 0 {
+				return (wIdx << 3) + (bits.TrailingZeros64(lsb) >> 3)
+			}
+			return -1
+		}
+		if (bs | ctrl) != 0 {
+			return -1
+		}
+		off += 8
+	}
+	return -1
+}
+
+func (s *StreamSession) growNodesForComplete(remBytes int) {
+	p := s.p
+	curLen := len(p.nodes)
+	nextCap := curLen * 2
+	if nextCap < int(defaultNodesCap) {
+		nextCap = int(defaultNodesCap)
+	}
+	if remBytes > 0 {
+		remMax := s.nodeLen + calMaxNodeCap(remBytes)
+		if nextCap > remMax && remMax >= s.nodeLen+64 {
+			nextCap = remMax
+		}
+	}
+	retainInPool := uintptr(nextCap) <= maxPooledNodesCap
+	grown := make([]node, nextCap)
+	if s.nodeLen > 0 {
+		copy(grown[:s.nodeLen], p.nodes[:s.nodeLen])
+	}
+	if !retainInPool && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
+		p.backup = p.nodes
+	}
+	p.nodes = grown
+}
+
+func (s *StreamSession) beginGiant(opts uint64, isEface bool, src string, singleDoc bool) {
+	s.Begin(opts, isEface)
+	p := s.p
+	if singleDoc {
+		pos := s.trav.skipSpace(src, 0)
+		s.cur = pos
+		if pos < len(src) && (src[pos] == '{' || src[pos] == '[') {
+			estNodes := (len(src)-pos)/12 + 1024
+			if estNodes > len(p.nodes) {
+				if uintptr(estNodes) > maxPooledNodesCap && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
+					p.backup = p.nodes
+				}
+				p.nodes = make([]node, estNodes)
+			}
+		}
+	} else if len(p.nodes) < int(defaultNodesCap) {
+		p.nodes = make([]node, defaultNodesCap, defaultNodesCap)
+	}
+}
+
+// scanComplete scans a complete in-memory JSON value starting at s.cur without
+// allocating or copying into a full-input padded slice.
+func (s *StreamSession) scanComplete(src string) ErrorCode {
+	n := len(src)
+	if n == 0 {
+		s.cur = 0
+		return SONIC_EOF
+	}
+	b := unsafe.Slice(unsafe.StringData(src), n)
+	p := s.p
+	nodes := p.nodes
+	nlen := s.nodeLen
+	pos := s.cur
+	parentIdx := p.nbuf.parent
+	depth := p.nbuf.depth
+	useNumber := s.useNumber
+	var arrElems uint32
+
+scanValue:
+	if pos < n && b[pos] > ' ' {
+		// fast zero-space hit
+	} else if pos+1 < n && b[pos] == ' ' && b[pos+1] > ' ' {
+		pos++
+	} else {
+		pos = s.trav.skipSpace(src, pos)
+		if pos >= n {
+			s.cur = n + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_EOF
+		}
+	}
+
+	switch ch := b[pos]; ch {
+	case '{':
+		if nlen >= len(nodes) {
+			s.nodeLen = nlen
+			s.growNodesForComplete(n - pos)
+			nodes = p.nodes
+		}
+		idx := nlen
+		nodes[idx] = node{typ: KObject | uint64(pos)<<PosBits, val: uint64(parentIdx)}
+		nlen = idx + 1
+		parentIdx = int64(idx)
+		depth++
+		if depth > consts.MaxStack {
+			s.cur = pos + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_STACK_OVERFLOW
+		}
+		pos++
+		if pos < n && b[pos] > ' ' {
+			if b[pos] == '}' {
+				pos++
+				goto closeContainer
+			}
+			if b[pos] == '"' {
+				goto objectKeyAtQuote
+			}
+			s.cur = pos + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_EXPECT_KEY
+		}
+		pos = s.trav.skipSpace(src, pos)
+		if pos >= n {
+			s.cur = n + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_EOF
+		}
+		if b[pos] == '}' {
+			pos++
+			goto closeContainer
+		}
+		if b[pos] != '"' {
+			s.cur = pos + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_EXPECT_KEY
+		}
+		goto objectKeyAtQuote
+
+	case '[':
+		if nlen >= len(nodes) {
+			s.nodeLen = nlen
+			s.growNodesForComplete(n - pos)
+			nodes = p.nodes
+		}
+		idx := nlen
+		nodes[idx] = node{typ: KArray | uint64(pos)<<PosBits, val: uint64(parentIdx)}
+		nlen = idx + 1
+		parentIdx = int64(idx)
+		depth++
+		if depth > consts.MaxStack {
+			s.cur = pos + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_STACK_OVERFLOW
+		}
+		pos++
+		if pos < n && b[pos] > ' ' {
+			if b[pos] == ']' {
+				pos++
+				goto closeContainer
+			}
+			goto scanValue
+		}
+		pos = s.trav.skipSpace(src, pos)
+		if pos >= n {
+			s.cur = n + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_EOF
+		}
+		if b[pos] == ']' {
+			pos++
+			goto closeContainer
+		}
+		goto scanValue
+
+	case '"':
+		rawStart := pos + 1
+		if slen := swarPlainQuoteLen64(b, rawStart); slen >= 0 {
+			if nlen >= len(nodes) {
+				s.nodeLen = nlen
+				s.growNodesForComplete(n - pos)
+				nodes = p.nodes
+			}
+			nodes[nlen] = node{typ: KStringCommon | uint64(rawStart)<<PosBits, val: uint64(slen)}
+			nlen++
+			pos = rawStart + slen + 1
+			goto afterValue
+		}
+		s.tokStart = pos
+		s.cur = rawStart
+		s.strScanOff = rawStart
+		s.strFirstEsc = -1
+		s.nodeLen = nlen
+		ok, _, code := s.scanStringStep(src, true, false)
+		nodes = p.nodes
+		nlen = s.nodeLen
+		if !ok {
+			if code == SONIC_EOF && n > 0 {
+				s.cur = n + 1
+			}
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return code
+		}
+		pos = s.cur
+		goto afterValue
+
+	case 't':
+		if pos+4 <= n && src[pos:pos+4] == "true" {
+			if nlen >= len(nodes) {
+				s.nodeLen = nlen
+				s.growNodesForComplete(n - pos)
+				nodes = p.nodes
+			}
+			nodes[nlen] = node{typ: KTrue | uint64(pos)<<PosBits, val: 0}
+			nlen++
+			pos += 4
+			goto afterValue
+		}
+		return s.failLiteralComplete(src, pos, "true", nlen, parentIdx, depth)
+
+	case 'f':
+		if pos+5 <= n && src[pos:pos+5] == "false" {
+			if nlen >= len(nodes) {
+				s.nodeLen = nlen
+				s.growNodesForComplete(n - pos)
+				nodes = p.nodes
+			}
+			nodes[nlen] = node{typ: KFalse | uint64(pos)<<PosBits, val: 0}
+			nlen++
+			pos += 5
+			goto afterValue
+		}
+		return s.failLiteralComplete(src, pos, "false", nlen, parentIdx, depth)
+
+	case 'n':
+		if pos+4 <= n && src[pos:pos+4] == "null" {
+			if nlen >= len(nodes) {
+				s.nodeLen = nlen
+				s.growNodesForComplete(n - pos)
+				nodes = p.nodes
+			}
+			nodes[nlen] = node{typ: KNull | uint64(pos)<<PosBits, val: 0}
+			nlen++
+			pos += 4
+			goto afterValue
+		}
+		return s.failLiteralComplete(src, pos, "null", nlen, parentIdx, depth)
+
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		if !useNumber {
+			neg := ch == '-'
+			q := pos
+			if neg {
+				q++
+			}
+			if q < n {
+				c0 := b[q]
+				if c0 >= '1' && c0 <= '9' {
+					v := uint64(c0 - '0')
+					q++
+					intDigits := 1
+					lim := q + 18
+					if lim > n {
+						lim = n
+					}
+					for q < lim {
+						d := b[q] - '0'
+						if d > 9 {
+							break
+						}
+						v = v*10 + uint64(d)
+						q++
+						intDigits++
+					}
+					if q < n {
+						term := b[q]
+						if term != '.' && term != 'e' && term != 'E' && (term-'0' > 9) {
+							if nlen >= len(nodes) {
+								s.nodeLen = nlen
+								s.growNodesForComplete(n - pos)
+								nodes = p.nodes
+							}
+							if !neg {
+								nodes[nlen] = node{typ: KUint | uint64(pos)<<PosBits, val: v}
+								nlen++
+								pos = q
+								goto afterValue
+							} else if v <= 1<<63 {
+								nodes[nlen] = node{typ: KSint | uint64(pos)<<PosBits, val: -v}
+								nlen++
+								pos = q
+								goto afterValue
+							}
+						} else if term == '.' && intDigits <= 15 && q+1 < n && b[q+1]-'0' <= 9 {
+							q++
+							fracDigits := 0
+							maxFrac := 15 - intDigits
+							for fracDigits < maxFrac && q < n {
+								d := b[q] - '0'
+								if d > 9 {
+									break
+								}
+								v = v*10 + uint64(d)
+								q++
+								fracDigits++
+							}
+							if q < n && fracDigits >= 1 && v>>52 == 0 {
+								term2 := b[q]
+								if term2 != '.' && term2 != 'e' && term2 != 'E' && (term2-'0' > 9) {
+									fv := float64(v)
+									if neg {
+										fv = -fv
+									}
+									fv /= giantPow10[fracDigits]
+									if nlen >= len(nodes) {
+										s.nodeLen = nlen
+										s.growNodesForComplete(n - pos)
+										nodes = p.nodes
+									}
+									nodes[nlen] = node{typ: KReal | uint64(pos)<<PosBits, val: math.Float64bits(fv)}
+									nlen++
+									pos = q
+									goto afterValue
+								}
+							}
+						}
+					}
+				} else if c0 == '0' && q+1 < n {
+					term := b[q+1]
+					if term != '.' && term != 'e' && term != 'E' && (term-'0' > 9) {
+						if nlen >= len(nodes) {
+							s.nodeLen = nlen
+							s.growNodesForComplete(n - pos)
+							nodes = p.nodes
+						}
+						typ := uint64(KUint)
+						if neg {
+							typ = KSint
+						}
+						nodes[nlen] = node{typ: typ | uint64(pos)<<PosBits, val: 0}
+						nlen++
+						pos = q + 1
+						goto afterValue
+					}
+				}
+			}
+		}
+
+		end, perr := kernels.ScanNumberStrict(src, pos)
+		if perr != 0 {
+			s.cur = end + 1
+			if s.cur > n+1 {
+				s.cur = n + 1
+			}
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_INVALID_NUM
+		}
+		if useNumber {
+			if nlen >= len(nodes) {
+				s.nodeLen = nlen
+				s.growNodesForComplete(n - pos)
+				nodes = p.nodes
+			}
+			nodes[nlen] = node{typ: KRawNumber | uint64(pos)<<PosBits, val: uint64(end - pos)}
+			nlen++
+			pos = end
+			goto afterValue
+		}
+		neg := ch == '-'
+		bodyOff := pos
+		if neg {
+			bodyOff++
+		}
+		var num cParityNum
+		var code ErrorCode
+		if end+8 <= n {
+			term := b[end]
+			if term != '.' && term != 'e' && term != 'E' && (term-'0' > 9) {
+				_, num, code = cParityParseNumberValue(unsafe.Pointer(rt.IndexChar(src, bodyOff)), num, neg, p.dbuf)
+				goto finishGiantNum
+			}
+		}
+		{
+			bodyLen := end - bodyOff
+			var stackBuf [128]byte
+			if bodyLen+8 <= len(stackBuf) {
+				copy(stackBuf[:bodyLen], src[bodyOff:end])
+				stackBuf[bodyLen] = ' '
+				_, num, code = cParityParseNumberValue(unsafe.Pointer(&stackBuf[0]), num, neg, p.dbuf)
+			} else {
+				savedLen := len(s.unesc)
+				s.unesc = append(s.unesc, src[bodyOff:end]...)
+				s.unesc = append(s.unesc, "        "...)
+				_, num, code = cParityParseNumberValue(unsafe.Pointer(&s.unesc[savedLen]), num, neg, p.dbuf)
+				s.unesc = s.unesc[:savedLen]
+			}
+		}
+	finishGiantNum:
+		if code != SONIC_OK {
+			s.cur = end
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return code
+		}
+		if nlen >= len(nodes) {
+			s.nodeLen = nlen
+			s.growNodesForComplete(n - pos)
+			nodes = p.nodes
+		}
+		nodes[nlen] = node{typ: num.typ | uint64(pos)<<PosBits, val: num.val}
+		nlen++
+		p.nbuf.stat.number++
+		pos = end
+		goto afterValue
+
+	default:
+		s.cur = pos + 1
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_INVALID_CHAR
+	}
+
+objectKey:
+	if pos < n && b[pos] == '"' {
+		goto objectKeyAtQuote
+	}
+	if pos+1 < n && b[pos] == ' ' && b[pos+1] == '"' {
+		pos++
+		goto objectKeyAtQuote
+	}
+	pos = s.trav.skipSpace(src, pos)
+	if pos >= n {
+		s.cur = n + 1
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EOF
+	}
+	if b[pos] != '"' {
+		s.cur = pos + 1
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EXPECT_KEY
+	}
+
+objectKeyAtQuote:
+	{
+		rawStart := pos + 1
+		if slen := swarPlainQuoteLen64(b, rawStart); slen >= 0 {
+			if nlen >= len(nodes) {
+				s.nodeLen = nlen
+				s.growNodesForComplete(n - pos)
+				nodes = p.nodes
+			}
+			nodes[nlen] = node{typ: KStringCommon | uint64(rawStart)<<PosBits, val: uint64(slen)}
+			nlen++
+			pos = rawStart + slen + 1
+		} else {
+			s.tokStart = pos
+			s.cur = rawStart
+			s.strScanOff = rawStart
+			s.strFirstEsc = -1
+			s.nodeLen = nlen
+			ok, _, code := s.scanStringStep(src, true, true)
+			nodes = p.nodes
+			nlen = s.nodeLen
+			if !ok {
+				if code == SONIC_EOF && n > 0 {
+					s.cur = n + 1
+				}
+				p.nbuf.parent = parentIdx
+				p.nbuf.depth = depth
+				return code
+			}
+			pos = s.cur
+		}
+	}
+	if pos < n && b[pos] == ':' {
+		pos++
+		goto scanValue
+	}
+	if pos+1 < n && b[pos] == ' ' && b[pos+1] == ':' {
+		pos += 2
+		goto scanValue
+	}
+	pos = s.trav.skipSpace(src, pos)
+	if pos >= n {
+		s.cur = n + 1
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EOF
+	}
+	if b[pos] != ':' {
+		s.cur = pos + 1
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EXPECT_COLON
+	}
+	pos++
+	goto scanValue
+
+afterValue:
+	if parentIdx == -1 {
+		s.cur = pos
+		s.nodeLen = nlen
+		p.nbuf.nlen = nlen
+		p.nbuf.parent = -1
+		p.nbuf.depth = 0
+		p.nbuf.stat.array_elems += arrElems
+		p.pos = pos
+		return SONIC_OK
+	}
+	nodes[parentIdx].typ += 1 << 8
+	if uint8(nodes[parentIdx].typ) == KObject {
+		if pos < n {
+			ch := b[pos]
+			if ch == ',' {
+				pos++
+				goto objectKey
+			}
+			if ch == '}' {
+				pos++
+				goto closeContainer
+			}
+		}
+		pos = s.trav.skipSpace(src, pos)
+		if pos >= n {
+			s.cur = n + 1
+			s.nodeLen = nlen
+			p.nbuf.parent = parentIdx
+			p.nbuf.depth = depth
+			return SONIC_EOF
+		}
+		ch := b[pos]
+		pos++
+		if ch == ',' {
+			goto objectKey
+		}
+		if ch == '}' {
+			goto closeContainer
+		}
+		s.cur = pos
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EXPECT_OBJ_COMMA_OR_END
+	}
+	if pos < n {
+		ch := b[pos]
+		if ch == ',' {
+			pos++
+			goto scanValue
+		}
+		if ch == ']' {
+			pos++
+			goto closeContainer
+		}
+	}
+	pos = s.trav.skipSpace(src, pos)
+	if pos >= n {
+		s.cur = n + 1
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EOF
+	}
+	{
+		ch := b[pos]
+		pos++
+		if ch == ',' {
+			goto scanValue
+		}
+		if ch == ']' {
+			goto closeContainer
+		}
+		s.cur = pos
+		s.nodeLen = nlen
+		p.nbuf.parent = parentIdx
+		p.nbuf.depth = depth
+		return SONIC_EXPECT_ARR_COMMA_OR_END
+	}
+
+closeContainer:
+	{
+		pIdx := int(parentIdx)
+		cnode := &nodes[pIdx]
+		count := uint32((cnode.typ >> 8) & 0xffffff)
+		if uint8(cnode.typ) != KObject {
+			arrElems += count
+		}
+		prevParent := int64(cnode.val)
+		parentIdx = prevParent
+		span := uint64(nlen - pIdx)
+		cnode.typ &= 0xffffffff000000ff
+		cnode.val = (span << 32) | uint64(count)
+		depth--
+		goto afterValue
+	}
+}
+
+func (s *StreamSession) failLiteralComplete(src string, pos int, want string, nlen int, parentIdx int64, depth uint64) ErrorCode {
+	avail := len(src) - pos
+	limit := len(want)
+	if avail < limit {
+		limit = avail
+	}
+	for i := 1; i < limit; i++ {
+		if src[pos+i] != want[i] {
+			s.cur = pos + i + 1
+			s.nodeLen = nlen
+			s.p.nbuf.parent = parentIdx
+			s.p.nbuf.depth = depth
+			return SONIC_INVALID_LITERAL
+		}
+	}
+	if avail < len(want) {
+		s.cur = len(src) + 1
+	} else {
+		s.cur = pos + len(want)
+	}
+	s.nodeLen = nlen
+	s.p.nbuf.parent = parentIdx
+	s.p.nbuf.depth = depth
+	return SONIC_INVALID_LITERAL
+}
+
+func giantSyntaxError(src string, cur int, code ErrorCode) error {
+	if cur <= 0 {
+		return error_syntax(0, src, ParsingErrors[SONIC_EOF])
+	}
+	return error_syntax(cur-1, src, ParsingErrors[code])
+}
+
+func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Pointer, dec decFunc) (string, int, error) {
+	if f&(1<<_F_validate_string) != 0 && !utf8.ValidateString(s) {
+		dbuf := utf8.CorrectWith(nil, rt.Str2Mem(s), "\ufffd")
+		s = rt.Mem2Str(dbuf)
+	}
+
+	sess := getStreamSession()
+	defer FreeStreamSession(sess)
+
+	isEface := etp == anyType || etp == mapEfaceType || etp == sliceEfaceType
+	sess.beginGiant(f, isEface, s, true)
+	code := sess.scanComplete(s)
+	if code != SONIC_OK {
+		return s, sess.cur, fix_error(s, 0, giantSyntaxError(s, sess.cur, code))
+	}
+
+	p := sess.p
+	p.Json = s
+	p.unesc = sess.unesc
+	p.options = f
+	sess.ctx.Parser = p
+	if canUseFastMap(f, etp) {
+		sess.ctx.initSliceArena()
+	} else {
+		sess.ctx.sliceArena = nil
+	}
+	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
+	sess.ctx.Parser = nil
+	sess.ctx.sliceArena = nil
+	err := fix_error(s, 0, merr)
+	return s, sess.cur, err
+}
+
+func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Type, vp unsafe.Pointer, dec decFunc, sessPtr **InputSession) error {
+	origPos := *i
+	sub := (*s)[origPos:]
+
+	sess := getStreamSession()
+	defer FreeStreamSession(sess)
+
+	isEface := etp == anyType || etp == mapEfaceType || etp == sliceEfaceType
+	sess.beginGiant(f, isEface, sub, false)
+	code := sess.scanComplete(sub)
+
+	checkEnd := sess.cur
+	if checkEnd > len(sub) {
+		checkEnd = len(sub)
+	}
+	if f&(1<<_F_validate_string) != 0 && checkEnd > 0 && !utf8.ValidateString(sub[:checkEnd]) {
+		dbuf := utf8.CorrectWith(nil, rt.Str2Mem(sub), "\ufffd")
+		sub = rt.Mem2Str(dbuf)
+		*s = (*s)[:origPos] + sub
+		sess.beginGiant(f, isEface, sub, false)
+		code = sess.scanComplete(sub)
+	}
+
+	if code != SONIC_OK {
+		if sessPtr != nil {
+			*sessPtr = nil
+		}
+		*i = origPos + sess.cur
+		return fix_error(*s, origPos, giantSyntaxError(sub, sess.cur, code))
+	}
+
+	p := sess.p
+	p.Json = sub
+	p.unesc = sess.unesc
+	p.options = f
+	sess.ctx.Parser = p
+	if canUseFastMap(f, etp) {
+		sess.ctx.initSliceArena()
+	} else {
+		sess.ctx.sliceArena = nil
+	}
+	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
+	sess.ctx.Parser = nil
+	sess.ctx.sliceArena = nil
+	err := fix_error(*s, origPos, merr)
+
+	newPos := origPos + sess.cur
+	if sessPtr != nil && err != nil {
+		*sessPtr = nil
+	}
+	*i = newPos
+	return err
 }

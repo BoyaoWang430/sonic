@@ -52,8 +52,111 @@ type rootEncPlan struct {
 	prog         *ir.Program
 	boxPool      *sync.Pool
 	pureSpecs    []ir.StructFieldSpec
+	elemSize     uintptr
 	isDirectPtr  bool
 	hasPureSpecs bool
+	isPureSlice  bool
+}
+
+func growSliceBufAfterFirst(buf []byte, startOff int, n int) []byte {
+	if n < 64 {
+		return buf
+	}
+	perElem := (len(buf) - startOff) + 1
+	if perElem > 4096 {
+		perElem = 4096
+	}
+	rem := perElem * (n - 1)
+	est := len(buf) + rem + (rem >> 3) + 64
+	if est > cap(buf) {
+		grown := make([]byte, len(buf), est)
+		copy(grown, buf)
+		return grown
+	}
+	return buf
+}
+
+func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, specs []ir.StructFieldSpec, s *vars.Stack, flags uint64) error {
+	if rv.IsNil() {
+		if flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
+			*b = append(*b, '[', ']')
+		} else {
+			*b = append(*b, 'n', 'u', 'l', 'l')
+		}
+		return nil
+	}
+	n := rv.Len()
+	if n == 0 {
+		*b = append(*b, '[', ']')
+		return nil
+	}
+	if !s.Save(0, 0, nil, nil) || !s.Save(0, 0, nil, nil) {
+		return vars.ERR_too_deep
+	}
+	dataPtr := rv.UnsafePointer()
+	startOff := len(*b)
+	buf := append(*b, '[', '{')
+	var err error
+	sanitize := flags & alg.SanitizeMask
+	if sanitize == 0 {
+		buf, _, err = encodeStructFieldsDefault(buf, dataPtr, specs, 1<<_S_cond, s, flags)
+		if err != nil {
+			s.Drop()
+			s.Drop()
+			return err
+		}
+		buf = growSliceBufAfterFirst(buf, startOff, n)
+		for idx := 1; idx < n; idx++ {
+			elemPtr := unsafe.Add(dataPtr, uintptr(idx)*elemSize)
+			buf = append(buf, '}', ',', '{')
+			buf, _, err = encodeStructFieldsDefault(buf, elemPtr, specs, 1<<_S_cond, s, flags)
+			if err != nil {
+				s.Drop()
+				s.Drop()
+				return err
+			}
+		}
+	} else {
+		buf, _, err = encodeStructFieldsSanitized(buf, dataPtr, specs, 1<<_S_cond, s, flags, sanitize)
+		if err != nil {
+			s.Drop()
+			s.Drop()
+			return err
+		}
+		buf = growSliceBufAfterFirst(buf, startOff, n)
+		for idx := 1; idx < n; idx++ {
+			elemPtr := unsafe.Add(dataPtr, uintptr(idx)*elemSize)
+			buf = append(buf, '}', ',', '{')
+			buf, _, err = encodeStructFieldsSanitized(buf, elemPtr, specs, 1<<_S_cond, s, flags, sanitize)
+			if err != nil {
+				s.Drop()
+				s.Drop()
+				return err
+			}
+		}
+	}
+	s.Drop()
+	s.Drop()
+	*b = append(buf, '}', ']')
+	return nil
+}
+
+func extractPureSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
+	n := len(*prog)
+	if (n != 17 && n != 15) || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
+		return nil, false
+	}
+	if (*prog)[n-2].Op() != ir.OP_drop || (*prog)[n-1].Op() != ir.OP_byte || (*prog)[n-1].Byte() != ']' {
+		return nil, false
+	}
+	elemEnd := 7
+	if n == 15 {
+		elemEnd = 6
+	}
+	if (*prog)[elemEnd].Op() != ir.OP_slice_next {
+		return nil, false
+	}
+	return extractPureStructSpecs(prog, 1, elemEnd)
 }
 
 func extractPureStructSpecs(prog *ir.Program, start, end int) ([]ir.StructFieldSpec, bool) {
@@ -117,6 +220,19 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			pureSpecs:    pureSpecs,
 			isDirectPtr:  isDirectPtr,
 			hasPureSpecs: hasPureSpecs,
+		}, nil
+	case reflect.Slice:
+		if pureSpecs, ok := extractPureSliceSpecs(prog); ok {
+			return &rootEncPlan{
+				prog:        prog,
+				pureSpecs:   pureSpecs,
+				elemSize:    vt.Elem().Size(),
+				isPureSlice: true,
+			}, nil
+		}
+		return &rootEncPlan{
+			prog:    prog,
+			boxPool: newValueBoxPool(vt),
 		}, nil
 	default:
 		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
@@ -408,6 +524,9 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 			return err
 		}
 		plan = computed.(*rootEncPlan)
+	}
+	if plan.isPureSlice {
+		return encodePureStructSliceRoot(buf, rv, plan.elemSize, plan.pureSpecs, sb, fv)
 	}
 	if plan.boxPool == nil {
 		ptr := rv.UnsafePointer()

@@ -167,14 +167,22 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 	return DecodeWithSession(s, i, f, val, nil)
 }
 
+const giantReadOnlyScanThreshold uintptr = 4 << 20
+
 // DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
 func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return s, 0, err
 	}
+	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree) {
+		return decodeGiantOneCompiled(s, f, etp, vp, dec)
+	}
 
 	p := newParserImpl(s, 0, f)
+	if len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) {
+		p.presizeNodesOne()
+	}
 	defer p.free()
 
 	ctx, err := newContextOnParserWithPlan(p, f, etp, proj)
@@ -199,8 +207,16 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		return err
 	}
 
-	/* parse into document */
 	origPos := *i
+	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
+		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
+		origPos >= 0 && origPos <= len(*s) &&
+		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
+		(proj == nil || !proj.hasRawSubtree) {
+		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
+	}
+
+	/* parse into document */
 	p := newParserFromSession(*s, origPos, uint64(f), sess)
 	defer p.free()
 

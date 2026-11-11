@@ -403,6 +403,18 @@ func calMaxNodeCap(jsonSize int) int {
 	return jsonSize/2 + 2
 }
 
+func (p *Parser) presizeNodesOne() {
+	estNodes := len(p.Json)/11 + 1024
+	if estNodes <= cap(p.nodes) {
+		return
+	}
+	if uintptr(estNodes) > maxPooledNodesCap && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
+		p.backup = p.nodes
+	}
+	p.nodes = make([]node, estNodes)
+	p.nbuf.init(p.nodes)
+}
+
 func (p *Parser) parse() ErrorCode {
 	return parseImpl(p)
 }
