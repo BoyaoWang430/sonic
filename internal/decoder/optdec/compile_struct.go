@@ -246,11 +246,44 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 		elemSize:      elemSize,
 		maxPtrBatch:   maxPtrBatch,
 		fast:          len(wideOffsets) == 0,
+		noInterface:   !typeHasInterface(vt),
 		ptrScalarHint: uint8(ptrScalarCount),
 		ptrStrHint:    uint8(ptrStrCount),
 	}
 	sd.initFlatDirect()
 	return sd
+}
+
+func typeHasInterface(vt reflect.Type) bool {
+	return typeHasInterfaceSeen(vt, nil)
+}
+
+func typeHasInterfaceSeen(vt reflect.Type, seen map[reflect.Type]bool) bool {
+	for vt.Kind() == reflect.Ptr {
+		vt = vt.Elem()
+	}
+	switch vt.Kind() {
+	case reflect.Interface:
+		return true
+	case reflect.Slice, reflect.Array:
+		return typeHasInterfaceSeen(vt.Elem(), seen)
+	case reflect.Map:
+		return typeHasInterfaceSeen(vt.Key(), seen) || typeHasInterfaceSeen(vt.Elem(), seen)
+	case reflect.Struct:
+		if seen == nil {
+			seen = make(map[reflect.Type]bool)
+		}
+		if seen[vt] {
+			return false
+		}
+		seen[vt] = true
+		for i := 0; i < vt.NumField(); i++ {
+			if typeHasInterfaceSeen(vt.Field(i).Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func typeHasPointers(vt reflect.Type) bool {

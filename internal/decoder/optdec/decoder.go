@@ -194,8 +194,10 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
 
+	var activeProj *projPlan
 	var p *Parser
 	if proj != nil && proj.shouldUse(len(s)) {
+		activeProj = proj
 		p = newParserLazy(s, 0, f)
 	} else {
 		p = newParserImpl(s, 0, f)
@@ -205,7 +207,7 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	}
 	defer p.free()
 
-	ctx, err := newContextOnParserWithPlan(p, f, etp, proj)
+	ctx, err := newContextOnParserWithPlan(p, f, etp, activeProj)
 	if err == errGiantStreamFallback {
 		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
@@ -259,8 +261,10 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	}
 
 	/* parse into document */
+	var activeProj *projPlan
 	var p *Parser
 	if proj != nil && proj.shouldUse(len(*s)-origPos) {
+		activeProj = proj
 		p = newParserLazyFromSession(*s, origPos, uint64(f), sess)
 	} else {
 		p = newParserFromSession(*s, origPos, uint64(f), sess)
@@ -270,7 +274,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	}
 	defer p.free()
 
-	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, proj)
+	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, activeProj)
 	if err == errGiantStreamFallback {
 		*i = origPos
 		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)

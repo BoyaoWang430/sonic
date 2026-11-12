@@ -85,7 +85,7 @@ func (sc *schemaScanner) byteAt(pos int) byte {
 const errCodeGiantStreamFallback ErrorCode = -1
 
 func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
-	if !plan.shouldUse(p.end) {
+	if plan == nil || plan.kind == projFull || plan.kind == projScalar || plan.kind == projBytes {
 		if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
 			return errCodeGiantStreamFallback
 		}
@@ -207,7 +207,7 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		return false, sc.mutatedPadded
 	}
 	if !plan.hasRawSubtree {
-		if sc.skippedKeys*4 < sc.matchedKeys && sc.skippedBytes*3 < sc.end && (!plan.isBounded || sc.end < 8192) {
+		if sc.skippedKeys*4 < sc.matchedKeys && sc.skippedBytes*3 < sc.end {
 			plan.recordDense()
 		} else {
 			plan.recordSparse()

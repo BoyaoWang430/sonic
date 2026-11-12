@@ -11,8 +11,10 @@ import (
 
 const nodeSize = unsafe.Sizeof(node{})
 
-const fastStructExcludeMask = uint64(consts.OptionCaseSensitive) |
-	uint64(OptionDisableUnknown) |
+const fastStructStrictExcludeMask = uint64(consts.OptionCaseSensitive) |
+	uint64(OptionDisableUnknown)
+
+const fastStructExcludeMask = fastStructStrictExcludeMask |
 	(1 << _F_use_number) |
 	(1 << _F_use_int64)
 
@@ -223,6 +225,7 @@ type structDecoder struct {
 	fast              bool
 	flatDirect        bool
 	flatPureASCIIKeys bool
+	noInterface       bool
 	ptrScalarHint     uint8
 	ptrStrHint        uint8
 	flatPtrMask       uint32
@@ -306,8 +309,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 
 	p := ctx.Parser
 	opts := p.options
-	if d.fast && opts&fastStructExcludeMask == 0 {
-		return d.fromObjFast(vp, node.ptr, p, p.Json, opts&(1<<_F_copy_string) != 0, ctx)
+	if d.fast {
+		exclude := fastStructExcludeMask
+		if d.noInterface {
+			exclude = fastStructStrictExcludeMask
+		}
+		if opts&exclude == 0 {
+			return d.fromObjFast(vp, node.ptr, p, p.Json, opts&(1<<_F_copy_string) != 0, ctx)
+		}
 	}
 	return d.fromObjSlow(vp, node.ptr, p, opts, ctx)
 }

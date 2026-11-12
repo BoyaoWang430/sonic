@@ -77,3 +77,59 @@ func TestCParityRawNumberBlockErrorPriority(t *testing.T) {
 		}
 	}
 }
+
+// TestCParityNonNegativeNeverProducesKSint guards the scanner invariant relied upon
+// by sintToFloat64 / sintToFloat32: non-negative numbers never emit KSint, and KSint
+// with raw value 0 is produced exclusively by "-0".
+func TestCParityNonNegativeNeverProducesKSint(t *testing.T) {
+	nonNegative := []string{
+		"0",
+		"00",
+		"1",
+		"42",
+		"9223372036854775807",
+		"9223372036854775808",
+		"18446744073709551615",
+		"18446744073709551616",
+		"0.0",
+		"0e0",
+		"0e-10",
+		"0e999999999999",
+	}
+	for _, src := range nonNegative {
+		input := append([]byte(src), padding...)
+		cur := unsafe.Pointer(&input[0])
+		var n cParityNum
+		scratch := make([]byte, 800)
+		code := cParityParseNumber(&cur, &n, false, &scratch)
+		if code != SONIC_OK {
+			t.Fatalf("src=%q unexpected error code %d", src, code)
+		}
+		if n.typ == KSint {
+			t.Fatalf("src=%q produced KSint (val=%#x); non-negative inputs must never emit KSint", src, n.val)
+		}
+	}
+
+	// Verify via full Parser + schemaScanner that "0" produces +0.0 while "-0" produces -0.0.
+	for _, tc := range []struct {
+		json string
+		neg  bool
+	}{
+		{`{"f":0}`, false},
+		{`{"f":-0}`, true},
+		{`{"f":0.0}`, false},
+		{`{"f":-0.0}`, true},
+	} {
+		var out struct {
+			F float64 `json:"f"`
+			S []int   `json:"s"` // forces non-flat_direct path too when tested via Parser
+		}
+		_, _, err := DecodeOne(tc.json, 0, &out)
+		if err != nil {
+			t.Fatalf("json=%s err=%v", tc.json, err)
+		}
+		if out.F != 0 || math.Signbit(out.F) != tc.neg {
+			t.Fatalf("json=%s got %v (signbit=%v), want signbit=%v", tc.json, out.F, math.Signbit(out.F), tc.neg)
+		}
+	}
+}

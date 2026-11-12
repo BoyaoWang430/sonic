@@ -38,6 +38,7 @@ type flatStructPlan struct {
 
 const (
 	flatMaxInputLen      int    = 1 << 20
+	flatSingleDocMaxLen  int    = 4096
 	flatBackoffThreshold uint32 = 8
 	flatMaxNestedDepth   int    = 2
 	// UseNumber and UseInt64 only affect untyped interface{} fields, which flat structs never contain.
@@ -190,7 +191,11 @@ func buildFlatPlanGroup(plan *flatStructPlan, sd *structDecoder, baseOffset uint
 // completely untouched for the standard decoder fallback.
 func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd *structDecoder, utf8Prechecked, checkTrailing bool) (int, bool) {
 	end := len(s)
-	if startPos < 0 || startPos >= end || end-startPos > flatMaxInputLen || f&flatUnsupportedOpts != 0 {
+	maxLen := flatMaxInputLen
+	if checkTrailing {
+		maxLen = flatSingleDocMaxLen
+	}
+	if startPos < 0 || startPos >= end || end-startPos > maxLen || f&flatUnsupportedOpts != 0 {
 		return 0, false
 	}
 	streak := atomic.LoadUint32(&sd.flatFailStreak)
@@ -282,10 +287,12 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 	}
 
 	var staged [32]flatStagedField
+	var preNullStaged *[32]flatStagedField
 	var presentMask uint32
 	var strMask uint32
 	var nullMask uint32
 	var nulledOnceMask uint32
+	var preNullMask uint32
 	var nonASCII uint64
 
 	fields := sd.fields
@@ -390,6 +397,13 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 				}
 				pos += 3
 				if ptrMask&bit != 0 {
+					if nulledOnceMask&bit == 0 && presentMask&bit != 0 {
+						if preNullStaged == nil {
+							preNullStaged = flatAllocPreNullStaged()
+						}
+						preNullStaged[idx] = staged[idx]
+						preNullMask |= bit
+					}
 					nullMask |= bit
 					nulledOnceMask |= bit
 					presentMask &^= bit
@@ -487,7 +501,7 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 		return pos, true
 	}
 
-	flatCommitWithPointersRoot(vp, fields, &staged, presentMask, strMask, nullMask, nulledOnceMask, s, copyStr)
+	flatCommitWithPointersRoot(vp, fields, &staged, preNullStaged, presentMask, strMask, nullMask, nulledOnceMask, preNullMask, s, copyStr)
 	return pos, true
 }
 
@@ -520,13 +534,15 @@ func tryDecodeFlatPlanBody(s string, startPos, end int, f uint64, vp unsafe.Poin
 	}
 
 	var staged [32]flatStagedField
+	var preNullStaged *[32]flatStagedField
 	var presentMask uint32
 	var strMask uint32
 	var nullMask uint32
 	var nulledOnceMask uint32
+	var preNullMask uint32
 	var nonASCII uint64
 
-	pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, 0, validateStr, caseSensitive, disUnknown, strictURC, &nonASCII, &staged, &presentMask, &strMask, &nullMask, &nulledOnceMask)
+	pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, 0, validateStr, caseSensitive, disUnknown, strictURC, &nonASCII, &staged, &preNullStaged, &presentMask, &strMask, &nullMask, &nulledOnceMask, &preNullMask)
 	if !ok {
 		return 0, false
 	}
@@ -546,7 +562,7 @@ func tryDecodeFlatPlanBody(s string, startPos, end int, f uint64, vp unsafe.Poin
 		return pos, true
 	}
 
-	flatCommitPlanLeaves(vp, plan.leaves, plan.ptrMask, &staged, presentMask, strMask, nullMask, nulledOnceMask, s, copyStr)
+	flatCommitPlanLeaves(vp, plan.leaves, plan.ptrMask, &staged, preNullStaged, presentMask, strMask, nullMask, nulledOnceMask, preNullMask, s, copyStr)
 	return pos, true
 }
 
@@ -559,7 +575,8 @@ func flatScanPlanGroup(
 	validateStr, caseSensitive, disUnknown, strictURC bool,
 	nonASCII *uint64,
 	staged *[32]flatStagedField,
-	presentMask, strMask, nullMask, nulledOnceMask *uint32,
+	preNullStaged **[32]flatStagedField,
+	presentMask, strMask, nullMask, nulledOnceMask, preNullMask *uint32,
 ) (int, bool) {
 	if pos >= end {
 		return 0, false
@@ -696,7 +713,7 @@ func flatScanPlanGroup(
 				if vc != '{' {
 					return 0, false
 				}
-				pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, int(-slot), validateStr, caseSensitive, disUnknown, strictURC, nonASCII, staged, presentMask, strMask, nullMask, nulledOnceMask)
+				pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, int(-slot), validateStr, caseSensitive, disUnknown, strictURC, nonASCII, staged, preNullStaged, presentMask, strMask, nullMask, nulledOnceMask, preNullMask)
 				if !ok {
 					return 0, false
 				}
@@ -711,6 +728,13 @@ func flatScanPlanGroup(
 				}
 				pos += 3
 				if ptrMask&bit != 0 {
+					if *nulledOnceMask&bit == 0 && *presentMask&bit != 0 {
+						if *preNullStaged == nil {
+							*preNullStaged = flatAllocPreNullStaged()
+						}
+						(*preNullStaged)[leafIdx] = staged[leafIdx]
+						*preNullMask |= bit
+					}
 					*nullMask |= bit
 					*nulledOnceMask |= bit
 					*presentMask &^= bit
@@ -926,14 +950,99 @@ func flatWriteValueScalarOrStr(elem unsafe.Pointer, kind uint8, st *flatStagedFi
 	}
 }
 
+//go:noinline
+func flatAllocPreNullStaged() *[32]flatStagedField {
+	return new([32]flatStagedField)
+}
+
+//go:noinline
+func flatCommitPreNullRoot(
+	vp unsafe.Pointer,
+	fields []fieldEntry,
+	preNullStaged *[32]flatStagedField,
+	preNullMask uint32,
+	s string,
+	copyStr bool,
+) {
+	var copySlabBytes int
+	if copyStr {
+		for m := preNullMask; m != 0; m &= m - 1 {
+			fi := bits.TrailingZeros32(m)
+			fe := &fields[fi]
+			if fe.kind == fieldKindPtrString && *(*unsafe.Pointer)(unsafe.Add(vp, uintptr(fe.offset))) != nil {
+				n := int(preNullStaged[fi].strLen)
+				if n <= maxArenaStrLen {
+					copySlabBytes += n
+				}
+			}
+		}
+	}
+	var copySlab []byte
+	copyOff := 0
+	if copySlabBytes > 0 {
+		copySlab = make([]byte, copySlabBytes)
+	}
+	for m := preNullMask; m != 0; m &= m - 1 {
+		fi := bits.TrailingZeros32(m)
+		bit := uint32(1) << uint(fi)
+		fe := &fields[fi]
+		elem := unsafe.Add(vp, uintptr(fe.offset))
+		if *(*unsafe.Pointer)(elem) != nil {
+			flatWritePtrLeaf(elem, fe.kind, &preNullStaged[fi], bit, 0, s, copyStr, copySlab, &copyOff, nil, nil, nil, nil)
+		}
+	}
+}
+
+//go:noinline
+func flatCommitPreNullLeaves(
+	vp unsafe.Pointer,
+	leaves []flatLeaf,
+	preNullStaged *[32]flatStagedField,
+	preNullMask uint32,
+	s string,
+	copyStr bool,
+) {
+	var copySlabBytes int
+	if copyStr {
+		for m := preNullMask; m != 0; m &= m - 1 {
+			fi := bits.TrailingZeros32(m)
+			lf := &leaves[fi]
+			if lf.kind == fieldKindPtrString && *(*unsafe.Pointer)(unsafe.Add(vp, uintptr(lf.offset))) != nil {
+				n := int(preNullStaged[fi].strLen)
+				if n <= maxArenaStrLen {
+					copySlabBytes += n
+				}
+			}
+		}
+	}
+	var copySlab []byte
+	copyOff := 0
+	if copySlabBytes > 0 {
+		copySlab = make([]byte, copySlabBytes)
+	}
+	for m := preNullMask; m != 0; m &= m - 1 {
+		fi := bits.TrailingZeros32(m)
+		bit := uint32(1) << uint(fi)
+		lf := &leaves[fi]
+		elem := unsafe.Add(vp, uintptr(lf.offset))
+		if *(*unsafe.Pointer)(elem) != nil {
+			flatWritePtrLeaf(elem, lf.kind, &preNullStaged[fi], bit, 0, s, copyStr, copySlab, &copyOff, nil, nil, nil, nil)
+		}
+	}
+}
+
 func flatCommitWithPointersRoot(
 	vp unsafe.Pointer,
 	fields []fieldEntry,
 	staged *[32]flatStagedField,
-	presentMask, strMask, nullMask, nulledOnceMask uint32,
+	preNullStaged *[32]flatStagedField,
+	presentMask, strMask, nullMask, nulledOnceMask, preNullMask uint32,
 	s string,
 	copyStr bool,
 ) {
+	if preNullMask != 0 {
+		flatCommitPreNullRoot(vp, fields, preNullStaged, preNullMask, s, copyStr)
+	}
 	for m := nullMask; m != 0; m &= m - 1 {
 		fi := bits.TrailingZeros32(m)
 		*(*unsafe.Pointer)(unsafe.Add(vp, uintptr(fields[fi].offset))) = nil
@@ -1006,7 +1115,8 @@ func flatCommitPlanLeaves(
 	leaves []flatLeaf,
 	ptrMask uint32,
 	staged *[32]flatStagedField,
-	presentMask, strMask, nullMask, nulledOnceMask uint32,
+	preNullStaged *[32]flatStagedField,
+	presentMask, strMask, nullMask, nulledOnceMask, preNullMask uint32,
 	s string,
 	copyStr bool,
 ) {
@@ -1031,6 +1141,9 @@ func flatCommitPlanLeaves(
 		return
 	}
 
+	if preNullMask != 0 {
+		flatCommitPreNullLeaves(vp, leaves, preNullStaged, preNullMask, s, copyStr)
+	}
 	for m := nullMask; m != 0; m &= m - 1 {
 		fi := bits.TrailingZeros32(m)
 		*(*unsafe.Pointer)(unsafe.Add(vp, uintptr(leaves[fi].offset))) = nil

@@ -13,6 +13,9 @@ jobs:
           - go-version: '1.26.x'
             goriscv64: rva22u64
             qemu_cpu: rv64,zba=true,zbb=true,zbs=true
+          - go-version: '1.26.x'
+            goriscv64: rva23u64
+            qemu_cpu: rv64,v=true,vlen=128,zba=true,zbb=true,zbs=true,zicond=true,zfa=true,zfhmin=true,zcb=true
           - go-version: '1.27.x'
             goriscv64: rva22u64
             qemu_cpu: rv64,zba=true,zbb=true,zbs=true

@@ -384,6 +384,9 @@ func (val Node) ParseNumber(ctx *Context) (json.Number, bool) {
 	return json.Number(s), true
 }
 
+// sintToFloat64 / sintToFloat32 rely on the scanner invariant that non-negative
+// integer tokens always emit KUint; KSint with raw value 0 is produced exclusively
+// by "-0" (e.g. "-0"), so v == 0 unambiguously represents IEEE-754 negative zero.
 func sintToFloat64(v int64) float64 {
 	if v == 0 {
 		return math.Copysign(0, -1)
