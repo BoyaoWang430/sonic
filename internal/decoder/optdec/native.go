@@ -163,7 +163,7 @@ type jsonStat struct {
 }
 
 var (
-	defaultJsonPaddedCap   uintptr = 64 << 10                          // 64 KB initial pool buffer
+	defaultJsonPaddedCap   uintptr = 64 << 10                           // 64 KB initial pool buffer
 	defaultNodesCap        uintptr = (64 << 10) / unsafe.Sizeof(node{}) // 4096 nodes (64 KB) initial pool buffer
 	maxPooledJsonPaddedCap uintptr = 1 << 20                            // 1 MB max pooled padded buffer
 	maxPooledNodesCap      uintptr = (1 << 20) / unsafe.Sizeof(node{})  // 65536 nodes (1 MB) max pooled node buffer
@@ -351,7 +351,12 @@ func (p *Parser) allocStrSlab(n int) []byte {
 	if nextCap == 0 {
 		jsonLen := len(p.Json)
 		if p.options&(1<<_F_copy_string) == 0 {
-			nextCap = 128
+			nextCap = jsonLen / 2
+			if nextCap < 128 {
+				nextCap = 128
+			} else if nextCap > 1024 {
+				nextCap = 1024
+			}
 		} else if p.isEface {
 			nextCap = jsonLen / 2
 			if nextCap < minStrSlabCap {

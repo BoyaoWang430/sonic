@@ -706,3 +706,29 @@ func BenchmarkMapStrI32Decode(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkDecoder_Binding_FlatWithPtrAndNested(b *testing.B) {
+	type nestedSpan struct {
+		TraceID string `json:"trace_id"`
+		SpanID  uint64 `json:"span_id"`
+		Sampled bool   `json:"sampled"`
+	}
+	type richEvent struct {
+		ID      int64      `json:"id"`
+		Level   int8       `json:"level"`
+		Code    uint16     `json:"code"`
+		UserID  *int64     `json:"user_id"`
+		Latency *float64   `json:"latency"`
+		Tag     *string    `json:"tag"`
+		Span    nestedSpan `json:"span"`
+	}
+	raw := `{"id":9001,"level":3,"code":200,"user_id":424242,"latency":4.125,"tag":"edge-gw","span":{"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":778899,"sampled":true}}`
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	var dst richEvent
+	for i := 0; i < b.N; i++ {
+		if err := sonic.ConfigFastest.UnmarshalFromString(raw, &dst); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

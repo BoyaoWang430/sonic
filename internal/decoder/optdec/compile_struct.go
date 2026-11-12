@@ -195,8 +195,8 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 			switch fe.kind {
 			case fieldKindPtrString:
 				ptrStrCount++
-			case fieldKindPtrI64, fieldKindPtrInt, fieldKindPtrI32,
-				fieldKindPtrU64, fieldKindPtrUint, fieldKindPtrU32,
+			case fieldKindPtrI64, fieldKindPtrInt, fieldKindPtrI32, fieldKindPtrI16, fieldKindPtrI8,
+				fieldKindPtrU64, fieldKindPtrUint, fieldKindPtrU32, fieldKindPtrU16, fieldKindPtrU8,
 				fieldKindPtrBool, fieldKindPtrF64, fieldKindPtrF32:
 				ptrScalarCount++
 			case fieldKindStruct, fieldKindPtrStruct:
@@ -234,50 +234,23 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 			}
 		}
 	}
-	flatDirect := len(wideOffsets) == 0 && len(entries) > 0 && len(entries) <= 32
-	flatPureASCIIKeys := flatDirect
-	if flatDirect {
-		for i := range entries {
-			switch entries[i].kind {
-			case fieldKindString, fieldKindI64, fieldKindI32,
-				fieldKindU64, fieldKindU32, fieldKindBool,
-				fieldKindF64, fieldKindF32:
-				if flatPureASCIIKeys {
-					name := entries[i].name
-					for j := 0; j < len(name); j++ {
-						b := name[j]
-						if b < 0x20 || b >= 0x80 || b == '"' || b == '\\' {
-							flatPureASCIIKeys = false
-							break
-						}
-					}
-				}
-			default:
-				flatDirect = false
-				flatPureASCIIKeys = false
-			}
-			if !flatDirect {
-				break
-			}
-		}
+	sd := &structDecoder{
+		fieldMap:      caching.NewFieldCache(fv),
+		fields:        entries,
+		fieldDecs:     decs,
+		wideOffsets:   wideOffsets,
+		structName:    vt.Name(),
+		typ:           vt,
+		goType:        vt,
+		sliceType:     sliceType,
+		elemSize:      elemSize,
+		maxPtrBatch:   maxPtrBatch,
+		fast:          len(wideOffsets) == 0,
+		ptrScalarHint: uint8(ptrScalarCount),
+		ptrStrHint:    uint8(ptrStrCount),
 	}
-	return &structDecoder{
-		fieldMap:          caching.NewFieldCache(fv),
-		fields:            entries,
-		fieldDecs:         decs,
-		wideOffsets:       wideOffsets,
-		structName:        vt.Name(),
-		typ:               vt,
-		goType:            vt,
-		sliceType:         sliceType,
-		elemSize:          elemSize,
-		maxPtrBatch:       maxPtrBatch,
-		fast:              len(wideOffsets) == 0,
-		flatDirect:        flatDirect,
-		flatPureASCIIKeys: flatPureASCIIKeys,
-		ptrScalarHint:     uint8(ptrScalarCount),
-		ptrStrHint:        uint8(ptrStrCount),
-	}
+	sd.initFlatDirect()
+	return sd
 }
 
 func typeHasPointers(vt reflect.Type) bool {

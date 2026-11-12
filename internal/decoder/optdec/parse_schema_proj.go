@@ -49,6 +49,7 @@ type schemaScanner struct {
 	mutatedPadded bool
 	denseBailout  bool
 	skippedKeys   int
+	skippedBytes  int
 	matchedKeys   int
 	num           cParityNum
 }
@@ -206,7 +207,7 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		return false, sc.mutatedPadded
 	}
 	if !plan.hasRawSubtree {
-		if sc.skippedKeys*4 < sc.matchedKeys {
+		if sc.skippedKeys*4 < sc.matchedKeys && sc.skippedBytes*3 < sc.end && (!plan.isBounded || sc.end < 8192) {
 			plan.recordDense()
 		} else {
 			plan.recordSparse()
@@ -660,6 +661,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 				if !sc.skipValidateValue(vc) {
 					return false
 				}
+				sc.skippedBytes += sc.pos - vStart
 			} else {
 				if !sc.skipValidateValue(vc) {
 					return false

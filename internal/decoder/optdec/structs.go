@@ -21,8 +21,12 @@ const (
 	fieldKindString
 	fieldKindI64
 	fieldKindI32
+	fieldKindI16
+	fieldKindI8
 	fieldKindU64
 	fieldKindU32
+	fieldKindU16
+	fieldKindU8
 	fieldKindBool
 	fieldKindF64
 	fieldKindF32
@@ -45,9 +49,13 @@ const (
 	fieldKindPtrI64
 	fieldKindPtrInt
 	fieldKindPtrI32
+	fieldKindPtrI16
+	fieldKindPtrI8
 	fieldKindPtrU64
 	fieldKindPtrUint
 	fieldKindPtrU32
+	fieldKindPtrU16
+	fieldKindPtrU8
 	fieldKindPtrBool
 	fieldKindPtrF64
 	fieldKindPtrF32
@@ -81,10 +89,18 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 		fe.kind = fieldKindI64
 	case *i32Decoder:
 		fe.kind = fieldKindI32
+	case *i16Decoder:
+		fe.kind = fieldKindI16
+	case *i8Decoder:
+		fe.kind = fieldKindI8
 	case *u64Decoder:
 		fe.kind = fieldKindU64
 	case *u32Decoder:
 		fe.kind = fieldKindU32
+	case *u16Decoder:
+		fe.kind = fieldKindU16
+	case *u8Decoder:
+		fe.kind = fieldKindU8
 	case *boolDecoder:
 		fe.kind = fieldKindBool
 	case *f64Decoder:
@@ -114,6 +130,14 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 			if _, ok := d.deref.(*i32Decoder); ok {
 				fe.kind = fieldKindPtrI32
 			}
+		case ptrInt16Type:
+			if _, ok := d.deref.(*i16Decoder); ok {
+				fe.kind = fieldKindPtrI16
+			}
+		case ptrInt8Type:
+			if _, ok := d.deref.(*i8Decoder); ok {
+				fe.kind = fieldKindPtrI8
+			}
 		case ptrUint64Type:
 			if _, ok := d.deref.(*u64Decoder); ok {
 				fe.kind = fieldKindPtrU64
@@ -127,6 +151,14 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 		case ptrUint32Type:
 			if _, ok := d.deref.(*u32Decoder); ok {
 				fe.kind = fieldKindPtrU32
+			}
+		case ptrUint16Type:
+			if _, ok := d.deref.(*u16Decoder); ok {
+				fe.kind = fieldKindPtrU16
+			}
+		case ptrUint8Type:
+			if _, ok := d.deref.(*u8Decoder); ok {
+				fe.kind = fieldKindPtrU8
 			}
 		case ptrBoolType:
 			if _, ok := d.deref.(*boolDecoder); ok {
@@ -193,6 +225,8 @@ type structDecoder struct {
 	flatPureASCIIKeys bool
 	ptrScalarHint     uint8
 	ptrStrHint        uint8
+	flatPtrMask       uint32
+	flatPlan          *flatStructPlan
 	flatFailStreak    uint32
 	flatProbeTick     uint32
 }
@@ -366,6 +400,54 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				return true
 			}
 		}
+	case fieldKindPtrI16:
+		if vtyp == KUint && vnode.val <= math.MaxInt16 {
+			pp := (**int16)(elem)
+			dst := *pp
+			if dst == nil {
+				dst = (*int16)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				*pp = dst
+			}
+			*dst = int16(vnode.val)
+			return true
+		}
+		if vtyp == KSint {
+			iv := int64(vnode.val)
+			if iv >= math.MinInt16 && iv <= math.MaxInt16 {
+				pp := (**int16)(elem)
+				dst := *pp
+				if dst == nil {
+					dst = (*int16)(p.allocScalarPtr(int(d.ptrScalarHint)))
+					*pp = dst
+				}
+				*dst = int16(iv)
+				return true
+			}
+		}
+	case fieldKindPtrI8:
+		if vtyp == KUint && vnode.val <= math.MaxInt8 {
+			pp := (**int8)(elem)
+			dst := *pp
+			if dst == nil {
+				dst = (*int8)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				*pp = dst
+			}
+			*dst = int8(vnode.val)
+			return true
+		}
+		if vtyp == KSint {
+			iv := int64(vnode.val)
+			if iv >= math.MinInt8 && iv <= math.MaxInt8 {
+				pp := (**int8)(elem)
+				dst := *pp
+				if dst == nil {
+					dst = (*int8)(p.allocScalarPtr(int(d.ptrScalarHint)))
+					*pp = dst
+				}
+				*dst = int8(iv)
+				return true
+			}
+		}
 	case fieldKindPtrU64:
 		if vtyp == KUint {
 			pp := (**uint64)(elem)
@@ -397,6 +479,28 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				*pp = dst
 			}
 			*dst = uint32(vnode.val)
+			return true
+		}
+	case fieldKindPtrU16:
+		if vtyp == KUint && vnode.val <= math.MaxUint16 {
+			pp := (**uint16)(elem)
+			dst := *pp
+			if dst == nil {
+				dst = (*uint16)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				*pp = dst
+			}
+			*dst = uint16(vnode.val)
+			return true
+		}
+	case fieldKindPtrU8:
+		if vtyp == KUint && vnode.val <= math.MaxUint8 {
+			pp := (**uint8)(elem)
+			dst := *pp
+			if dst == nil {
+				dst = (*uint8)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				*pp = dst
+			}
+			*dst = uint8(vnode.val)
 			return true
 		}
 	case fieldKindPtrBool:
@@ -627,6 +731,30 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 						continue
 					}
 				}
+			case fieldKindI16:
+				if vtyp == KUint && vnode.val <= math.MaxInt16 {
+					*(*int16)(elem) = int16(vnode.val)
+					continue
+				}
+				if vtyp == KSint {
+					iv := int64(vnode.val)
+					if iv >= math.MinInt16 && iv <= math.MaxInt16 {
+						*(*int16)(elem) = int16(iv)
+						continue
+					}
+				}
+			case fieldKindI8:
+				if vtyp == KUint && vnode.val <= math.MaxInt8 {
+					*(*int8)(elem) = int8(vnode.val)
+					continue
+				}
+				if vtyp == KSint {
+					iv := int64(vnode.val)
+					if iv >= math.MinInt8 && iv <= math.MaxInt8 {
+						*(*int8)(elem) = int8(iv)
+						continue
+					}
+				}
 			case fieldKindBool:
 				if vtyp == KTrue {
 					*(*bool)(elem) = true
@@ -671,6 +799,16 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			case fieldKindU32:
 				if vtyp == KUint && vnode.val <= math.MaxUint32 {
 					*(*uint32)(elem) = uint32(vnode.val)
+					continue
+				}
+			case fieldKindU16:
+				if vtyp == KUint && vnode.val <= math.MaxUint16 {
+					*(*uint16)(elem) = uint16(vnode.val)
+					continue
+				}
+			case fieldKindU8:
+				if vtyp == KUint && vnode.val <= math.MaxUint8 {
+					*(*uint8)(elem) = uint8(vnode.val)
 					continue
 				}
 			case fieldKindPtrStruct:
@@ -1066,6 +1204,30 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 						continue
 					}
 				}
+			case fieldKindI16:
+				if vtyp == KUint && vnode.val <= math.MaxInt16 {
+					*(*int16)(elem) = int16(vnode.val)
+					continue
+				}
+				if vtyp == KSint {
+					iv := int64(vnode.val)
+					if iv >= math.MinInt16 && iv <= math.MaxInt16 {
+						*(*int16)(elem) = int16(iv)
+						continue
+					}
+				}
+			case fieldKindI8:
+				if vtyp == KUint && vnode.val <= math.MaxInt8 {
+					*(*int8)(elem) = int8(vnode.val)
+					continue
+				}
+				if vtyp == KSint {
+					iv := int64(vnode.val)
+					if iv >= math.MinInt8 && iv <= math.MaxInt8 {
+						*(*int8)(elem) = int8(iv)
+						continue
+					}
+				}
 			case fieldKindBool:
 				if vtyp == KTrue {
 					*(*bool)(elem) = true
@@ -1110,6 +1272,16 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			case fieldKindU32:
 				if vtyp == KUint && vnode.val <= math.MaxUint32 {
 					*(*uint32)(elem) = uint32(vnode.val)
+					continue
+				}
+			case fieldKindU16:
+				if vtyp == KUint && vnode.val <= math.MaxUint16 {
+					*(*uint16)(elem) = uint16(vnode.val)
+					continue
+				}
+			case fieldKindU8:
+				if vtyp == KUint && vnode.val <= math.MaxUint8 {
+					*(*uint8)(elem) = uint8(vnode.val)
 					continue
 				}
 			case fieldKindPtrStruct:

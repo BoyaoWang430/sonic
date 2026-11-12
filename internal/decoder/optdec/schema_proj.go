@@ -268,13 +268,15 @@ func (p *projPlan) shouldUse(jsonLen int) bool {
 	if jsonLen < 256 {
 		return false
 	}
-	if atomic.LoadUint32(&p.denseStreak) >= 2 {
-		if (atomic.AddUint32(&p.probeTick, 1) & 255) != 0 {
-			return false
+	if !p.isBounded || jsonLen < 8192 {
+		if atomic.LoadUint32(&p.denseStreak) >= 2 {
+			if (atomic.AddUint32(&p.probeTick, 1) & 255) != 0 {
+				return false
+			}
 		}
 	}
 	if p.isBounded {
-		return jsonLen >= p.totalFields*48
+		return jsonLen >= p.totalFields*24 && p.maxStructWidth <= 32 && p.totalFields <= 64
 	}
-	return jsonLen >= 512 && p.maxStructWidth > 0 && p.maxStructWidth <= 12 && p.totalFields <= 24
+	return jsonLen >= 384 && p.maxStructWidth > 0 && p.maxStructWidth <= 32 && p.totalFields <= 64
 }
