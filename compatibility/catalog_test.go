@@ -50,7 +50,7 @@ func TestCase_F32_OVF(t *testing.T) {
 	require.Error(t, je)
 	require.Equal(t, float32(0), s, "sonic leaves dest at 0")
 
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.True(t, math.IsInf(float64(j), 1), "std jsonv2 saturates to +Inf")
 	} else {
 		require.Equal(t, float32(0), j, "legacy std leaves dest at 0")
@@ -68,7 +68,7 @@ func TestCase_F64_OVF(t *testing.T) {
 	require.Error(t, je)
 	require.Equal(t, float64(0), s, "sonic leaves dest at 0")
 
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.True(t, math.IsInf(j, 1), "std jsonv2 saturates to +Inf")
 	} else {
 		require.Equal(t, float64(0), j, "legacy std leaves dest at 0")
@@ -154,7 +154,7 @@ func TestCase_STR_NULL(t *testing.T) {
 	require.Nil(t, s.S)
 	require.Nil(t, s.I)
 
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		var typeErr *json.UnmarshalTypeError
 		require.ErrorAs(t, je, &typeErr)
 		require.NotNil(t, j.S)
@@ -311,7 +311,7 @@ func TestCase_TM_KEY_QUOTE(t *testing.T) {
 
 	require.JSONEq(t, `{"one":1,"two":2}`, string(sout))
 
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.JSONEq(t, `{"\"one\"":1,"\"two\"":2}`, string(jout))
 	} else {
 		require.JSONEq(t, string(sout), string(jout))
@@ -693,7 +693,7 @@ func TestCase_MAP_STRING_TEXT(t *testing.T) {
 	require.NoError(t, serr)
 	require.NoError(t, jerr)
 	require.JSONEq(t, `{"raw":1}`, string(sout))
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.JSONEq(t, `{"TEXTKEY":1}`, string(jout))
 	} else {
 		require.JSONEq(t, string(sout), string(jout))
@@ -731,7 +731,7 @@ func TestCase_UNSUPPORTED_VALUE_PAYLOAD(t *testing.T) {
 	require.ErrorAs(t, se, &sonicErr)
 	require.ErrorAs(t, je, &jsonErr)
 	require.True(t, sonicErr.Value.IsValid())
-	require.Equal(t, !stdUsesJSONV2, jsonErr.Value.IsValid())
+	require.Equal(t, !stdJSONV2Pre1273, jsonErr.Value.IsValid())
 }
 
 type nestedMiddle struct {
@@ -807,8 +807,10 @@ func TestCase_F64_LONG_OVF(t *testing.T) {
 	if errors.Is(parseErr, strconv.ErrRange) {
 		require.Error(t, je)
 		require.Len(t, j, 1)
-		if stdUsesJSONV2 {
+		if stdJSONV2Pre1273 {
 			require.True(t, math.IsInf(j[0].(float64), 1))
+		} else if stdUsesJSONV2 {
+			require.Equal(t, float64(0), j[0])
 		} else {
 			require.Nil(t, j[0])
 		}

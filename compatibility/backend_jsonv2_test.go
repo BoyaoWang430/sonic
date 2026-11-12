@@ -19,5 +19,30 @@
 
 package compatibility_test
 
+import (
+	"go/version"
+	"runtime"
+	"strings"
+)
+
 // Go 1.27 uses the jsonv2 backend for encoding/json by default.
 const stdUsesJSONV2 = true
+
+// Go 1.27.3 fixed seven DefaultOptionsV1 regressions in the jsonv2-backed
+// encoding/json facade (F32-OVF, F64-OVF, F64-LONG-OVF, STR-NULL, TM-KEY-QUOTE,
+// MAP-STRING-TEXT, UNSUPPORTED-VALUE-PAYLOAD), restoring legacy v1 behavior.
+var stdJSONV2Pre1273 = isPreGo1273(runtime.Version())
+
+func isPreGo1273(v string) bool {
+	if i := strings.Index(v, "go1."); i >= 0 {
+		v = v[i:]
+		if sp := strings.IndexByte(v, ' '); sp >= 0 {
+			v = v[:sp]
+		}
+		if dash := strings.IndexByte(v, '-'); dash >= 0 {
+			v = v[:dash]
+		}
+		return version.Compare(v, "go1.27.3") < 0
+	}
+	return false
+}
