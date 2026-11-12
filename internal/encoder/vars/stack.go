@@ -48,11 +48,15 @@ type Stack struct {
 	ptrSp     int
 	kvSp      int
 	kvOrderSp int
+	kvStrSp   int
+	kvU64Sp   int
 	sb        [inlineStackCap]State
 	sbExtra   []State
 	ptrSlots  [8]unsafe.Pointer
 	KVBuf     []MapKVEntry
 	KVOrder   []int
+	KVStr     []string
+	KVScalar  []uint64
 	ValPtr    unsafe.Pointer
 }
 
@@ -104,6 +108,8 @@ func NewStack() *Stack {
 	ret.ptrSp = 0
 	ret.kvSp = 0
 	ret.kvOrderSp = 0
+	ret.kvStrSp = 0
+	ret.kvU64Sp = 0
 	return ret
 }
 
@@ -124,11 +130,28 @@ func ResetStack(p *Stack) {
 		p.KVOrder = p.KVOrder[:0]
 		p.kvOrderSp = 0
 	}
+	if p.kvStrSp > 0 {
+		for i := 0; i < p.kvStrSp; i++ {
+			p.KVStr[i] = ""
+		}
+		p.KVStr = p.KVStr[:0]
+		p.kvStrSp = 0
+	}
+	if p.kvU64Sp > 0 {
+		p.KVScalar = p.KVScalar[:0]
+		p.kvU64Sp = 0
+	}
 	if cap(p.KVBuf) > maxPooledMapKV {
 		p.KVBuf = nil
 	}
 	if cap(p.KVOrder) > maxPooledMapKV {
 		p.KVOrder = nil
+	}
+	if cap(p.KVStr) > maxPooledMapKV {
+		p.KVStr = nil
+	}
+	if cap(p.KVScalar) > maxPooledMapKV {
+		p.KVScalar = nil
 	}
 	limit := p.sp
 	if limit > inlineStackCap {
@@ -209,6 +232,95 @@ func (s *Stack) ReleaseMapKV(baseKV int, count int, baseOrd int) {
 	s.kvOrderSp = baseOrd
 }
 
+func (s *Stack) ReserveMapKVStr(n int) (baseKV int, baseOrd int, baseStr int) {
+	baseKV, baseOrd = s.ReserveMapKV(n)
+	baseStr = s.kvStrSp
+	endStr := baseStr + n
+	if cap(s.KVStr) < endStr {
+		newCap := cap(s.KVStr) * 2
+		if newCap < 64 {
+			newCap = 64
+		}
+		if newCap < endStr {
+			newCap = endStr
+		}
+		next := make([]string, endStr, newCap)
+		copy(next, s.KVStr[:baseStr])
+		s.KVStr = next
+	} else {
+		s.KVStr = s.KVStr[:endStr]
+	}
+	s.kvStrSp = endStr
+	return baseKV, baseOrd, baseStr
+}
+
+func (s *Stack) GrowMapKVStrOne(k string, v string, localIdx int) {
+	s.GrowMapKVOne(k, nil, localIdx)
+	s.KVStr = append(s.KVStr, v)
+	s.kvStrSp = len(s.KVStr)
+}
+
+func (s *Stack) TrimMapKVStr(baseKV int, baseOrd int, baseStr int, count int) ([]MapKVEntry, []int) {
+	kvSlice, ordSlice := s.TrimMapKV(baseKV, baseOrd, count)
+	for j := baseStr + count; j < s.kvStrSp; j++ {
+		s.KVStr[j] = ""
+	}
+	s.kvStrSp = baseStr + count
+	s.KVStr = s.KVStr[:s.kvStrSp]
+	return kvSlice, ordSlice
+}
+
+func (s *Stack) ReleaseMapKVStr(baseKV int, count int, baseOrd int, baseStr int) {
+	s.ReleaseMapKV(baseKV, count, baseOrd)
+	clearStr := s.KVStr[baseStr : baseStr+count]
+	for i := range clearStr {
+		clearStr[i] = ""
+	}
+	s.KVStr = s.KVStr[:baseStr]
+	s.kvStrSp = baseStr
+}
+
+func (s *Stack) ReserveMapKVScalar(n int) (baseKV int, baseOrd int, baseU64 int) {
+	baseKV, baseOrd = s.ReserveMapKV(n)
+	baseU64 = s.kvU64Sp
+	endU64 := baseU64 + n
+	if cap(s.KVScalar) < endU64 {
+		newCap := cap(s.KVScalar) * 2
+		if newCap < 64 {
+			newCap = 64
+		}
+		if newCap < endU64 {
+			newCap = endU64
+		}
+		next := make([]uint64, endU64, newCap)
+		copy(next, s.KVScalar[:baseU64])
+		s.KVScalar = next
+	} else {
+		s.KVScalar = s.KVScalar[:endU64]
+	}
+	s.kvU64Sp = endU64
+	return baseKV, baseOrd, baseU64
+}
+
+func (s *Stack) GrowMapKVScalarOne(k string, v uint64, localIdx int) {
+	s.GrowMapKVOne(k, nil, localIdx)
+	s.KVScalar = append(s.KVScalar, v)
+	s.kvU64Sp = len(s.KVScalar)
+}
+
+func (s *Stack) TrimMapKVScalar(baseKV int, baseOrd int, baseU64 int, count int) ([]MapKVEntry, []int) {
+	kvSlice, ordSlice := s.TrimMapKV(baseKV, baseOrd, count)
+	s.kvU64Sp = baseU64 + count
+	s.KVScalar = s.KVScalar[:s.kvU64Sp]
+	return kvSlice, ordSlice
+}
+
+func (s *Stack) ReleaseMapKVScalar(baseKV int, count int, baseOrd int, baseU64 int) {
+	s.ReleaseMapKV(baseKV, count, baseOrd)
+	s.KVScalar = s.KVScalar[:baseU64]
+	s.kvU64Sp = baseU64
+}
+
 func (s *Stack) PushPtr(ptr unsafe.Pointer) (unsafe.Pointer, int) {
 	if s.ptrSp < len(s.ptrSlots) {
 		idx := s.ptrSp
@@ -264,6 +376,9 @@ func (s *Stack) Push(v State) bool {
 }
 
 func (s *Stack) EnterDepth(n int) bool {
+	if s == nil {
+		return true
+	}
 	if s.sp+n > MaxStack {
 		return false
 	}
@@ -272,6 +387,9 @@ func (s *Stack) EnterDepth(n int) bool {
 }
 
 func (s *Stack) LeaveDepth(n int) {
+	if s == nil {
+		return
+	}
 	s.sp -= n
 }
 
@@ -320,6 +438,8 @@ func FreeBytes(p *[]byte) {
 func FreeStack(p *Stack) {
 	p.sp = 0
 	p.ptrSp = 0
+	p.kvStrSp = 0
+	p.kvU64Sp = 0
 	p.ValPtr = nil
 	p.sbExtra = nil
 	if cap(p.KVBuf) > maxPooledMapKV {
@@ -327,6 +447,12 @@ func FreeStack(p *Stack) {
 	}
 	if cap(p.KVOrder) > maxPooledMapKV {
 		p.KVOrder = nil
+	}
+	if cap(p.KVStr) > maxPooledMapKV {
+		p.KVStr = nil
+	}
+	if cap(p.KVScalar) > maxPooledMapKV {
+		p.KVScalar = nil
 	}
 	stackPool.Put(p)
 }

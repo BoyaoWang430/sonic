@@ -111,8 +111,7 @@ func (self *Node) MarshalJSON() ([]byte, error) {
 	if !rt.CanSizeResue(cap(*buf)) {
 		ret = *buf
 	} else {
-		ret = make([]byte, len(*buf))
-		copy(ret, *buf)
+		ret = rt.CloneBytesNoZero(*buf)
 		freeBuffer(buf)
 	}
 	return ret, err

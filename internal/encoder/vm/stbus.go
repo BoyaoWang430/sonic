@@ -67,6 +67,25 @@ type rootEncPlan struct {
 	hasDenseSpecs bool
 	isPureSlice   bool
 	allowSizeHint bool
+	boxHasPtrs    bool
+}
+
+func typeHasPointers(vt reflect.Type) bool {
+	switch vt.Kind() {
+	case reflect.Ptr, reflect.UnsafePointer, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface, reflect.Slice, reflect.String:
+		return true
+	case reflect.Array:
+		return vt.Len() > 0 && typeHasPointers(vt.Elem())
+	case reflect.Struct:
+		for i := 0; i < vt.NumField(); i++ {
+			if typeHasPointers(vt.Field(i).Type) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func clampRootSizeHint(n int) uint32 {
@@ -296,6 +315,7 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			prog:          prog,
 			boxPool:       newValueBoxPool(vt),
 			allowSizeHint: vt.Elem().Kind() == reflect.Struct,
+			boxHasPtrs:    true,
 		}, nil
 	default:
 		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
@@ -312,6 +332,7 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			hasPureSpecs:  hasPureSpecs,
 			hasDenseSpecs: hasDenseSpecs,
 			allowSizeHint: vt.Kind() == reflect.Struct,
+			boxHasPtrs:    typeHasPointers(vt),
 		}, nil
 	}
 }
@@ -645,14 +666,16 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 	} else {
 		err = Execute(buf, box.UnsafePointer(), sb, fv, plan.prog)
 	}
-	elem.SetZero()
+	if plan.boxHasPtrs {
+		elem.SetZero()
+	}
 	plan.boxPool.Put(box)
 	return err
 }
 
-// EncodeRoot encodes top-level struct and struct-slice values directly into a pre-sized output slice
-// once the schema's steady-state payload size (>=512B) has been observed, avoiding pooled buffer
-// contention and post-encode memcpy under multi-goroutine workloads.
+// EncodeRoot encodes top-level struct and struct-slice values via per-P pooled scratch buffers
+// with adaptive steady-state capacity hints and unzeroed result cloning, avoiding cold heap
+// zeroing and sync.Pool Stack traffic on pure/dense struct schemas.
 func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	switch val.(type) {
 	case nil, string, []byte, json.RawMessage, json.Number, bool,
@@ -688,41 +711,29 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 				return []byte{'[', ']'}, true, nil
 			}
 		}
-
-		hint := int(plan.sizeHint.Load())
-		if hint >= minDirectRootHint && hint <= maxDirectRootHint {
-			capHint := hint + (hint >> 5) + 96
-			out := make([]byte, 0, capHint)
-			stk := vars.NewStack()
-			err := encodeWithRootPlan(&out, rv, plan, stk, fv)
-			if err != nil {
-				vars.ResetStack(stk)
-				vars.FreeStack(stk)
-				runtime.KeepAlive(val)
-				return nil, true, err
-			}
-			vars.FreeStack(stk)
-			runtime.KeepAlive(val)
-
-			if len(out) > capHint || len(out)*2 < hint {
-				plan.sizeHint.Store(clampRootSizeHint(len(out)))
-			}
-			if cap(out) > len(out)*2 && cap(out) > 1024 {
-				shrunk := make([]byte, len(out))
-				copy(shrunk, out)
-				return shrunk, true, nil
-			}
-			return out, true, nil
-		}
 	}
 
 	buf := vars.NewBytes()
+	if plan.allowSizeHint {
+		hint := int(plan.sizeHint.Load())
+		if hint >= minDirectRootHint && hint <= maxDirectRootHint {
+			capHint := hint + (hint >> 5) + 96
+			if cap(*buf) < capHint {
+				*buf = make([]byte, 0, capHint)
+			}
+		}
+	}
 	origBuf := (*buf)[:0]
-	stk := vars.NewStack()
+	var stk *vars.Stack
+	if !plan.isPureSlice && !plan.hasPureSpecs {
+		stk = vars.NewStack()
+	}
 	err = encodeWithRootPlan(buf, rv, plan, stk, fv)
 	if err != nil {
-		vars.ResetStack(stk)
-		vars.FreeStack(stk)
+		if stk != nil {
+			vars.ResetStack(stk)
+			vars.FreeStack(stk)
+		}
 		if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
 			*buf = origBuf
 		}
@@ -730,17 +741,21 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 		runtime.KeepAlive(val)
 		return nil, true, err
 	}
-	vars.FreeStack(stk)
+	if stk != nil {
+		vars.FreeStack(stk)
+	}
 	runtime.KeepAlive(val)
 
-	if plan.allowSizeHint && len(*buf) >= minDirectRootHint {
-		plan.sizeHint.Store(clampRootSizeHint(len(*buf)))
+	if plan.allowSizeHint {
+		hint := int(plan.sizeHint.Load())
+		if (len(*buf) >= minDirectRootHint && hint == 0) || len(*buf) > cap(origBuf) || (hint > 0 && len(*buf)*2 < hint) {
+			plan.sizeHint.Store(clampRootSizeHint(len(*buf)))
+		}
 	}
 
 	var ret []byte
 	if rt.CanSizeResue(cap(*buf)) {
-		ret = make([]byte, len(*buf))
-		copy(ret, *buf)
+		ret = rt.CloneBytesNoZero(*buf)
 		vars.FreeBytes(buf)
 	} else {
 		ret = *buf

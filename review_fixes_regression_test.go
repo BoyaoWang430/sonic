@@ -498,3 +498,61 @@ func TestReviewFix_P2_6_GiantPayloadWithRawMessageSchemaBailoutUsesStreamSession
 	require.NoError(t, dec.Decode(&outStream))
 	require.Equal(t, out, outStream)
 }
+
+func TestOptBatchA_PtrStructAndSortedMapsParity(t *testing.T) {
+	type leafDense struct {
+		Tag  string `json:"tag"`
+		Code int64  `json:"code"`
+	}
+	type leafSparse struct {
+		Opt string `json:"opt,omitempty"`
+		Val int    `json:"val"`
+	}
+	type rootPtrStruct struct {
+		First    *leafDense  `json:"first"`
+		OmitLead *leafSparse `json:"omit_lead,omitempty"`
+		Mid      *leafSparse `json:"mid"`
+		Tail     string      `json:"tail"`
+	}
+	type ptrFreeBox struct {
+		X float64 `json:"x"`
+		Y int64   `json:"y"`
+		Z bool    `json:"z"`
+	}
+
+	cases := []any{
+		rootPtrStruct{First: nil, OmitLead: nil, Mid: nil, Tail: "a&b"},
+		rootPtrStruct{
+			First:    &leafDense{Tag: "<ok>", Code: 7},
+			OmitLead: &leafSparse{Opt: "", Val: 9},
+			Mid:      &leafSparse{Opt: "hi", Val: 11},
+			Tail:     "done",
+		},
+		&rootPtrStruct{
+			First:    nil,
+			OmitLead: &leafSparse{Opt: "x&y", Val: 3},
+			Mid:      nil,
+			Tail:     "<end>",
+		},
+		ptrFreeBox{X: 1.5, Y: -42, Z: true},
+		map[string]string{"z": "<1>", "a": "2&3", "m": "plain"},
+		map[string]int{"c": -3, "a": 1, "b": 2},
+		map[string]int64{"k2": 200, "k1": -100},
+		map[string]uint64{"u2": 999, "u1": 0},
+		map[string]float64{"f2": 2.5, "f1": -0.25},
+		map[string]bool{"t": true, "f": false},
+	}
+
+	for idx, tc := range cases {
+		want, err := json.Marshal(tc)
+		require.NoError(t, err, "case %d std marshal", idx)
+
+		gotStd, err := ConfigStd.Marshal(tc)
+		require.NoError(t, err, "case %d ConfigStd marshal", idx)
+		require.Equal(t, string(want), string(gotStd), "case %d ConfigStd parity", idx)
+
+		gotFast, err := ConfigFastest.Marshal(tc)
+		require.NoError(t, err, "case %d ConfigFastest marshal", idx)
+		require.True(t, json.Valid(gotFast), "case %d ConfigFastest valid JSON", idx)
+	}
+}

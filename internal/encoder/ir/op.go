@@ -91,6 +91,7 @@ const (
 	OP_slice_bool
 	OP_slice_str
 	OP_slice_struct
+	OP_ptr_struct
 	OP_unsupported
 
 	// TheFollowing belongs to Branch Op Basic Block
@@ -183,6 +184,7 @@ var _OpNames = [256]string{
 	OP_slice_bool:       "slice_bool",
 	OP_slice_str:        "slice_str",
 	OP_slice_struct:     "slice_struct",
+	OP_ptr_struct:       "ptr_struct",
 	OP_unsupported:      "unsupported",
 }
 
@@ -325,6 +327,13 @@ type StructSliceSpec struct {
 	IsDense    bool
 }
 
+type StructPtrSpec struct {
+	KeyPtr     *byte
+	Specs      []StructFieldSpec
+	DenseSpecs []StructFieldSpec
+	IsDense    bool
+}
+
 // BuildDenseSpecs returns a copy of specs with leading-comma skips statically resolved
 // when every spec in specs is unconditional and non-pointer (Flags == 0).
 func BuildDenseSpecs(specs []StructFieldSpec) ([]StructFieldSpec, bool) {
@@ -345,6 +354,17 @@ func BuildDenseSpecs(specs []StructFieldSpec) ([]StructFieldSpec, bool) {
 		}
 		if s.Kind == OP_slice_struct {
 			orig := (*StructSliceSpec)(s.Ptr)
+			if s.NoCommaSkip != 0 {
+				cp := *orig
+				cp.KeyPtr = (*byte)(unsafe.Add(unsafe.Pointer(orig.KeyPtr), s.NoCommaSkip))
+				s.Ptr = unsafe.Pointer(&cp)
+				s.KeyLen -= s.NoCommaSkip
+				s.NoCommaSkip = 0
+			}
+			continue
+		}
+		if s.Kind == OP_ptr_struct {
+			orig := (*StructPtrSpec)(s.Ptr)
 			if s.NoCommaSkip != 0 {
 				cp := *orig
 				cp.KeyPtr = (*byte)(unsafe.Add(unsafe.Pointer(orig.KeyPtr), s.NoCommaSkip))

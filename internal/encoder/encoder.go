@@ -215,8 +215,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 
 	/* make a copy of the result */
 	if rt.CanSizeResue(cap(*buf)) {
-		ret = make([]byte, len(*buf))
-		copy(ret, *buf)
+		ret = rt.CloneBytesNoZero(*buf)
 		vars.FreeBytes(buf)
 	} else {
 		ret = *buf
@@ -326,8 +325,7 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 	/* copy to the result buffer */
 	var ret []byte
 	if rt.CanSizeResue(cap(buf.Bytes())) {
-		ret = make([]byte, buf.Len())
-		copy(ret, buf.Bytes())
+		ret = rt.CloneBytesNoZero(buf.Bytes())
 		/* return the buffers into pool */
 		vars.FreeBuffer(buf)
 	} else {

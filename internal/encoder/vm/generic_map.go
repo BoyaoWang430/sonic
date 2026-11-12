@@ -157,6 +157,20 @@ func encodeAnyValue(b *[]byte, val any, s *vars.Stack, flags uint64) error {
 			*b = append(*b, '{', '}')
 			return nil
 		}
+		if s == nil {
+			stk := vars.NewStack()
+			stk.EnterDepth(2)
+			*b = append(*b, '{')
+			err := encodeStringAnyMap(b, v, stk, flags)
+			if err != nil {
+				vars.ResetStack(stk)
+				vars.FreeStack(stk)
+				return err
+			}
+			vars.FreeStack(stk)
+			*b = append(*b, '}')
+			return nil
+		}
 		if !s.Save(0, 0, nil, nil) || !s.Save(0, 0, nil, nil) {
 			return vars.ERR_too_deep
 		}
@@ -181,6 +195,24 @@ func encodeAnyValue(b *[]byte, val any, s *vars.Stack, flags uint64) error {
 			*b = append(*b, '[', ']')
 			return nil
 		}
+		if s == nil {
+			stk := vars.NewStack()
+			stk.EnterDepth(2)
+			*b = append(*b, '[')
+			for i, elem := range v {
+				if i > 0 {
+					*b = append(*b, ',')
+				}
+				if err := encodeAnyValue(b, elem, stk, flags); err != nil {
+					vars.ResetStack(stk)
+					vars.FreeStack(stk)
+					return err
+				}
+			}
+			vars.FreeStack(stk)
+			*b = append(*b, ']')
+			return nil
+		}
 		if !s.Save(0, 0, nil, nil) {
 			return vars.ERR_too_deep
 		}
@@ -197,35 +229,203 @@ func encodeAnyValue(b *[]byte, val any, s *vars.Stack, flags uint64) error {
 		*b = append(*b, ']')
 		return nil
 	default:
+		if s == nil {
+			stk := vars.NewStack()
+			stk.EnterDepth(2)
+			err := EncodeValue(b, val, stk, flags&^uint64(1<<alg.BitPointerValue))
+			if err != nil {
+				vars.ResetStack(stk)
+			}
+			vars.FreeStack(stk)
+			return err
+		}
 		return EncodeValue(b, val, s, flags&^uint64(1<<alg.BitPointerValue))
 	}
 }
 
-func sortStrKeys[V any](m map[string]V, s *vars.Stack) (baseKV int, baseOrd int, count int) {
+func sortStrStringMap(m map[string]string, s *vars.Stack) (baseKV int, baseOrd int, baseStr int, count int) {
 	n := len(m)
-	baseKV, baseOrd = s.ReserveMapKV(n)
+	baseKV, baseOrd, baseStr = s.ReserveMapKVStr(n)
 	kvSlice := s.KVBuf[baseKV : baseKV+n]
 	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
-	for k := range m {
+	strSlice := s.KVStr[baseStr : baseStr+n]
+	for k, v := range m {
 		if count < len(kvSlice) {
 			kvSlice[count] = vars.MapKVEntry{K: k}
 			ordSlice[count] = count
+			strSlice[count] = v
 		} else {
-			s.GrowMapKVOne(k, nil, count)
+			s.GrowMapKVStrOne(k, v, count)
 			kvSlice = s.KVBuf[baseKV:]
 			ordSlice = s.KVOrder[baseOrd:]
+			strSlice = s.KVStr[baseStr:]
 		}
 		count++
 	}
 	if count == 0 {
-		s.ReleaseMapKV(baseKV, n, baseOrd)
-		return 0, 0, 0
+		s.ReleaseMapKVStr(baseKV, n, baseOrd, baseStr)
+		return 0, 0, 0, 0
 	}
 	if count < n {
-		kvSlice, ordSlice = s.TrimMapKV(baseKV, baseOrd, count)
+		kvSlice, ordSlice = s.TrimMapKVStr(baseKV, baseOrd, baseStr, count)
 	}
 	alg.SortMapKVOrder(ordSlice, kvSlice)
-	return baseKV, baseOrd, count
+	return baseKV, baseOrd, baseStr, count
+}
+
+func sortStrIntMap(m map[string]int, s *vars.Stack) (baseKV int, baseOrd int, baseU64 int, count int) {
+	n := len(m)
+	baseKV, baseOrd, baseU64 = s.ReserveMapKVScalar(n)
+	kvSlice := s.KVBuf[baseKV : baseKV+n]
+	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+	u64Slice := s.KVScalar[baseU64 : baseU64+n]
+	for k, v := range m {
+		if count < len(kvSlice) {
+			kvSlice[count] = vars.MapKVEntry{K: k}
+			ordSlice[count] = count
+			u64Slice[count] = uint64(int64(v))
+		} else {
+			s.GrowMapKVScalarOne(k, uint64(int64(v)), count)
+			kvSlice = s.KVBuf[baseKV:]
+			ordSlice = s.KVOrder[baseOrd:]
+			u64Slice = s.KVScalar[baseU64:]
+		}
+		count++
+	}
+	if count == 0 {
+		s.ReleaseMapKVScalar(baseKV, n, baseOrd, baseU64)
+		return 0, 0, 0, 0
+	}
+	if count < n {
+		kvSlice, ordSlice = s.TrimMapKVScalar(baseKV, baseOrd, baseU64, count)
+	}
+	alg.SortMapKVOrder(ordSlice, kvSlice)
+	return baseKV, baseOrd, baseU64, count
+}
+
+func sortStrI64Map(m map[string]int64, s *vars.Stack) (baseKV int, baseOrd int, baseU64 int, count int) {
+	n := len(m)
+	baseKV, baseOrd, baseU64 = s.ReserveMapKVScalar(n)
+	kvSlice := s.KVBuf[baseKV : baseKV+n]
+	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+	u64Slice := s.KVScalar[baseU64 : baseU64+n]
+	for k, v := range m {
+		if count < len(kvSlice) {
+			kvSlice[count] = vars.MapKVEntry{K: k}
+			ordSlice[count] = count
+			u64Slice[count] = uint64(v)
+		} else {
+			s.GrowMapKVScalarOne(k, uint64(v), count)
+			kvSlice = s.KVBuf[baseKV:]
+			ordSlice = s.KVOrder[baseOrd:]
+			u64Slice = s.KVScalar[baseU64:]
+		}
+		count++
+	}
+	if count == 0 {
+		s.ReleaseMapKVScalar(baseKV, n, baseOrd, baseU64)
+		return 0, 0, 0, 0
+	}
+	if count < n {
+		kvSlice, ordSlice = s.TrimMapKVScalar(baseKV, baseOrd, baseU64, count)
+	}
+	alg.SortMapKVOrder(ordSlice, kvSlice)
+	return baseKV, baseOrd, baseU64, count
+}
+
+func sortStrU64Map(m map[string]uint64, s *vars.Stack) (baseKV int, baseOrd int, baseU64 int, count int) {
+	n := len(m)
+	baseKV, baseOrd, baseU64 = s.ReserveMapKVScalar(n)
+	kvSlice := s.KVBuf[baseKV : baseKV+n]
+	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+	u64Slice := s.KVScalar[baseU64 : baseU64+n]
+	for k, v := range m {
+		if count < len(kvSlice) {
+			kvSlice[count] = vars.MapKVEntry{K: k}
+			ordSlice[count] = count
+			u64Slice[count] = v
+		} else {
+			s.GrowMapKVScalarOne(k, v, count)
+			kvSlice = s.KVBuf[baseKV:]
+			ordSlice = s.KVOrder[baseOrd:]
+			u64Slice = s.KVScalar[baseU64:]
+		}
+		count++
+	}
+	if count == 0 {
+		s.ReleaseMapKVScalar(baseKV, n, baseOrd, baseU64)
+		return 0, 0, 0, 0
+	}
+	if count < n {
+		kvSlice, ordSlice = s.TrimMapKVScalar(baseKV, baseOrd, baseU64, count)
+	}
+	alg.SortMapKVOrder(ordSlice, kvSlice)
+	return baseKV, baseOrd, baseU64, count
+}
+
+func sortStrF64Map(m map[string]float64, s *vars.Stack) (baseKV int, baseOrd int, baseU64 int, count int) {
+	n := len(m)
+	baseKV, baseOrd, baseU64 = s.ReserveMapKVScalar(n)
+	kvSlice := s.KVBuf[baseKV : baseKV+n]
+	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+	u64Slice := s.KVScalar[baseU64 : baseU64+n]
+	for k, v := range m {
+		bits := math.Float64bits(v)
+		if count < len(kvSlice) {
+			kvSlice[count] = vars.MapKVEntry{K: k}
+			ordSlice[count] = count
+			u64Slice[count] = bits
+		} else {
+			s.GrowMapKVScalarOne(k, bits, count)
+			kvSlice = s.KVBuf[baseKV:]
+			ordSlice = s.KVOrder[baseOrd:]
+			u64Slice = s.KVScalar[baseU64:]
+		}
+		count++
+	}
+	if count == 0 {
+		s.ReleaseMapKVScalar(baseKV, n, baseOrd, baseU64)
+		return 0, 0, 0, 0
+	}
+	if count < n {
+		kvSlice, ordSlice = s.TrimMapKVScalar(baseKV, baseOrd, baseU64, count)
+	}
+	alg.SortMapKVOrder(ordSlice, kvSlice)
+	return baseKV, baseOrd, baseU64, count
+}
+
+func sortStrBoolMap(m map[string]bool, s *vars.Stack) (baseKV int, baseOrd int, baseU64 int, count int) {
+	n := len(m)
+	baseKV, baseOrd, baseU64 = s.ReserveMapKVScalar(n)
+	kvSlice := s.KVBuf[baseKV : baseKV+n]
+	ordSlice := s.KVOrder[baseOrd : baseOrd+n]
+	u64Slice := s.KVScalar[baseU64 : baseU64+n]
+	for k, v := range m {
+		var bv uint64
+		if v {
+			bv = 1
+		}
+		if count < len(kvSlice) {
+			kvSlice[count] = vars.MapKVEntry{K: k}
+			ordSlice[count] = count
+			u64Slice[count] = bv
+		} else {
+			s.GrowMapKVScalarOne(k, bv, count)
+			kvSlice = s.KVBuf[baseKV:]
+			ordSlice = s.KVOrder[baseOrd:]
+			u64Slice = s.KVScalar[baseU64:]
+		}
+		count++
+	}
+	if count == 0 {
+		s.ReleaseMapKVScalar(baseKV, n, baseOrd, baseU64)
+		return 0, 0, 0, 0
+	}
+	if count < n {
+		kvSlice, ordSlice = s.TrimMapKVScalar(baseKV, baseOrd, baseU64, count)
+	}
+	alg.SortMapKVOrder(ordSlice, kvSlice)
+	return baseKV, baseOrd, baseU64, count
 }
 
 func encodeStringStringMap(b *[]byte, m map[string]string, s *vars.Stack, flags uint64) {
@@ -243,25 +443,21 @@ func encodeStringStringMap(b *[]byte, m map[string]string, s *vars.Stack, flags 
 			}
 			return
 		}
-		baseKV, baseOrd, count := sortStrKeys(m, s)
+		baseKV, baseOrd, baseStr, count := sortStrStringMap(m, s)
 		if count == 0 {
 			return
 		}
-		first := true
 		for idx := 0; idx < count; idx++ {
-			k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
-			v, ok := m[k]
-			if !ok {
-				continue
-			}
-			if !first {
+			if idx > 0 {
 				*b = append(*b, ',')
 			}
-			first = false
+			ord := s.KVOrder[baseOrd+idx]
+			k := s.KVBuf[baseKV+ord].K
+			v := s.KVStr[baseStr+ord]
 			*b = alg.QuoteKeyFlags(*b, k, sanitize)
 			*b = alg.QuoteFlags(*b, v, false, sanitize)
 		}
-		s.ReleaseMapKV(baseKV, count, baseOrd)
+		s.ReleaseMapKVStr(baseKV, count, baseOrd, baseStr)
 		return
 	}
 	first := true
@@ -297,25 +493,21 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 	case vars.MapBuiltinStrInt:
 		m := *(*map[string]int)(p)
 		if sorted && len(m) > 1 {
-			baseKV, baseOrd, count := sortStrKeys(m, s)
+			baseKV, baseOrd, baseU64, count := sortStrIntMap(m, s)
 			if count == 0 {
 				return nil
 			}
-			first := true
 			for idx := 0; idx < count; idx++ {
-				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
-				v, ok := m[k]
-				if !ok {
-					continue
-				}
-				if !first {
+				if idx > 0 {
 					*b = append(*b, ',')
 				}
-				first = false
+				ord := s.KVOrder[baseOrd+idx]
+				k := s.KVBuf[baseKV+ord].K
+				v := int64(s.KVScalar[baseU64+ord])
 				*b = alg.QuoteKeyFlags(*b, k, sanitize)
-				*b = alg.I64toa(*b, int64(v))
+				*b = alg.I64toa(*b, v)
 			}
-			s.ReleaseMapKV(baseKV, count, baseOrd)
+			s.ReleaseMapKVScalar(baseKV, count, baseOrd, baseU64)
 			return nil
 		}
 		first := true
@@ -331,25 +523,21 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 	case vars.MapBuiltinStrI64:
 		m := *(*map[string]int64)(p)
 		if sorted && len(m) > 1 {
-			baseKV, baseOrd, count := sortStrKeys(m, s)
+			baseKV, baseOrd, baseU64, count := sortStrI64Map(m, s)
 			if count == 0 {
 				return nil
 			}
-			first := true
 			for idx := 0; idx < count; idx++ {
-				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
-				v, ok := m[k]
-				if !ok {
-					continue
-				}
-				if !first {
+				if idx > 0 {
 					*b = append(*b, ',')
 				}
-				first = false
+				ord := s.KVOrder[baseOrd+idx]
+				k := s.KVBuf[baseKV+ord].K
+				v := int64(s.KVScalar[baseU64+ord])
 				*b = alg.QuoteKeyFlags(*b, k, sanitize)
 				*b = alg.I64toa(*b, v)
 			}
-			s.ReleaseMapKV(baseKV, count, baseOrd)
+			s.ReleaseMapKVScalar(baseKV, count, baseOrd, baseU64)
 			return nil
 		}
 		first := true
@@ -365,25 +553,21 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 	case vars.MapBuiltinStrU64:
 		m := *(*map[string]uint64)(p)
 		if sorted && len(m) > 1 {
-			baseKV, baseOrd, count := sortStrKeys(m, s)
+			baseKV, baseOrd, baseU64, count := sortStrU64Map(m, s)
 			if count == 0 {
 				return nil
 			}
-			first := true
 			for idx := 0; idx < count; idx++ {
-				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
-				v, ok := m[k]
-				if !ok {
-					continue
-				}
-				if !first {
+				if idx > 0 {
 					*b = append(*b, ',')
 				}
-				first = false
+				ord := s.KVOrder[baseOrd+idx]
+				k := s.KVBuf[baseKV+ord].K
+				v := s.KVScalar[baseU64+ord]
 				*b = alg.QuoteKeyFlags(*b, k, sanitize)
 				*b = alg.U64toa(*b, v)
 			}
-			s.ReleaseMapKV(baseKV, count, baseOrd)
+			s.ReleaseMapKVScalar(baseKV, count, baseOrd, baseU64)
 			return nil
 		}
 		first := true
@@ -400,25 +584,21 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 		m := *(*map[string]float64)(p)
 		nullInfNan := flags&(1<<alg.BitEncodeNullForInfOrNan) != 0
 		if sorted && len(m) > 1 {
-			baseKV, baseOrd, count := sortStrKeys(m, s)
+			baseKV, baseOrd, baseU64, count := sortStrF64Map(m, s)
 			if count == 0 {
 				return nil
 			}
-			first := true
 			for idx := 0; idx < count; idx++ {
-				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
-				v, ok := m[k]
-				if !ok {
-					continue
-				}
-				if !first {
+				if idx > 0 {
 					*b = append(*b, ',')
 				}
-				first = false
+				ord := s.KVOrder[baseOrd+idx]
+				k := s.KVBuf[baseKV+ord].K
+				v := math.Float64frombits(s.KVScalar[baseU64+ord])
 				*b = alg.QuoteKeyFlags(*b, k, sanitize)
 				if math.IsNaN(v) || math.IsInf(v, 0) {
 					if !nullInfNan {
-						s.ReleaseMapKV(baseKV, count, baseOrd)
+						s.ReleaseMapKVScalar(baseKV, count, baseOrd, baseU64)
 						return vars.ERR_nan_or_infinite
 					}
 					*b = append(*b, 'n', 'u', 'l', 'l')
@@ -426,7 +606,7 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 					*b = alg.F64toa(*b, v)
 				}
 			}
-			s.ReleaseMapKV(baseKV, count, baseOrd)
+			s.ReleaseMapKVScalar(baseKV, count, baseOrd, baseU64)
 			return nil
 		}
 		first := true
@@ -449,21 +629,17 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 	case vars.MapBuiltinStrBool:
 		m := *(*map[string]bool)(p)
 		if sorted && len(m) > 1 {
-			baseKV, baseOrd, count := sortStrKeys(m, s)
+			baseKV, baseOrd, baseU64, count := sortStrBoolMap(m, s)
 			if count == 0 {
 				return nil
 			}
-			first := true
 			for idx := 0; idx < count; idx++ {
-				k := s.KVBuf[baseKV+s.KVOrder[baseOrd+idx]].K
-				v, ok := m[k]
-				if !ok {
-					continue
-				}
-				if !first {
+				if idx > 0 {
 					*b = append(*b, ',')
 				}
-				first = false
+				ord := s.KVOrder[baseOrd+idx]
+				k := s.KVBuf[baseKV+ord].K
+				v := s.KVScalar[baseU64+ord] != 0
 				*b = alg.QuoteKeyFlags(*b, k, sanitize)
 				if v {
 					*b = append(*b, 't', 'r', 'u', 'e')
@@ -471,7 +647,7 @@ func encodeBuiltinMap(b *[]byte, p unsafe.Pointer, kind int, s *vars.Stack, flag
 					*b = append(*b, 'f', 'a', 'l', 's', 'e')
 				}
 			}
-			s.ReleaseMapKV(baseKV, count, baseOrd)
+			s.ReleaseMapKVScalar(baseKV, count, baseOrd, baseU64)
 			return nil
 		}
 		first := true

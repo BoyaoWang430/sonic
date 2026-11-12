@@ -94,3 +94,12 @@ func CanSizeResue(cap int) bool {
 func StringData(s string) *byte    { return unsafe.StringData(s) }
 func SliceData[T any](s []T) *T    { return unsafe.SliceData(s) }
 func String(p *byte, n int) string { return unsafe.String(p, n) }
+
+// CloneBytesNoZero returns an independent heap copy of b without pre-zeroing
+// the destination slice (compiles to runtime.stringtoslicebyte -> rawbyteslice).
+func CloneBytesNoZero(b []byte) []byte {
+	if len(b) == 0 {
+		return []byte{}
+	}
+	return []byte(unsafe.String(unsafe.SliceData(b), len(b)))
+}

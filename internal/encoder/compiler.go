@@ -653,6 +653,9 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 		return ir.StructFieldSpec{}, false
 	}
 	isPtr := false
+	isPtrStruct := false
+	var kind ir.Op
+	specPtr := unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset])
 	if ft.Kind() == reflect.Ptr && (fv.Opts&resolver.F_stringize) == 0 {
 		et := ft.Elem()
 		if !self.tab[et] && !self.isCustomMarshaler(ft, true) && !self.isCustomMarshaler(et, true) {
@@ -668,12 +671,25 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 					ft = et
 					isPtr = true
 				}
+			case reflect.Struct:
+				elemSpecs, ok := self.tryCompilePureStructSpecs(et, depth+2)
+				if ok {
+					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
+					specPtr = unsafe.Pointer(&ir.StructPtrSpec{
+						KeyPtr:     &fv.KeyBlob[fv.KeyOffset],
+						Specs:      elemSpecs,
+						DenseSpecs: denseSpecs,
+						IsDense:    isDense,
+					})
+					kind = ir.OP_ptr_struct
+					isPtrStruct = true
+				}
 			}
 		}
 	}
-	var kind ir.Op
-	specPtr := unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset])
-	if (fv.Opts & resolver.F_stringize) != 0 {
+	if isPtrStruct {
+		// kind and specPtr already populated for *SubStruct.
+	} else if (fv.Opts & resolver.F_stringize) != 0 {
 		if ft != vars.JsonNumberType && ft.Kind() == reflect.String {
 			kind = ir.OP_quote
 		} else {
@@ -764,7 +780,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 				kind = ir.OP_slice_str
 			default:
 				if et.Kind() == reflect.Struct {
-					elemSpecs, ok := self.tryCompilePureStructSpecs(et, depth+1)
+					elemSpecs, ok := self.tryCompilePureStructSpecs(et, depth+2)
 					if !ok {
 						return ir.StructFieldSpec{}, false
 					}
@@ -787,7 +803,11 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 		}
 	}
 	var flags uint8
-	if isPtr {
+	if isPtrStruct {
+		if (fv.Opts & resolver.F_omitempty) != 0 {
+			flags |= ir.SpecFlagOmitNil
+		}
+	} else if isPtr {
 		flags |= ir.SpecFlagIsPtr
 		if (fv.Opts & resolver.F_omitempty) != 0 {
 			flags |= ir.SpecFlagOmitNil
