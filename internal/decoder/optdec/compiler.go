@@ -2,6 +2,7 @@ package optdec
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 
 	"github.com/bytedance/sonic/internal/caching"
@@ -297,14 +298,23 @@ func (c *compiler) compileSlice(vt reflect.Type) decFunc {
 
 	ed := c.compile(et)
 	sd, _ := ed.(*structDecoder)
+	var psd *structDecoder
+	if sd == nil {
+		if pd, ok := ed.(*ptrDecoder); ok && reflect.PtrTo(pd.typ) == et {
+			if inner, ok := pd.deref.(*structDecoder); ok && inner.goType == pd.typ {
+				psd = inner
+			}
+		}
+	}
 	return &sliceDecoder{
-		elemType:   et,
-		elemDec:    ed,
-		structDec:  sd,
-		size:       et.Size(),
-		typ:        vt,
-		zeroSlice:  reflect.Zero(vt),
-		emptySlice: reflect.MakeSlice(vt, 0, 0),
+		elemType:     et,
+		elemDec:      ed,
+		structDec:    sd,
+		ptrStructDec: psd,
+		size:         et.Size(),
+		typ:          vt,
+		zeroSlice:    reflect.Zero(vt),
+		emptySlice:   reflect.MakeSlice(vt, 0, 0),
 	}
 }
 
@@ -429,10 +439,28 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 		return &mapStringDecoder{}
 	case mapStrIntType:
 		return &mapStrIntDecoder{}
+	case mapStrI8Type:
+		return &mapStrSignedDecoder[int8]{mapType: vt, elemType: int8Type, minVal: math.MinInt8, maxVal: math.MaxInt8}
+	case mapStrI16Type:
+		return &mapStrSignedDecoder[int16]{mapType: vt, elemType: int16Type, minVal: math.MinInt16, maxVal: math.MaxInt16}
+	case mapStrI32Type:
+		return &mapStrSignedDecoder[int32]{mapType: vt, elemType: int32Type, minVal: math.MinInt32, maxVal: math.MaxInt32}
 	case mapStrI64Type:
 		return &mapStrI64Decoder{}
+	case mapStrUintType:
+		return &mapStrUnsignedDecoder[uint]{mapType: vt, elemType: uintType, maxVal: uint64(^uint(0))}
+	case mapStrU8Type:
+		return &mapStrUnsignedDecoder[uint8]{mapType: vt, elemType: uint8Type, maxVal: math.MaxUint8}
+	case mapStrU16Type:
+		return &mapStrUnsignedDecoder[uint16]{mapType: vt, elemType: uint16Type, maxVal: math.MaxUint16}
+	case mapStrU32Type:
+		return &mapStrUnsignedDecoder[uint32]{mapType: vt, elemType: uint32Type, maxVal: math.MaxUint32}
 	case mapStrU64Type:
 		return &mapStrU64Decoder{}
+	case mapStrUintptrType:
+		return &mapStrUnsignedDecoder[uintptr]{mapType: vt, elemType: uintptrType, maxVal: uint64(^uintptr(0))}
+	case mapStrF32Type:
+		return &mapStrF32Decoder{}
 	case mapStrF64Type:
 		return &mapStrF64Decoder{}
 	case mapStrBoolType:
@@ -444,16 +472,30 @@ func (c *compiler) compileMap(vt reflect.Type) decFunc {
 	}
 
 	if kt.Kind() == reflect.String && kt != jsonNumberType {
+		ed := c.compile(et)
+		var sd, psd *structDecoder
+		if !freshElem {
+			sd, _ = ed.(*structDecoder)
+			if sd == nil {
+				if pd, ok := ed.(*ptrDecoder); ok && reflect.PtrTo(pd.typ) == et {
+					if inner, ok := pd.deref.(*structDecoder); ok && inner.goType == pd.typ {
+						psd = inner
+					}
+				}
+			}
+		}
 		return &mapStrKeyDecoder{
-			mapType:   vt,
-			keyType:   kt,
-			elemType:  et,
-			zeroMap:   reflect.Zero(vt),
-			zeroKey:   reflect.Zero(kt),
-			zeroElem:  reflect.Zero(et),
-			elemDec:   c.compile(et),
-			typ:       vt,
-			freshElem: freshElem,
+			mapType:      vt,
+			keyType:      kt,
+			elemType:     et,
+			zeroMap:      reflect.Zero(vt),
+			zeroKey:      reflect.Zero(kt),
+			zeroElem:     reflect.Zero(et),
+			elemDec:      ed,
+			structDec:    sd,
+			ptrStructDec: psd,
+			typ:          vt,
+			freshElem:    freshElem,
 		}
 	}
 

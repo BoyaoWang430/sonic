@@ -6,13 +6,14 @@ import (
 )
 
 type sliceDecoder struct {
-	elemType   reflect.Type
-	elemDec    decFunc
-	structDec  *structDecoder
-	size       uintptr
-	typ        reflect.Type
-	zeroSlice  reflect.Value
-	emptySlice reflect.Value
+	elemType     reflect.Type
+	elemDec      decFunc
+	structDec    *structDecoder
+	ptrStructDec *structDecoder
+	size         uintptr
+	typ          reflect.Type
+	zeroSlice    reflect.Value
+	emptySlice   reflect.Value
 }
 
 func (d *sliceDecoder) setNil(vp unsafe.Pointer) {
@@ -84,6 +85,53 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 			val := NewNode(next)
 			elem := unsafe.Add(elems, uintptr(i)*elemSize)
 			err := sd.FromDom(elem, val, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = val.Next()
+		}
+	} else if psd := d.ptrStructDec; psd != nil {
+		p := ctx.Parser
+		opts := p.options
+		ptrs := unsafe.Slice((*unsafe.Pointer)(elems), size)
+		if psd.fast && opts&fastStructExcludeMask == 0 {
+			jsonStr := p.Json
+			copyStr := opts&(1<<_F_copy_string) != 0
+			for i := 0; i < size; i++ {
+				vptr := next
+				vtyp := uint8(vptr.typ)
+				if vtyp == KObject {
+					next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
+					dst := ptrs[i]
+					if dst == nil {
+						dst = psd.allocPtr(p)
+						ptrs[i] = dst
+					}
+					if uint32(vptr.val) != 0 {
+						err := psd.fromObjFast(dst, vptr, p, jsonStr, copyStr, ctx)
+						if gerr == nil && err != nil {
+							gerr = err
+						}
+					}
+					continue
+				}
+				if vtyp == KNull {
+					ptrs[i] = nil
+					next = PtrOffset(vptr, 1)
+					continue
+				}
+				val := NewNode(vptr)
+				err := d.elemDec.FromDom(unsafe.Pointer(&ptrs[i]), val, ctx)
+				if gerr == nil && err != nil {
+					gerr = err
+				}
+				next = val.Next()
+			}
+			return gerr
+		}
+		for i := 0; i < size; i++ {
+			val := NewNode(next)
+			err := d.elemDec.FromDom(unsafe.Pointer(&ptrs[i]), val, ctx)
 			if gerr == nil && err != nil {
 				gerr = err
 			}

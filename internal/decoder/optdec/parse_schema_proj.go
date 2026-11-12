@@ -9,6 +9,8 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
+	"github.com/bytedance/sonic/internal/native/kernels"
+	"github.com/bytedance/sonic/internal/native/types"
 )
 
 const (
@@ -24,9 +26,12 @@ const (
 type schemaScanner struct {
 	p             *Parser
 	jsonStr       string
-	rawPtr        *byte
+	strPtr        unsafe.Pointer
+	tailPtr       unsafe.Pointer
 	pos           int
 	end           int
+	safe64        int
+	tailStart     int
 	nIdx          int
 	depth         uint64
 	opts          uint64
@@ -40,6 +45,34 @@ type schemaScanner struct {
 	skippedKeys   int
 	matchedKeys   int
 	num           cParityNum
+}
+
+func schemaPtrAt64(strPtr, tailPtr unsafe.Pointer, pos, safe64, tailStart int) unsafe.Pointer {
+	if pos <= safe64 {
+		return unsafe.Add(strPtr, pos)
+	}
+	return unsafe.Add(tailPtr, pos-tailStart)
+}
+
+func schemaByteAt(strPtr unsafe.Pointer, pos, end int) byte {
+	if pos < end {
+		return *(*byte)(unsafe.Add(strPtr, pos))
+	}
+	return 'x'
+}
+
+func (sc *schemaScanner) ptrAt64(pos int) unsafe.Pointer {
+	if pos <= sc.safe64 {
+		return unsafe.Add(sc.strPtr, pos)
+	}
+	return unsafe.Add(sc.tailPtr, pos-sc.tailStart)
+}
+
+func (sc *schemaScanner) byteAt(pos int) byte {
+	if pos < sc.end {
+		return *(*byte)(unsafe.Add(sc.strPtr, pos))
+	}
+	return 'x'
 }
 
 const errCodeGiantStreamFallback ErrorCode = -1
@@ -63,7 +96,8 @@ func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 }
 
 func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
-	if mutated {
+	wasLazy := p.lazyPadded
+	if mutated && !wasLazy {
 		if p.sessionPadded != nil {
 			needed := len(p.Json) + len(padding)
 			if cap(p.padded) < needed {
@@ -77,11 +111,19 @@ func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
 			p.padded = append(p.padded, padding...)
 		}
 	}
+	p.unesc = nil
+	if p.unescBuf != nil {
+		p.unescBuf = p.unescBuf[:0]
+	}
 	p.pos = 0
 	p.end = len(p.Json)
 	p._nbk = _nospaceBlock{}
 	p.nbuf = nodeBuf{}
-	p.nbuf.init(p.nodes)
+	if wasLazy && len(p.Json) > 128<<10 && p.sessionPadded == nil && !looksLikeJSONLPrefix(p.Json) {
+		p.presizeNodesOne()
+	} else {
+		p.nbuf.init(p.nodes)
+	}
 	return parseImpl(p)
 }
 
@@ -96,9 +138,31 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		}
 		p.nbuf.ncap = len(p.nodes)
 	}
-	raw := p.JsonBytes()
-	if len(raw) < p.end+len(padding) {
-		return false, false
+	var strPtr, tailPtr unsafe.Pointer
+	var safe64, tailStart int
+	if p.lazyPadded && p.sessionPadded == nil {
+		if p.end <= schemaTailWindowLen {
+			copy(p.tailBuf[:p.end], p.Json)
+			copy(p.tailBuf[p.end:p.end+len(padding)], padding)
+			strPtr = unsafe.Pointer(&p.tailBuf[0])
+			tailPtr = strPtr
+			safe64 = p.end
+		} else {
+			tailStart = p.end - schemaTailWindowLen
+			copy(p.tailBuf[:schemaTailWindowLen], p.Json[tailStart:p.end])
+			copy(p.tailBuf[schemaTailWindowLen:schemaTailWindowLen+len(padding)], padding)
+			strPtr = unsafe.Pointer(unsafe.StringData(p.Json))
+			tailPtr = unsafe.Pointer(&p.tailBuf[0])
+			safe64 = p.end - 64
+		}
+	} else {
+		raw := p.JsonBytes()
+		if len(raw) < p.end+len(padding) {
+			return false, false
+		}
+		strPtr = unsafe.Pointer(unsafe.SliceData(raw))
+		tailPtr = strPtr
+		safe64 = p.end
 	}
 	oldOpts := p.options
 	if !p.isEface && !p.keepUseNumber {
@@ -107,9 +171,12 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 	sc := schemaScanner{
 		p:             p,
 		jsonStr:       p.Json,
-		rawPtr:        unsafe.SliceData(raw),
+		strPtr:        strPtr,
+		tailPtr:       tailPtr,
 		pos:           0,
 		end:           p.end,
+		safe64:        safe64,
+		tailStart:     tailStart,
 		nIdx:          0,
 		depth:         0,
 		opts:          p.options,
@@ -177,21 +244,29 @@ func (sc *schemaScanner) growTape(extra int) {
 
 // skipIndentSWAR skips up to 24 ASCII spaces or tabs starting at pos (typically right after '\n').
 // Returns (ch, nextPos, true) if a non-whitespace byte (> ' ') is found within 24 bytes.
-func skipIndentSWAR(rawPtr unsafe.Pointer, pos, end int) (byte, int, bool) {
-	w0 := *(*uint64)(unsafe.Add(rawPtr, pos)) ^ swarSpaces
+func skipIndentSWAR(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart int) (byte, int, bool) {
+	if pos > end {
+		return 0, pos, false
+	}
+	base := schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart)
+	w0 := *(*uint64)(base) ^ swarSpaces
 	if w0 != 0 {
-		at := pos + (bits.TrailingZeros64(w0) >> 3)
-		b := *(*byte)(unsafe.Add(rawPtr, at))
+		rel := bits.TrailingZeros64(w0) >> 3
+		at := pos + rel
+		b := *(*byte)(unsafe.Add(base, rel))
 		if b > ' ' {
 			return b, at + 1, at < end
 		}
 		if b == '\t' {
-			for {
+			for at+1 < end {
 				at++
-				b = *(*byte)(unsafe.Add(rawPtr, at))
+				b = schemaByteAt(strPtr, at, end)
 				if b != '\t' && b != ' ' {
 					break
 				}
+			}
+			if b == '\t' || b == ' ' {
+				return 0, end, false
 			}
 			if b > ' ' {
 				return b, at + 1, at < end
@@ -199,31 +274,35 @@ func skipIndentSWAR(rawPtr unsafe.Pointer, pos, end int) (byte, int, bool) {
 		}
 		return 0, at, false
 	}
-	w1 := *(*uint64)(unsafe.Add(rawPtr, pos+8)) ^ swarSpaces
+	w1 := *(*uint64)(unsafe.Add(base, 8)) ^ swarSpaces
 	if w1 != 0 {
-		at := pos + 8 + (bits.TrailingZeros64(w1) >> 3)
-		b := *(*byte)(unsafe.Add(rawPtr, at))
+		rel := 8 + (bits.TrailingZeros64(w1) >> 3)
+		at := pos + rel
+		b := *(*byte)(unsafe.Add(base, rel))
 		if b > ' ' {
 			return b, at + 1, at < end
 		}
 		return 0, at, false
 	}
-	w2 := *(*uint64)(unsafe.Add(rawPtr, pos+16)) ^ swarSpaces
+	w2 := *(*uint64)(unsafe.Add(base, 16)) ^ swarSpaces
 	if w2 != 0 {
-		at := pos + 16 + (bits.TrailingZeros64(w2) >> 3)
-		b := *(*byte)(unsafe.Add(rawPtr, at))
+		rel := 16 + (bits.TrailingZeros64(w2) >> 3)
+		at := pos + rel
+		b := *(*byte)(unsafe.Add(base, rel))
 		if b > ' ' {
 			return b, at + 1, at < end
 		}
 		return 0, at, false
+	}
+	if pos+24 > end {
+		return 0, end, false
 	}
 	return 0, pos + 24, false
 }
 
 func (sc *schemaScanner) skipSpace() (byte, bool) {
 	pos := sc.pos
-	rawPtr := unsafe.Pointer(sc.rawPtr)
-	c := *(*byte)(unsafe.Add(rawPtr, pos))
+	c := sc.byteAt(pos)
 	if c > ' ' {
 		sc.pos = pos + 1
 		return c, pos < sc.end
@@ -232,7 +311,7 @@ func (sc *schemaScanner) skipSpace() (byte, bool) {
 		sc.pos = pos + 1
 		return c, pos < sc.end
 	}
-	c2 := *(*byte)(unsafe.Add(rawPtr, pos+1))
+	c2 := sc.byteAt(pos + 1)
 	if c2 > ' ' {
 		sc.pos = pos + 2
 		return c2, pos+1 < sc.end
@@ -241,15 +320,21 @@ func (sc *schemaScanner) skipSpace() (byte, bool) {
 }
 
 func (sc *schemaScanner) skipSpaceSlow(pos int) (byte, bool) {
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	strPtr := sc.strPtr
+	tailPtr := sc.tailPtr
 	end := sc.end
-	if b, nextPos, hit := skipIndentSWAR(rawPtr, pos, end); hit {
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
+	if pos > end {
+		return 'x', false
+	}
+	if b, nextPos, hit := skipIndentSWAR(strPtr, tailPtr, pos, end, safe64, tailStart); hit {
 		sc.pos = nextPos
 		return b, true
 	} else {
 		pos = nextPos
 	}
-	c := *(*byte)(unsafe.Add(rawPtr, pos))
+	c := schemaByteAt(strPtr, pos, end)
 	if c > ' ' || (spaceMask&(uint64(1)<<c)) == 0 {
 		sc.pos = pos + 1
 		return c, pos < end
@@ -263,19 +348,22 @@ func (sc *schemaScanner) skipSpaceSlow(pos int) (byte, bool) {
 			if mask != 0 {
 				at := pos + bits.TrailingZeros64(mask)
 				sc.pos = at + 1
-				return *(*byte)(unsafe.Add(rawPtr, at)), at < end
+				return schemaByteAt(strPtr, at, end), at < end
 			}
 			pos = blockOff + 64
 		}
 	}
 	for {
-		mask := cParityNonspace64(unsafe.Add(rawPtr, pos))
+		if pos > end {
+			return 'x', false
+		}
+		mask := cParityNonspace64(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart))
 		if mask != 0 {
 			sc.nbkBits = mask
 			sc.nbkOffPlus64 = uint64(pos + 64)
 			at := pos + bits.TrailingZeros64(mask)
 			sc.pos = at + 1
-			return *(*byte)(unsafe.Add(rawPtr, at)), at < end
+			return schemaByteAt(strPtr, at, end), at < end
 		}
 		pos += 64
 	}
@@ -370,7 +458,10 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 	disUnknown := sc.disUnknown
 	expectedIdx := 0
 	var count uint64
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	strPtr := sc.strPtr
+	tailPtr := sc.tailPtr
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
 
 	for {
 		if nc != '"' {
@@ -379,11 +470,13 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 		keyStart := sc.pos
 		var klen int
 		var keyTyp uint64
+		var keyVal uint64
 		hasEsc := false
 		isASCIIKey := false
 
 		// 64-byte register SWAR fast path for keys (handles >99.9% of JSON keys with zero ABI calls).
-		w0 := *(*uint64)(unsafe.Add(rawPtr, keyStart))
+		kp := schemaPtrAt64(strPtr, tailPtr, keyStart, safe64, tailStart)
+		w0 := *(*uint64)(kp)
 		q0 := w0 ^ swarQuote
 		qm0 := (q0 - swarOnes) &^ q0 & swarHigh
 		b0 := w0 ^ swarBS
@@ -399,12 +492,13 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 			}
 			sc.pos = afterQuote
 			keyTyp = KStringCommon | uint64(keyStart)<<PosBits
+			keyVal = uint64(klen)
 			isASCIIKey = (w0 & (qm0 - 1) & swarHigh) == 0
 		} else if qm0 == 0 && em0 == 0 {
 			highAcc := w0
 			found := false
 			for off := 8; off < 64; off += 8 {
-				w := *(*uint64)(unsafe.Add(rawPtr, keyStart+off))
+				w := *(*uint64)(unsafe.Add(kp, off))
 				q := w ^ swarQuote
 				qm := (q - swarOnes) &^ q & swarHigh
 				b := w ^ swarBS
@@ -423,6 +517,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 					}
 					sc.pos = afterQuote
 					keyTyp = KStringCommon | uint64(keyStart)<<PosBits
+					keyVal = uint64(klen)
 					isASCIIKey = ((highAcc | (w & (qm - 1))) & swarHigh) == 0
 					found = true
 					break
@@ -442,29 +537,19 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 
 	slowKey:
 		{
-			cur := unsafe.Add(rawPtr, keyStart)
-			dlen := cParityParseStringOpt(&cur, &hasEsc, sc.opts, sc.p.strictURC)
-			if hasEsc {
-				sc.mutatedPadded = true
-			}
-			if dlen < 0 {
+			keyTyp, keyVal, hasEsc, ok = sc.scanStringSlow(keyStart)
+			if !ok {
 				return false
 			}
-			afterQuote := int(uintptr(cur) - uintptr(rawPtr))
-			if afterQuote > sc.end {
-				return false
-			}
-			sc.pos = afterQuote
-			klen = dlen
 			if hasEsc {
-				keyTyp = KStringEscaped | uint64(keyStart)<<PosBits
+				klen = int(uint32(keyVal))
 			} else {
-				keyTyp = KStringCommon | uint64(keyStart)<<PosBits
+				klen = int(keyVal)
 			}
 		}
 
 	afterKeyScan:
-		if *(*byte)(unsafe.Add(rawPtr, sc.pos)) == ':' {
+		if schemaByteAt(strPtr, sc.pos, sc.end) == ':' {
 			sc.pos++
 			if sc.pos > sc.end {
 				return false
@@ -510,7 +595,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 		if !bloomRejected {
 			var key string
 			if hasEsc {
-				b := unsafe.Slice((*byte)(unsafe.Add(rawPtr, keyStart)), klen)
+				b := sc.p.bytesEscaped(keyStart, keyVal)
 				key = unsafe.String(unsafe.SliceData(b), len(b))
 			} else {
 				key = sc.jsonStr[keyStart : keyStart+klen]
@@ -528,7 +613,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 
 		var vc byte
 		pVal := sc.pos
-		cVal := *(*byte)(unsafe.Add(rawPtr, pVal))
+		cVal := schemaByteAt(strPtr, pVal, sc.end)
 		if cVal > ' ' {
 			vc = cVal
 			sc.pos = pVal + 1
@@ -536,7 +621,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 				return false
 			}
 		} else if cVal == ' ' {
-			cVal2 := *(*byte)(unsafe.Add(rawPtr, pVal+1))
+			cVal2 := schemaByteAt(strPtr, pVal+1, sc.end)
 			if cVal2 > ' ' {
 				vc = cVal2
 				sc.pos = pVal + 2
@@ -568,7 +653,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 					return false
 				}
 				sc.ensureNodes(3)
-				sc.p.nodes[sc.nIdx] = node{typ: keyTyp, val: uint64(klen)}
+				sc.p.nodes[sc.nIdx] = node{typ: keyTyp, val: keyVal}
 				sc.p.nodes[sc.nIdx+1] = node{typ: KNull | uint64(vStart)<<PosBits}
 				sc.nIdx += 2
 				count++
@@ -580,7 +665,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 				hint = uint64(idx+1) << 8
 			}
 			sc.ensureNodes(2)
-			sc.p.nodes[sc.nIdx] = node{typ: keyTyp | hint, val: uint64(klen)}
+			sc.p.nodes[sc.nIdx] = node{typ: keyTyp | hint, val: keyVal}
 			sc.nIdx++
 			if !sc.scanByPlan(fplans[idx], vc, vStart) {
 				return false
@@ -588,13 +673,13 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 			count++
 		}
 
-		delim := *(*byte)(unsafe.Add(rawPtr, sc.pos))
+		delim := schemaByteAt(strPtr, sc.pos, sc.end)
 		if delim == ',' {
 			sc.pos++
 			if sc.pos > sc.end {
 				return false
 			}
-			cNext := *(*byte)(unsafe.Add(rawPtr, sc.pos))
+			cNext := schemaByteAt(strPtr, sc.pos, sc.end)
 			if cNext == '"' {
 				nc = '"'
 				sc.pos++
@@ -604,7 +689,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 				continue
 			}
 			if cNext == '\n' {
-				if b, nextPos, hit := skipIndentSWAR(rawPtr, sc.pos+1, sc.end); hit {
+				if b, nextPos, hit := skipIndentSWAR(strPtr, tailPtr, sc.pos+1, sc.end, safe64, tailStart); hit {
 					nc = b
 					sc.pos = nextPos
 					continue
@@ -624,7 +709,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 			break
 		}
 		if delim == '\n' {
-			if b, nextPos, hit := skipIndentSWAR(rawPtr, sc.pos+1, sc.end); hit {
+			if b, nextPos, hit := skipIndentSWAR(strPtr, tailPtr, sc.pos+1, sc.end, safe64, tailStart); hit {
 				delim = b
 				sc.pos = nextPos
 				if delim == '}' {
@@ -699,7 +784,10 @@ func (sc *schemaScanner) scanSlice(plan *projPlan, c byte, valStart int) bool {
 	useFullElem := elemPlan == nil || elemPlan.kind == projFull
 	checkAdaptive := elemPlan != nil && elemPlan.kind == projStruct && !elemPlan.hasRawSubtree
 	var count uint64
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	strPtr := sc.strPtr
+	tailPtr := sc.tailPtr
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
 
 	for {
 		eStart := sc.pos - 1
@@ -726,13 +814,13 @@ func (sc *schemaScanner) scanSlice(plan *projPlan, c byte, valStart int) bool {
 		}
 		count++
 
-		delim := *(*byte)(unsafe.Add(rawPtr, sc.pos))
+		delim := schemaByteAt(strPtr, sc.pos, sc.end)
 		if delim == ',' {
 			sc.pos++
 			if sc.pos > sc.end {
 				return false
 			}
-			cNext := *(*byte)(unsafe.Add(rawPtr, sc.pos))
+			cNext := schemaByteAt(strPtr, sc.pos, sc.end)
 			if cNext > ' ' {
 				ec = cNext
 				sc.pos++
@@ -742,7 +830,7 @@ func (sc *schemaScanner) scanSlice(plan *projPlan, c byte, valStart int) bool {
 				continue
 			}
 			if cNext == '\n' {
-				if b, nextPos, hit := skipIndentSWAR(rawPtr, sc.pos+1, sc.end); hit {
+				if b, nextPos, hit := skipIndentSWAR(strPtr, tailPtr, sc.pos+1, sc.end, safe64, tailStart); hit {
 					ec = b
 					sc.pos = nextPos
 					continue
@@ -818,7 +906,7 @@ func (sc *schemaScanner) scanMap(plan *projPlan, c byte, valStart int) bool {
 
 	elemPlan := plan.elem
 	var count uint64
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	strPtr := sc.strPtr
 
 	for {
 		if nc != '"' {
@@ -827,7 +915,7 @@ func (sc *schemaScanner) scanMap(plan *projPlan, c byte, valStart int) bool {
 		if !sc.scanStringScalar(sc.pos - 1) {
 			return false
 		}
-		if *(*byte)(unsafe.Add(rawPtr, sc.pos)) == ':' {
+		if schemaByteAt(strPtr, sc.pos, sc.end) == ':' {
 			sc.pos++
 			if sc.pos > sc.end {
 				return false
@@ -874,8 +962,37 @@ func (sc *schemaScanner) scanFullSubtree(c byte, valStart int) bool {
 	if c != '{' && c != '[' {
 		return sc.scanScalar(c, valStart)
 	}
+	// Fast zero-copy path for empty '{}' / '[]' subtrees (e.g. empty []any / map[string]any fields).
+	savedPos := sc.pos
+	savedNbkOff := sc.nbkOffPlus64
+	savedNbkBits := sc.nbkBits
+	if firstTok, ok := sc.skipSpace(); ok {
+		if c == '[' && firstTok == ']' {
+			if sc.depth+1 > consts.MaxStack {
+				return false
+			}
+			sc.ensureNodes(2)
+			sc.p.nodes[sc.nIdx] = node{typ: KArray | uint64(valStart)<<PosBits, val: 1 << ConLenBits}
+			sc.nIdx++
+			return true
+		}
+		if c == '{' && firstTok == '}' {
+			if sc.depth+1 > consts.MaxStack {
+				return false
+			}
+			sc.ensureNodes(2)
+			sc.p.nodes[sc.nIdx] = node{typ: KObject | uint64(valStart)<<PosBits, val: 1 << ConLenBits}
+			sc.nIdx++
+			return true
+		}
+	}
+	sc.pos = savedPos
+	sc.nbkOffPlus64 = savedNbkOff
+	sc.nbkBits = savedNbkBits
+
 	sc.ensureNodes(16)
 	p := sc.p
+	p.ensurePadded()
 	nbk := (*cParityNonspaceBlock)(unsafe.Pointer(&p._nbk))
 	nbk.offPlus64 = sc.nbkOffPlus64
 	nbk.bits = sc.nbkBits
@@ -952,9 +1069,13 @@ func (sc *schemaScanner) scanScalar(c byte, valStart int) bool {
 	}
 }
 
-func swarSkipString64(rawPtr unsafe.Pointer, pos, end int, validateStr bool) (int, bool, bool) {
+func swarSkipString64(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart int, validateStr bool) (int, bool, bool) {
+	if pos > end {
+		return pos, true, false
+	}
+	base := schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart)
 	for off := 0; off < 64; off += 8 {
-		w := *(*uint64)(unsafe.Add(rawPtr, pos+off))
+		w := *(*uint64)(unsafe.Add(base, off))
 		q := w ^ swarQuote
 		qm := (q - swarOnes) &^ q & swarHigh
 		b := w ^ swarBS
@@ -973,13 +1094,90 @@ func swarSkipString64(rawPtr unsafe.Pointer, pos, end int, validateStr bool) (in
 			return pos + off, false, false
 		}
 	}
+	if pos+64 > end {
+		return end, false, false
+	}
 	return pos + 64, false, false
+}
+
+// scanStringSlow scans a string starting right after the opening quote (contentStart)
+// without mutating input bytes, writing any escaped string into sc.p.unescBuf.
+func (sc *schemaScanner) scanStringSlow(contentStart int) (uint64, uint64, bool, bool) {
+	pos := contentStart
+	end := sc.end
+	opts := sc.opts
+	strPtr := sc.strPtr
+	tailPtr := sc.tailPtr
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
+	for {
+		if pos > end {
+			return 0, 0, false, false
+		}
+		bs, quote, control := cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
+		if cParityAtFirst(quote, bs|control) {
+			afterQuote := pos + bits.TrailingZeros32(quote) + 1
+			if afterQuote > end {
+				return 0, 0, false, false
+			}
+			sc.pos = afterQuote
+			return KStringCommon | uint64(contentStart)<<PosBits, uint64(afterQuote - contentStart - 1), false, true
+		}
+		if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
+			return 0, 0, false, false
+		}
+		if cParityAtFirst(bs, quote) {
+			pos += bits.TrailingZeros32(bs)
+			break
+		}
+		pos += 32
+	}
+
+	firstEsc := pos
+	afterQuote, ok := skipStringBodyAt(strPtr, tailPtr, firstEsc, end, safe64, tailStart, opts)
+	if !ok {
+		return 0, 0, false, false
+	}
+	quotePos := afterQuote - 1
+	p := sc.p
+	uoff := len(p.unescBuf)
+	prefixLen := firstEsc - contentStart
+	maxOut := quotePos - contentStart
+	if cap(p.unescBuf)-uoff < maxOut {
+		newCap := cap(p.unescBuf) * 2
+		if newCap < 256 {
+			newCap = 256
+		}
+		if newCap < uoff+maxOut {
+			newCap = uoff + maxOut
+		}
+		grown := make([]byte, uoff, newCap)
+		copy(grown, p.unescBuf)
+		p.unescBuf = grown
+	}
+	p.unescBuf = append(p.unescBuf, sc.jsonStr[contentStart:firstEsc]...)
+	escTail := sc.jsonStr[firstEsc:quotePos]
+	dst := p.unescBuf[uoff+prefixLen : uoff+maxOut]
+	var unquoteFlags uint64 = types.F_UNICODE_REPLACE
+	if opts&(1<<_F_disable_urc) != 0 {
+		unquoteFlags = 0
+	}
+	written, _, uerr := kernels.Unquote(escTail, dst, unquoteFlags)
+	if uerr != 0 {
+		p.unescBuf = p.unescBuf[:uoff]
+		return 0, 0, false, false
+	}
+	ulen := prefixLen + written
+	p.unescBuf = p.unescBuf[:uoff+ulen]
+	p.unesc = p.unescBuf
+	sc.pos = afterQuote
+	packedVal := escapedInUnescFlag | (uint64(uoff) << 32) | uint64(uint32(ulen))
+	return KStringEscaped | uint64(contentStart)<<PosBits, packedVal, true, true
 }
 
 func (sc *schemaScanner) scanStringScalar(valStart int) bool {
 	contentStart := valStart + 1
-	rawPtr := unsafe.Pointer(sc.rawPtr)
-	if afterQuote, done, valid := swarSkipString64(rawPtr, contentStart, sc.end, sc.validateStr); done {
+	if afterQuote, done, valid := swarSkipString64(sc.strPtr, sc.tailPtr, contentStart, sc.end, sc.safe64, sc.tailStart, sc.validateStr); done {
 		if !valid {
 			return false
 		}
@@ -994,39 +1192,25 @@ func (sc *schemaScanner) scanStringScalar(valStart int) bool {
 		return true
 	}
 
-	cur := unsafe.Add(rawPtr, contentStart)
-	var hasEsc bool
-	dlen := cParityParseStringOpt(&cur, &hasEsc, sc.opts, sc.p.strictURC)
-	if hasEsc {
-		sc.mutatedPadded = true
-	}
-	if dlen < 0 {
+	typ, val, _, ok := sc.scanStringSlow(contentStart)
+	if !ok {
 		return false
-	}
-	afterQuote := int(uintptr(cur) - uintptr(rawPtr))
-	if afterQuote > sc.end {
-		return false
-	}
-	sc.pos = afterQuote
-	typ := uint64(KStringCommon)
-	if hasEsc {
-		typ = KStringEscaped
 	}
 	sc.ensureNodes(2)
 	sc.p.nodes[sc.nIdx] = node{
-		typ: typ | uint64(contentStart)<<PosBits,
-		val: uint64(dlen),
+		typ: typ,
+		val: val,
 	}
 	sc.nIdx++
 	return true
 }
 
 func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	strPtr := sc.strPtr
 	pos := sc.pos
 	end := sc.end
 	if sc.opts&(1<<_F_use_number) != 0 {
-		numEnd, ok := skipNumberAt(rawPtr, first, pos, end, false)
+		numEnd, ok := skipNumberAt(strPtr, first, pos, end, false)
 		if !ok {
 			return false
 		}
@@ -1041,7 +1225,7 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 		uval := uint64(first - '0')
 		digits := 1
 		for digits < 19 {
-			d := *(*byte)(unsafe.Add(rawPtr, pos))
+			d := schemaByteAt(strPtr, pos, end)
 			if d < '0' || d > '9' {
 				if d != '.' && (d|0x20) != 'e' {
 					if pos > end {
@@ -1060,7 +1244,7 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 			digits++
 		}
 	} else if first == '0' {
-		d := *(*byte)(unsafe.Add(rawPtr, pos))
+		d := schemaByteAt(strPtr, pos, end)
 		if d != '.' && (d|0x20) != 'e' {
 			if pos > end {
 				return false
@@ -1071,13 +1255,13 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 			return true
 		}
 	} else if first == '-' {
-		d0 := *(*byte)(unsafe.Add(rawPtr, pos))
+		d0 := schemaByteAt(strPtr, pos, end)
 		if d0 >= '1' && d0 <= '9' {
 			uval := uint64(d0 - '0')
 			p2 := pos + 1
 			digits := 1
 			for digits < 19 {
-				d := *(*byte)(unsafe.Add(rawPtr, p2))
+				d := schemaByteAt(strPtr, p2, end)
 				if d < '0' || d > '9' {
 					if d != '.' && (d|0x20) != 'e' {
 						if p2 > end {
@@ -1104,21 +1288,49 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 		}
 	}
 
+	numEnd, ok := skipNumberAt(strPtr, first, sc.pos, end, false)
+	if !ok {
+		return false
+	}
 	neg := first == '-'
 	numBody := valStart
 	if neg {
 		numBody++
 	}
-	nextCur, numVal, code := cParityParseNumberValue(unsafe.Add(rawPtr, numBody), sc.num, neg, sc.p.dbuf)
-	if code != SONIC_OK {
-		return false
-	}
-	nextPos := int(uintptr(nextCur) - uintptr(rawPtr))
-	if nextPos > end {
-		return false
+	var numVal cParityNum
+	var code ErrorCode
+	if numEnd <= sc.safe64 {
+		var nextCur unsafe.Pointer
+		startPtr := unsafe.Add(strPtr, numBody)
+		nextCur, numVal, code = cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+		if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
+			return false
+		}
+	} else if numBody >= sc.tailStart {
+		var nextCur unsafe.Pointer
+		startPtr := unsafe.Add(sc.tailPtr, numBody-sc.tailStart)
+		nextCur, numVal, code = cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+		if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
+			return false
+		}
+	} else {
+		p := sc.p
+		savedLen := len(p.unescBuf)
+		p.unescBuf = append(p.unescBuf, sc.jsonStr[numBody:numEnd]...)
+		p.unescBuf = append(p.unescBuf, 'x', 0, 0, 0, 0, 0, 0, 0)
+		startPtr := unsafe.Pointer(&p.unescBuf[savedLen])
+		nextCur, nv, c := cParityParseNumberValue(startPtr, sc.num, neg, p.dbuf)
+		p.unescBuf = p.unescBuf[:savedLen]
+		if p.unesc != nil {
+			p.unesc = p.unescBuf
+		}
+		if c != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
+			return false
+		}
+		numVal = nv
 	}
 	sc.num = numVal
-	sc.pos = nextPos
+	sc.pos = numEnd
 	sc.ensureNodes(2)
 	sc.p.nodes[sc.nIdx] = node{typ: numVal.typ | uint64(valStart)<<PosBits, val: numVal.val}
 	sc.nIdx++
@@ -1129,7 +1341,7 @@ func (sc *schemaScanner) matchTrueTail() bool {
 	if sc.pos+3 > sc.end {
 		return false
 	}
-	p := unsafe.Add(unsafe.Pointer(sc.rawPtr), sc.pos)
+	p := sc.ptrAt64(sc.pos)
 	if (*(*uint32)(p) & 0x00ffffff) != 0x00657572 {
 		return false
 	}
@@ -1141,7 +1353,7 @@ func (sc *schemaScanner) matchFalseTail() bool {
 	if sc.pos+4 > sc.end {
 		return false
 	}
-	p := unsafe.Add(unsafe.Pointer(sc.rawPtr), sc.pos)
+	p := sc.ptrAt64(sc.pos)
 	if *(*uint32)(p) != 0x65736c61 {
 		return false
 	}
@@ -1153,7 +1365,7 @@ func (sc *schemaScanner) matchNullTail() bool {
 	if sc.pos+3 > sc.end {
 		return false
 	}
-	p := unsafe.Add(unsafe.Pointer(sc.rawPtr), sc.pos)
+	p := sc.ptrAt64(sc.pos)
 	if (*(*uint32)(p) & 0x00ffffff) != 0x006c6c75 {
 		return false
 	}
@@ -1164,12 +1376,15 @@ func (sc *schemaScanner) matchNullTail() bool {
 // skipValidateValue handles scalar values immediately without touching a container stack,
 // and dispatches objects/arrays to skipValidateContainer (64-level register bit-stack).
 func (sc *schemaScanner) skipValidateValue(c byte) bool {
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	strPtr := sc.strPtr
+	tailPtr := sc.tailPtr
 	pos := sc.pos
 	end := sc.end
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
 	switch c {
 	case '"':
-		if nextPos, done, valid := swarSkipString64(rawPtr, pos, end, sc.validateStr); done {
+		if nextPos, done, valid := swarSkipString64(strPtr, tailPtr, pos, end, safe64, tailStart, sc.validateStr); done {
 			if !valid {
 				return false
 			}
@@ -1177,7 +1392,7 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 			return true
 		} else {
 			var ok bool
-			pos, ok = skipStringBodyAt(rawPtr, nextPos, end, sc.opts)
+			pos, ok = skipStringBodyAt(strPtr, tailPtr, nextPos, end, safe64, tailStart, sc.opts)
 			if !ok {
 				return false
 			}
@@ -1185,19 +1400,19 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 			return true
 		}
 	case 't':
-		if pos+3 > end || (*(*uint32)(unsafe.Add(rawPtr, pos))&0x00ffffff) != 0x00657572 {
+		if pos+3 > end || (*(*uint32)(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart))&0x00ffffff) != 0x00657572 {
 			return false
 		}
 		sc.pos = pos + 3
 		return true
 	case 'f':
-		if pos+4 > end || *(*uint32)(unsafe.Add(rawPtr, pos)) != 0x65736c61 {
+		if pos+4 > end || *(*uint32)(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart)) != 0x65736c61 {
 			return false
 		}
 		sc.pos = pos + 4
 		return true
 	case 'n':
-		if pos+3 > end || (*(*uint32)(unsafe.Add(rawPtr, pos))&0x00ffffff) != 0x006c6c75 {
+		if pos+3 > end || (*(*uint32)(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart))&0x00ffffff) != 0x006c6c75 {
 			return false
 		}
 		sc.pos = pos + 3
@@ -1208,7 +1423,7 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 		if c >= '1' && c <= '9' {
 			p2 := pos
 			for {
-				d := *(*byte)(unsafe.Add(rawPtr, p2))
+				d := schemaByteAt(strPtr, p2, end)
 				if d < '0' || d > '9' {
 					if d != '.' && (d|0x20) != 'e' && p2-pos < 199 {
 						if p2 > end {
@@ -1222,7 +1437,7 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 				p2++
 			}
 		} else if c == '0' {
-			d := *(*byte)(unsafe.Add(rawPtr, pos))
+			d := schemaByteAt(strPtr, pos, end)
 			if d != '.' && (d|0x20) != 'e' {
 				if pos > end {
 					return false
@@ -1232,7 +1447,7 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 		} else if c != '-' {
 			return false
 		}
-		nextPos, ok := skipNumberAt(rawPtr, c, pos, end, sc.opts&(1<<_F_use_number) == 0)
+		nextPos, ok := skipNumberAt(strPtr, c, pos, end, sc.opts&(1<<_F_use_number) == 0)
 		if !ok {
 			return false
 		}
@@ -1241,10 +1456,72 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 	}
 }
 
+func swarSkipString64Raw(rawPtr unsafe.Pointer, pos int, validateStr bool) (int, bool, bool) {
+	base := unsafe.Add(rawPtr, pos)
+	for off := 0; off < 64; off += 8 {
+		w := *(*uint64)(unsafe.Add(base, off))
+		q := w ^ swarQuote
+		qm := (q - swarOnes) &^ q & swarHigh
+		b := w ^ swarBS
+		em := (b - swarOnes) &^ b & swarHigh
+		if validateStr {
+			em |= (w - swarCtrl) &^ w & swarHigh
+		}
+		if qm != 0 {
+			if (qm-1)&em != 0 {
+				return pos + off, false, false
+			}
+			return pos + off + (bits.TrailingZeros64(qm) >> 3) + 1, true, true
+		}
+		if em != 0 {
+			return pos + off, false, false
+		}
+	}
+	return pos + 64, false, false
+}
+
+func skipIndentSWARRaw(rawPtr unsafe.Pointer, pos int) (byte, int, bool) {
+	base := unsafe.Add(rawPtr, pos)
+	w0 := *(*uint64)(base) ^ swarSpaces
+	if w0 != 0 {
+		rel := bits.TrailingZeros64(w0) >> 3
+		b := *(*byte)(unsafe.Add(base, rel))
+		if b > ' ' {
+			return b, pos + rel + 1, true
+		}
+		return 0, pos + rel, false
+	}
+	w1 := *(*uint64)(unsafe.Add(base, 8)) ^ swarSpaces
+	if w1 != 0 {
+		rel := 8 + (bits.TrailingZeros64(w1) >> 3)
+		b := *(*byte)(unsafe.Add(base, rel))
+		if b > ' ' {
+			return b, pos + rel + 1, true
+		}
+		return 0, pos + rel, false
+	}
+	w2 := *(*uint64)(unsafe.Add(base, 16)) ^ swarSpaces
+	if w2 != 0 {
+		rel := 16 + (bits.TrailingZeros64(w2) >> 3)
+		b := *(*byte)(unsafe.Add(base, rel))
+		if b > ' ' {
+			return b, pos + rel + 1, true
+		}
+		return 0, pos + rel, false
+	}
+	return 0, pos + 24, false
+}
+
 // skipValidateContainer validates and skips a '{' or '[' subtree with a 64-level
 // bit-stack in a single uint64 register (0 = object, 1 = array), zero closures,
 // zero stack-array zeroing, inline SWAR indentation & string scanning.
 func (sc *schemaScanner) skipValidateContainer(c byte) bool {
+	end := sc.end
+	fastLimit := end - 128
+	if sc.pos > fastLimit {
+		return sc.skipValidateContainerTail(c, 0, 0, sc.pos, sc.nbkOffPlus64, sc.nbkBits, 0)
+	}
+
 	var frameBits uint64
 	sp := 0
 	maxSp := int(consts.MaxStack - sc.depth)
@@ -1252,9 +1529,11 @@ func (sc *schemaScanner) skipValidateContainer(c byte) bool {
 		maxSp = 64
 	}
 
-	rawPtr := unsafe.Pointer(sc.rawPtr)
+	rawPtr := sc.strPtr
+	tailPtr := sc.tailPtr
 	pos := sc.pos
-	end := sc.end
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
 	opts := sc.opts
 	validateStr := sc.validateStr
 	checkFloatInf := opts&(1<<_F_use_number) == 0
@@ -1266,16 +1545,19 @@ func (sc *schemaScanner) skipValidateContainer(c byte) bool {
 	var done, valid, ok bool
 
 valueEntry:
+	if pos > fastLimit {
+		return sc.skipValidateContainerTail(c, frameBits, sp, pos, nbkOffPlus64, nbkBits, 0)
+	}
 	switch c {
 	case '"':
-		if nextPos, done, valid = swarSkipString64(rawPtr, pos, end, validateStr); done {
+		if nextPos, done, valid = swarSkipString64Raw(rawPtr, pos, validateStr); done {
 			if !valid {
 				return false
 			}
 			pos = nextPos
 			goto afterValue
 		}
-		pos, ok = skipStringBodyAt(rawPtr, nextPos, end, opts)
+		pos, ok = skipStringBodyAt(rawPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
 		if !ok {
 			return false
 		}
@@ -1288,21 +1570,18 @@ valueEntry:
 		nc = *(*byte)(unsafe.Add(rawPtr, pos))
 		if nc > ' ' {
 			pos++
-			if pos > end {
-				return false
-			}
 		} else if nc == '\n' {
-			if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+			if b, np, hit := skipIndentSWARRaw(rawPtr, pos+1); hit {
 				nc = b
 				pos = np
 			} else {
-				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, np, end, nbkOffPlus64, nbkBits)
+				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 				if !ok {
 					return false
 				}
 			}
 		} else {
-			nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+			nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 			if !ok {
 				return false
 			}
@@ -1322,21 +1601,18 @@ valueEntry:
 		nc = *(*byte)(unsafe.Add(rawPtr, pos))
 		if nc > ' ' {
 			pos++
-			if pos > end {
-				return false
-			}
 		} else if nc == '\n' {
-			if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+			if b, np, hit := skipIndentSWARRaw(rawPtr, pos+1); hit {
 				nc = b
 				pos = np
 			} else {
-				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, np, end, nbkOffPlus64, nbkBits)
+				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 				if !ok {
 					return false
 				}
 			}
 		} else {
-			nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+			nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 			if !ok {
 				return false
 			}
@@ -1349,30 +1625,27 @@ valueEntry:
 		c = nc
 		goto valueEntry
 	case 't':
-		if pos+3 > end || (*(*uint32)(unsafe.Add(rawPtr, pos))&0x00ffffff) != 0x00657572 {
+		if (*(*uint32)(unsafe.Add(rawPtr, pos)) & 0x00ffffff) != 0x00657572 {
 			return false
 		}
 		pos += 3
 	case 'f':
-		if pos+4 > end || *(*uint32)(unsafe.Add(rawPtr, pos)) != 0x65736c61 {
+		if *(*uint32)(unsafe.Add(rawPtr, pos)) != 0x65736c61 {
 			return false
 		}
 		pos += 4
 	case 'n':
-		if pos+3 > end || (*(*uint32)(unsafe.Add(rawPtr, pos))&0x00ffffff) != 0x006c6c75 {
+		if (*(*uint32)(unsafe.Add(rawPtr, pos)) & 0x00ffffff) != 0x006c6c75 {
 			return false
 		}
 		pos += 3
 	default:
 		if c >= '1' && c <= '9' {
 			p2 := pos
-			for {
+			for p2-pos < 20 {
 				d := *(*byte)(unsafe.Add(rawPtr, p2))
 				if d < '0' || d > '9' {
-					if d != '.' && (d|0x20) != 'e' && p2-pos < 199 {
-						if p2 > end {
-							return false
-						}
+					if d != '.' && (d|0x20) != 'e' {
 						pos = p2
 						goto afterValue
 					}
@@ -1383,9 +1656,6 @@ valueEntry:
 		} else if c == '0' {
 			d := *(*byte)(unsafe.Add(rawPtr, pos))
 			if d != '.' && (d|0x20) != 'e' {
-				if pos > end {
-					return false
-				}
 				goto afterValue
 			}
 		} else if c != '-' {
@@ -1404,37 +1674,34 @@ afterValue:
 		sc.nbkBits = nbkBits
 		return true
 	}
+	if pos > fastLimit {
+		return sc.skipValidateContainerTail(0, frameBits, sp, pos, nbkOffPlus64, nbkBits, 1)
+	}
 	if (frameBits & 1) != 0 {
 		goto arrAfterValue
 	}
 	delim = *(*byte)(unsafe.Add(rawPtr, pos))
 	if delim == ',' {
 		pos++
-		if pos > end {
-			return false
-		}
 		cNext := *(*byte)(unsafe.Add(rawPtr, pos))
 		if cNext == '"' {
 			pos++
-			if pos > end {
-				return false
-			}
 			goto objKeyBody
 		}
 		if cNext == '\n' {
-			if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+			if b, np, hit := skipIndentSWARRaw(rawPtr, pos+1); hit {
 				nc = b
 				pos = np
 				goto objKey
 			} else {
-				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, np, end, nbkOffPlus64, nbkBits)
+				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 				if !ok {
 					return false
 				}
 				goto objKey
 			}
 		}
-		nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok {
 			return false
 		}
@@ -1442,31 +1709,28 @@ afterValue:
 	}
 	if delim == '}' {
 		pos++
-		if pos > end {
-			return false
-		}
 		frameBits >>= 1
 		sp--
 		goto afterValue
 	}
 	if delim == '\n' {
-		if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+		if b, np, hit := skipIndentSWARRaw(rawPtr, pos+1); hit {
 			delim = b
 			pos = np
 		} else {
-			delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, np, end, nbkOffPlus64, nbkBits)
+			delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 			if !ok {
 				return false
 			}
 		}
 	} else {
-		delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok {
 			return false
 		}
 	}
 	if delim == ',' {
-		nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok {
 			return false
 		}
@@ -1484,35 +1748,38 @@ objKey:
 		return false
 	}
 objKeyBody:
-	if nextPos, done, valid = swarSkipString64(rawPtr, pos, end, validateStr); done {
+	if pos > fastLimit {
+		return sc.skipValidateContainerTail(0, frameBits, sp, pos, nbkOffPlus64, nbkBits, 2)
+	}
+	if nextPos, done, valid = swarSkipString64Raw(rawPtr, pos, validateStr); done {
 		if !valid {
 			return false
 		}
 		pos = nextPos
 		goto objAfterKey
 	}
-	pos, ok = skipStringBodyAt(rawPtr, nextPos, end, opts)
+	pos, ok = skipStringBodyAt(rawPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
 	if !ok {
 		return false
+	}
+	if pos > fastLimit {
+		return sc.skipValidateContainerTail(0, frameBits, sp, pos, nbkOffPlus64, nbkBits, 3)
 	}
 objAfterKey:
 	if *(*byte)(unsafe.Add(rawPtr, pos)) == ':' {
 		pos++
-		if pos > end {
-			return false
-		}
 	} else {
-		colon, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		colon, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok || colon != ':' {
 			return false
+		}
+		if pos > fastLimit {
+			return sc.skipValidateContainerTail(0, frameBits, sp, pos, nbkOffPlus64, nbkBits, 4)
 		}
 	}
 	vc = *(*byte)(unsafe.Add(rawPtr, pos))
 	if vc > ' ' {
 		pos++
-		if pos > end {
-			return false
-		}
 		c = vc
 		goto valueEntry
 	}
@@ -1520,14 +1787,11 @@ objAfterKey:
 		vc2 := *(*byte)(unsafe.Add(rawPtr, pos+1))
 		if vc2 > ' ' {
 			pos += 2
-			if pos > end {
-				return false
-			}
 			c = vc2
 			goto valueEntry
 		}
 	}
-	vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+	vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 	if !ok {
 		return false
 	}
@@ -1538,10 +1802,382 @@ arrAfterValue:
 	delim = *(*byte)(unsafe.Add(rawPtr, pos))
 	if delim == ',' {
 		pos++
+		vc = *(*byte)(unsafe.Add(rawPtr, pos))
+		if vc > ' ' {
+			pos++
+			c = vc
+			goto valueEntry
+		}
+		if vc == '\n' {
+			if b, np, hit := skipIndentSWARRaw(rawPtr, pos+1); hit {
+				c = b
+				pos = np
+				goto valueEntry
+			} else {
+				vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+				if !ok {
+					return false
+				}
+				c = vc
+				goto valueEntry
+			}
+		}
+		vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok {
+			return false
+		}
+		c = vc
+		goto valueEntry
+	}
+	if delim == ']' {
+		pos++
+		frameBits >>= 1
+		sp--
+		goto afterValue
+	}
+	if delim == '\n' {
+		if b, np, hit := skipIndentSWARRaw(rawPtr, pos+1); hit {
+			delim = b
+			pos = np
+		} else {
+			delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+			if !ok {
+				return false
+			}
+		}
+	} else {
+		delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok {
+			return false
+		}
+	}
+	if delim == ',' {
+		vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok {
+			return false
+		}
+		c = vc
+		goto valueEntry
+	}
+	if delim == ']' {
+		frameBits >>= 1
+		sp--
+		goto afterValue
+	}
+	return false
+}
+
+// skipValidateContainerTail finishes container skipping in the final <= 128 bytes near EOF
+// using the bounds-safe tail window (tailPtr / schemaByteAt).
+// entryMode: 0 = valueEntry(c), 1 = afterValue, 2 = objKeyBody, 3 = objAfterKey, 4 = objAfterColon.
+func (sc *schemaScanner) skipValidateContainerTail(c byte, frameBits uint64, sp int, pos int, nbkOffPlus64, nbkBits uint64, entryMode uint8) bool {
+	maxSp := int(consts.MaxStack - sc.depth)
+	if maxSp > 64 {
+		maxSp = 64
+	}
+
+	strPtr := sc.strPtr
+	tailPtr := sc.tailPtr
+	end := sc.end
+	safe64 := sc.safe64
+	tailStart := sc.tailStart
+	opts := sc.opts
+	validateStr := sc.validateStr
+	checkFloatInf := opts&(1<<_F_use_number) == 0
+
+	var nc, vc, delim, colon byte
+	var nextPos int
+	var done, valid, ok bool
+
+	switch entryMode {
+	case 1:
+		goto afterValue
+	case 2:
+		goto objKeyBody
+	case 3:
+		goto objAfterKey
+	case 4:
+		goto objAfterColon
+	}
+
+valueEntry:
+	switch c {
+	case '"':
+		if nextPos, done, valid = swarSkipString64(strPtr, tailPtr, pos, end, safe64, tailStart, validateStr); done {
+			if !valid {
+				return false
+			}
+			pos = nextPos
+			goto afterValue
+		}
+		pos, ok = skipStringBodyAt(strPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
+		if !ok {
+			return false
+		}
+	case '{':
+		if sp >= maxSp {
+			return false
+		}
+		frameBits <<= 1
+		sp++
+		nc = schemaByteAt(strPtr, pos, end)
+		if nc > ' ' {
+			pos++
+			if pos > end {
+				return false
+			}
+		} else if nc == '\n' {
+			if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
+				nc = b
+				pos = np
+			} else {
+				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+				if !ok {
+					return false
+				}
+			}
+		} else {
+			nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+			if !ok {
+				return false
+			}
+		}
+		if nc == '}' {
+			frameBits >>= 1
+			sp--
+			goto afterValue
+		}
+		goto objKey
+	case '[':
+		if sp >= maxSp {
+			return false
+		}
+		frameBits = (frameBits << 1) | 1
+		sp++
+		nc = schemaByteAt(strPtr, pos, end)
+		if nc > ' ' {
+			pos++
+			if pos > end {
+				return false
+			}
+		} else if nc == '\n' {
+			if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
+				nc = b
+				pos = np
+			} else {
+				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+				if !ok {
+					return false
+				}
+			}
+		} else {
+			nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+			if !ok {
+				return false
+			}
+		}
+		if nc == ']' {
+			frameBits >>= 1
+			sp--
+			goto afterValue
+		}
+		c = nc
+		goto valueEntry
+	case 't':
+		if pos+3 > end || (*(*uint32)(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart))&0x00ffffff) != 0x00657572 {
+			return false
+		}
+		pos += 3
+	case 'f':
+		if pos+4 > end || *(*uint32)(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart)) != 0x65736c61 {
+			return false
+		}
+		pos += 4
+	case 'n':
+		if pos+3 > end || (*(*uint32)(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart))&0x00ffffff) != 0x006c6c75 {
+			return false
+		}
+		pos += 3
+	default:
+		if c >= '1' && c <= '9' {
+			p2 := pos
+			for {
+				d := schemaByteAt(strPtr, p2, end)
+				if d < '0' || d > '9' {
+					if d != '.' && (d|0x20) != 'e' && p2-pos < 199 {
+						if p2 > end {
+							return false
+						}
+						pos = p2
+						goto afterValue
+					}
+					break
+				}
+				p2++
+			}
+		} else if c == '0' {
+			d := schemaByteAt(strPtr, pos, end)
+			if d != '.' && (d|0x20) != 'e' {
+				if pos > end {
+					return false
+				}
+				goto afterValue
+			}
+		} else if c != '-' {
+			return false
+		}
+		pos, ok = skipNumberAt(strPtr, c, pos, end, checkFloatInf)
+		if !ok {
+			return false
+		}
+	}
+
+afterValue:
+	if sp == 0 {
+		sc.pos = pos
+		sc.nbkOffPlus64 = nbkOffPlus64
+		sc.nbkBits = nbkBits
+		return true
+	}
+	if (frameBits & 1) != 0 {
+		goto arrAfterValue
+	}
+	delim = schemaByteAt(strPtr, pos, end)
+	if delim == ',' {
+		pos++
 		if pos > end {
 			return false
 		}
-		vc = *(*byte)(unsafe.Add(rawPtr, pos))
+		cNext := schemaByteAt(strPtr, pos, end)
+		if cNext == '"' {
+			pos++
+			if pos > end {
+				return false
+			}
+			goto objKeyBody
+		}
+		if cNext == '\n' {
+			if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
+				nc = b
+				pos = np
+				goto objKey
+			} else {
+				nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+				if !ok {
+					return false
+				}
+				goto objKey
+			}
+		}
+		nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok {
+			return false
+		}
+		goto objKey
+	}
+	if delim == '}' {
+		pos++
+		if pos > end {
+			return false
+		}
+		frameBits >>= 1
+		sp--
+		goto afterValue
+	}
+	if delim == '\n' {
+		if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
+			delim = b
+			pos = np
+		} else {
+			delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+			if !ok {
+				return false
+			}
+		}
+	} else {
+		delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok {
+			return false
+		}
+	}
+	if delim == ',' {
+		nc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok {
+			return false
+		}
+		goto objKey
+	}
+	if delim == '}' {
+		frameBits >>= 1
+		sp--
+		goto afterValue
+	}
+	return false
+
+objKey:
+	if nc != '"' {
+		return false
+	}
+objKeyBody:
+	if nextPos, done, valid = swarSkipString64(strPtr, tailPtr, pos, end, safe64, tailStart, validateStr); done {
+		if !valid {
+			return false
+		}
+		pos = nextPos
+		goto objAfterKey
+	}
+	pos, ok = skipStringBodyAt(strPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
+	if !ok {
+		return false
+	}
+objAfterKey:
+	if schemaByteAt(strPtr, pos, end) == ':' {
+		pos++
+		if pos > end {
+			return false
+		}
+	} else {
+		colon, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+		if !ok || colon != ':' {
+			return false
+		}
+	}
+objAfterColon:
+	vc = schemaByteAt(strPtr, pos, end)
+	if vc > ' ' {
+		pos++
+		if pos > end {
+			return false
+		}
+		c = vc
+		goto valueEntry
+	}
+	if vc == ' ' {
+		vc2 := schemaByteAt(strPtr, pos+1, end)
+		if vc2 > ' ' {
+			pos += 2
+			if pos > end {
+				return false
+			}
+			c = vc2
+			goto valueEntry
+		}
+	}
+	vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
+	if !ok {
+		return false
+	}
+	c = vc
+	goto valueEntry
+
+arrAfterValue:
+	delim = schemaByteAt(strPtr, pos, end)
+	if delim == ',' {
+		pos++
+		if pos > end {
+			return false
+		}
+		vc = schemaByteAt(strPtr, pos, end)
 		if vc > ' ' {
 			pos++
 			if pos > end {
@@ -1551,12 +2187,12 @@ arrAfterValue:
 			goto valueEntry
 		}
 		if vc == '\n' {
-			if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+			if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
 				c = b
 				pos = np
 				goto valueEntry
 			} else {
-				vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, np, end, nbkOffPlus64, nbkBits)
+				vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 				if !ok {
 					return false
 				}
@@ -1564,7 +2200,7 @@ arrAfterValue:
 				goto valueEntry
 			}
 		}
-		vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok {
 			return false
 		}
@@ -1581,23 +2217,23 @@ arrAfterValue:
 		goto afterValue
 	}
 	if delim == '\n' {
-		if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+		if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
 			delim = b
 			pos = np
 		} else {
-			delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, np, end, nbkOffPlus64, nbkBits)
+			delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, np, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 			if !ok {
 				return false
 			}
 		}
 	} else {
-		delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		delim, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok {
 			return false
 		}
 	}
 	if delim == ',' {
-		vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(rawPtr, pos, end, nbkOffPlus64, nbkBits)
+		vc, pos, nbkOffPlus64, nbkBits, ok = skipSpaceReg(strPtr, tailPtr, pos, end, safe64, tailStart, nbkOffPlus64, nbkBits)
 		if !ok {
 			return false
 		}
@@ -1612,17 +2248,17 @@ arrAfterValue:
 	return false
 }
 
-func skipSpaceReg(rawPtr unsafe.Pointer, pos, end int, nbkOffPlus64, nbkBits uint64) (byte, int, uint64, uint64, bool) {
-	b := *(*byte)(unsafe.Add(rawPtr, pos))
+func skipSpaceReg(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart int, nbkOffPlus64, nbkBits uint64) (byte, int, uint64, uint64, bool) {
+	b := schemaByteAt(strPtr, pos, end)
 	if b > ' ' || (spaceMask&(uint64(1)<<b)) == 0 {
 		return b, pos + 1, nbkOffPlus64, nbkBits, pos < end
 	}
-	if b, np, hit := skipIndentSWAR(rawPtr, pos+1, end); hit {
+	if b, np, hit := skipIndentSWAR(strPtr, tailPtr, pos+1, end, safe64, tailStart); hit {
 		return b, np, nbkOffPlus64, nbkBits, true
 	} else {
 		pos = np
 	}
-	b = *(*byte)(unsafe.Add(rawPtr, pos))
+	b = schemaByteAt(strPtr, pos, end)
 	if b > ' ' || (spaceMask&(uint64(1)<<b)) == 0 {
 		return b, pos + 1, nbkOffPlus64, nbkBits, pos < end
 	}
@@ -1634,26 +2270,32 @@ func skipSpaceReg(rawPtr unsafe.Pointer, pos, end int, nbkOffPlus64, nbkBits uin
 			mask := nbkBits >> uint(rel)
 			if mask != 0 {
 				at := pos + bits.TrailingZeros64(mask)
-				return *(*byte)(unsafe.Add(rawPtr, at)), at + 1, nbkOffPlus64, nbkBits, at < end
+				return schemaByteAt(strPtr, at, end), at + 1, nbkOffPlus64, nbkBits, at < end
 			}
 			pos = blockOff + 64
 		}
 	}
 	for {
-		mask := cParityNonspace64(unsafe.Add(rawPtr, pos))
+		if pos >= end {
+			return 0, pos, nbkOffPlus64, nbkBits, false
+		}
+		mask := cParityNonspace64(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart))
 		if mask != 0 {
 			nbkBits = mask
 			nbkOffPlus64 = uint64(pos + 64)
 			at := pos + bits.TrailingZeros64(mask)
-			return *(*byte)(unsafe.Add(rawPtr, at)), at + 1, nbkOffPlus64, nbkBits, at < end
+			return schemaByteAt(strPtr, at, end), at + 1, nbkOffPlus64, nbkBits, at < end
 		}
 		pos += 64
 	}
 }
 
-func skipStringBodyAt(rawPtr unsafe.Pointer, pos, end int, opts uint64) (int, bool) {
+func skipStringBodyAt(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart int, opts uint64) (int, bool) {
 	for {
-		bs, quote, control := cParityStringMasks32(unsafe.Add(rawPtr, pos), opts)
+		if pos > end {
+			return pos, false
+		}
+		bs, quote, control := cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
 		if cParityAtFirst(quote, bs|control) {
 			pos += bits.TrailingZeros32(quote) + 1
 			return pos, pos <= end
@@ -1672,7 +2314,7 @@ func skipStringBodyAt(rawPtr unsafe.Pointer, pos, end int, opts uint64) (int, bo
 		if pos+2 > end {
 			return pos, false
 		}
-		esc := *(*byte)(unsafe.Add(rawPtr, pos+1))
+		esc := *(*byte)(unsafe.Add(strPtr, pos+1))
 		if esc != 'u' {
 			if cParityEscaped[esc] == 0 {
 				return pos, false
@@ -1683,36 +2325,39 @@ func skipStringBodyAt(rawPtr unsafe.Pointer, pos, end int, opts uint64) (int, bo
 				if pos+6 > end {
 					return pos, false
 				}
-				u, ok := cParityReadHex16(unsafe.Add(rawPtr, pos+2))
+				u, ok := cParityReadHex16(unsafe.Add(strPtr, pos+2))
 				if !ok {
 					return pos, false
 				}
 				pos += 6
 				if opts&(1<<_F_disable_urc) != 0 && u >= 0xd800 && u <= 0xdfff {
-					if u > 0xdbff || pos+6 > end || *(*byte)(unsafe.Add(rawPtr, pos)) != '\\' || *(*byte)(unsafe.Add(rawPtr, pos+1)) != 'u' {
+					if u > 0xdbff || pos+6 > end || *(*byte)(unsafe.Add(strPtr, pos)) != '\\' || *(*byte)(unsafe.Add(strPtr, pos+1)) != 'u' {
 						return pos, false
 					}
-					u2, ok2 := cParityReadHex16(unsafe.Add(rawPtr, pos+2))
+					u2, ok2 := cParityReadHex16(unsafe.Add(strPtr, pos+2))
 					if !ok2 || u2 < 0xdc00 || u2 > 0xdfff {
 						return pos, false
 					}
 					pos += 6
 				}
-				if *(*byte)(unsafe.Add(rawPtr, pos)) != '\\' || *(*byte)(unsafe.Add(rawPtr, pos+1)) != 'u' {
+				if pos+2 > end || *(*byte)(unsafe.Add(strPtr, pos)) != '\\' || *(*byte)(unsafe.Add(strPtr, pos+1)) != 'u' {
 					break
 				}
 			}
 		}
-		if *(*byte)(unsafe.Add(rawPtr, pos)) == '\\' {
+		if schemaByteAt(strPtr, pos, end) == '\\' {
 			continue
 		}
 		for {
-			bs, quote, control := cParityStringMasks32(unsafe.Add(rawPtr, pos), opts)
+			if pos > end {
+				return pos, false
+			}
+			bs, quote, control := cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
 			if cParityAtFirst(quote, bs|control) {
 				pos += bits.TrailingZeros32(quote) + 1
 				return pos, pos <= end
 			}
-			if opts&(1<<5) != 0 && cParityAtFirst(control, quote) {
+			if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
 				return pos, false
 			}
 			if cParityAtFirst(bs, quote) {
@@ -1724,9 +2369,9 @@ func skipStringBodyAt(rawPtr unsafe.Pointer, pos, end int, opts uint64) (int, bo
 	}
 }
 
-func skipNumberAt(rawPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf bool) (int, bool) {
+func skipNumberAt(strPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf bool) (int, bool) {
 	if first == '-' {
-		first = *(*byte)(unsafe.Add(rawPtr, pos))
+		first = schemaByteAt(strPtr, pos, end)
 		pos++
 		if pos > end {
 			return pos, false
@@ -1739,7 +2384,7 @@ func skipNumberAt(rawPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf
 	} else if first >= '1' && first <= '9' {
 		intDigits = 1
 		for {
-			d := *(*byte)(unsafe.Add(rawPtr, pos))
+			d := schemaByteAt(strPtr, pos, end)
 			if d < '0' || d > '9' {
 				break
 			}
@@ -1750,16 +2395,16 @@ func skipNumberAt(rawPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf
 		return pos, false
 	}
 
-	d := *(*byte)(unsafe.Add(rawPtr, pos))
+	d := schemaByteAt(strPtr, pos, end)
 	if d == '.' {
 		pos++
-		f0 := *(*byte)(unsafe.Add(rawPtr, pos))
+		f0 := schemaByteAt(strPtr, pos, end)
 		if f0 < '0' || f0 > '9' {
 			return pos, false
 		}
 		pos++
 		for {
-			fd := *(*byte)(unsafe.Add(rawPtr, pos))
+			fd := schemaByteAt(strPtr, pos, end)
 			if fd < '0' || fd > '9' {
 				d = fd
 				break
@@ -1771,10 +2416,10 @@ func skipNumberAt(rawPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf
 	expDigits := 0
 	if d == 'e' || d == 'E' {
 		pos++
-		ed := *(*byte)(unsafe.Add(rawPtr, pos))
+		ed := schemaByteAt(strPtr, pos, end)
 		if ed == '+' || ed == '-' {
 			pos++
-			ed = *(*byte)(unsafe.Add(rawPtr, pos))
+			ed = schemaByteAt(strPtr, pos, end)
 		}
 		if ed < '0' || ed > '9' {
 			return pos, false
@@ -1782,7 +2427,7 @@ func skipNumberAt(rawPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf
 		pos++
 		expDigits = 1
 		for {
-			ed = *(*byte)(unsafe.Add(rawPtr, pos))
+			ed = schemaByteAt(strPtr, pos, end)
 			if ed < '0' || ed > '9' {
 				break
 			}

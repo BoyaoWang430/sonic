@@ -186,11 +186,13 @@ type structDecoder struct {
 	typ           reflect.Type
 	goType        reflect.Type
 	sliceType     reflect.Type
-	elemSize      uintptr
-	maxPtrBatch   uint16
-	fast          bool
-	ptrScalarHint uint8
-	ptrStrHint    uint8
+	elemSize          uintptr
+	maxPtrBatch       uint16
+	fast              bool
+	flatDirect        bool
+	flatPureASCIIKeys bool
+	ptrScalarHint     uint8
+	ptrStrHint        uint8
 }
 
 func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {

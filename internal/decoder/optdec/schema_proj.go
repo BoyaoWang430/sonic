@@ -198,10 +198,23 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 			maxStructWidth: ep.maxStructWidth,
 			elem:           ep,
 		}
-	case *sliceI64Decoder, *sliceI32Decoder, *sliceU64Decoder, *sliceU32Decoder,
-		*sliceF64Decoder, *sliceF32Decoder, *sliceBoolDecoder, *sliceStringDecoder:
+	case *sliceIntDecoder, *sliceI64Decoder, *sliceI32Decoder,
+		*sliceUintDecoder, *sliceU64Decoder, *sliceU32Decoder,
+		*sliceF64Decoder, *sliceF32Decoder, *sliceBoolDecoder, *sliceStringDecoder,
+		*sliceBytesDecoder:
 		return &projPlan{
 			kind:        projSlice,
+			isBounded:   false,
+			totalFields: 1,
+			elem:        projScalarPlan,
+		}
+	case *mapStringDecoder, *mapStrIntDecoder, *mapStrI64Decoder,
+		*mapStrSignedDecoder[int8], *mapStrSignedDecoder[int16], *mapStrSignedDecoder[int32],
+		*mapStrUnsignedDecoder[uint], *mapStrUnsignedDecoder[uint8], *mapStrUnsignedDecoder[uint16],
+		*mapStrUnsignedDecoder[uint32], *mapStrU64Decoder, *mapStrUnsignedDecoder[uintptr],
+		*mapStrF32Decoder, *mapStrF64Decoder, *mapStrBoolDecoder:
+		return &projPlan{
+			kind:        projMap,
 			isBounded:   false,
 			totalFields: 1,
 			elem:        projScalarPlan,

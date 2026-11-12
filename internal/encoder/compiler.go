@@ -794,6 +794,25 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 						IsDense:    isDense,
 					})
 					kind = ir.OP_slice_struct
+				} else if et.Kind() == reflect.Ptr {
+					pt := et.Elem()
+					if pt.Kind() != reflect.Struct || self.tab[et] || self.tab[pt] || self.isCustomMarshaler(et, true) || self.isCustomMarshaler(pt, true) {
+						return ir.StructFieldSpec{}, false
+					}
+					elemSpecs, ok := self.tryCompilePureStructSpecs(pt, depth+2)
+					if !ok {
+						return ir.StructFieldSpec{}, false
+					}
+					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
+					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
+						KeyPtr:     &fv.KeyBlob[fv.KeyOffset],
+						SliceType:  ft,
+						ElemSize:   et.Size(),
+						Specs:      elemSpecs,
+						DenseSpecs: denseSpecs,
+						IsDense:    isDense,
+					})
+					kind = ir.OP_slice_ptr_struct
 				} else {
 					return ir.StructFieldSpec{}, false
 				}

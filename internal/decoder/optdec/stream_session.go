@@ -495,7 +495,7 @@ func (s *StreamSession) scanStringStep(src string, eof bool, isKey bool) (bool, 
 		}
 		ulen := prefixLen + written
 		s.unesc = s.unesc[:uoff+ulen]
-		packedVal := (uint64(uoff) << 32) | uint64(uint32(ulen))
+		packedVal := escapedInUnescFlag | (uint64(uoff) << 32) | uint64(uint32(ulen))
 		s.emitNode(KStringEscaped|uint64(rawStart)<<PosBits, packedVal)
 	}
 

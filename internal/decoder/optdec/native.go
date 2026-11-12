@@ -139,6 +139,9 @@ type Parser struct {
 	strPtrSlabOff  int
 	strPtrSlabNext int
 	ptrStructSlabs [4]ptrStructSlabSlot
+	lazyPadded     bool
+	unescBuf       []byte
+	tailBuf        [320]byte
 }
 
 type ptrStructSlabSlot struct {
@@ -383,11 +386,18 @@ func (p *Parser) allocStrSlab(n int) []byte {
 	return slab
 }
 
+const (
+	escapedInUnescFlag  uint64 = 1 << 63
+	maxPooledUnescCap   int    = 64 << 10
+	schemaTailWindowLen int    = 256
+)
+
 // bytesEscaped returns the decoded byte slice for an escaped JSON string token.
 func (p *Parser) bytesEscaped(off int, val uint64) []byte {
-	if p.unesc != nil {
-		uoff := int(val >> 32)
-		ulen := int(uint32(val))
+	if val&escapedInUnescFlag != 0 {
+		u := val &^ escapedInUnescFlag
+		uoff := int(u >> 32)
+		ulen := int(uint32(u))
 		return p.unesc[uoff : uoff+ulen]
 	}
 	return p.JsonBytes()[off : off+int(val)]
@@ -515,8 +525,14 @@ func (p *Parser) reset() {
 	p.hasProjHints = false
 	p.strictURC = false
 	p.keepUseNumber = false
+	p.lazyPadded = false
 	p.sessionPadded = nil
 	p.unesc = nil
+	if cap(p.unescBuf) > maxPooledUnescCap {
+		p.unescBuf = nil
+	} else if p.unescBuf != nil {
+		p.unescBuf = p.unescBuf[:0]
+	}
 	p.resetSlabs()
 	p.ctx = Context{}
 }

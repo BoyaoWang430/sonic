@@ -91,6 +91,7 @@ const (
 	OP_slice_bool
 	OP_slice_str
 	OP_slice_struct
+	OP_slice_ptr_struct
 	OP_ptr_struct
 	OP_unsupported
 
@@ -184,6 +185,7 @@ var _OpNames = [256]string{
 	OP_slice_bool:       "slice_bool",
 	OP_slice_str:        "slice_str",
 	OP_slice_struct:     "slice_struct",
+	OP_slice_ptr_struct: "slice_ptr_struct",
 	OP_ptr_struct:       "ptr_struct",
 	OP_unsupported:      "unsupported",
 }
@@ -352,7 +354,7 @@ func BuildDenseSpecs(specs []StructFieldSpec) ([]StructFieldSpec, bool) {
 		if s.Kind == OP_struct_end {
 			continue
 		}
-		if s.Kind == OP_slice_struct {
+		if s.Kind == OP_slice_struct || s.Kind == OP_slice_ptr_struct {
 			orig := (*StructSliceSpec)(s.Ptr)
 			if s.NoCommaSkip != 0 {
 				cp := *orig

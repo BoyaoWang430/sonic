@@ -253,6 +253,144 @@ func (d *mapStrBoolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) 
 	return gerr
 }
 
+type mapStrSignedDecoder[V int8 | int16 | int32] struct {
+	mapType  reflect.Type
+	elemType reflect.Type
+	minVal   int64
+	maxVal   int64
+}
+
+func (d *mapStrSignedDecoder[V]) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]V)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, d.mapType)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]V, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsI64(ctx)
+		if !ok || ret < d.minVal || ret > d.maxVal {
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, d.elemType)
+			}
+			next = val.Next()
+		} else {
+			m[key] = V(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapStrUnsignedDecoder[V uint | uint8 | uint16 | uint32 | uintptr] struct {
+	mapType  reflect.Type
+	elemType reflect.Type
+	maxVal   uint64
+}
+
+func (d *mapStrUnsignedDecoder[V]) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]V)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, d.mapType)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]V, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsU64(ctx)
+		if !ok || ret > d.maxVal {
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, d.elemType)
+			}
+			next = val.Next()
+		} else {
+			m[key] = V(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
+type mapStrF32Decoder struct{}
+
+func (d *mapStrF32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	dst := (*map[string]float32)(vp)
+	if node.IsNull() {
+		*dst = nil
+		return nil
+	}
+	obj, ok := node.AsObj()
+	if !ok {
+		return error_mismatch(node, ctx, mapStrF32Type)
+	}
+	size := obj.Len()
+	m := *dst
+	if m == nil {
+		m = make(map[string]float32, size)
+	}
+	var gerr error
+	next := obj.Children()
+	for i := 0; i < size; i++ {
+		knode := NewNode(next)
+		key, _ := knode.AsStr(ctx)
+		val := NewNode(PtrOffset(next, 1))
+		ret, ok := val.AsF64(ctx)
+		if !ok || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, float32Type)
+			}
+			next = val.Next()
+		} else {
+			m[key] = float32(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+	*dst = m
+	return gerr
+}
+
 type mapIntStrDecoder struct{}
 
 func (d *mapIntStrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -402,16 +540,18 @@ func decodeMapEntry(mv, kv, ev, zeroElem reflect.Value, ep unsafe.Pointer, elemT
 /** Decoder for map with string key **/
 
 type mapStrKeyDecoder struct {
-	mapType   reflect.Type
-	keyType   reflect.Type
-	elemType  reflect.Type
-	zeroMap   reflect.Value
-	zeroKey   reflect.Value
-	zeroElem  reflect.Value
-	elemDec   decFunc
-	typ       reflect.Type
-	freshElem bool
-	slotPool  sync.Pool
+	mapType      reflect.Type
+	keyType      reflect.Type
+	elemType     reflect.Type
+	zeroMap      reflect.Value
+	zeroKey      reflect.Value
+	zeroElem     reflect.Value
+	elemDec      decFunc
+	structDec    *structDecoder
+	ptrStructDec *structDecoder
+	typ          reflect.Type
+	freshElem    bool
+	slotPool     sync.Pool
 }
 
 func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -443,17 +583,89 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 
 	var gerr error
 	next := obj.Children()
-	for i := 0; i < obj.Len(); i++ {
-		keyn := NewNode(next)
-		key, _ := keyn.AsStr(ctx)
-		kv.SetString(key)
+	p := ctx.Parser
+	if psd := d.ptrStructDec; psd != nil && !d.freshElem && psd.fast && p.options&fastStructExcludeMask == 0 {
+		jsonStr := p.Json
+		copyStr := p.options&(1<<_F_copy_string) != 0
+		for i := 0; i < obj.Len(); i++ {
+			keyn := NewNode(next)
+			key, _ := keyn.AsStr(ctx)
+			kv.SetString(key)
 
-		valn := NewNode(PtrOffset(next, 1))
-		err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
-		if gerr == nil && err != nil {
-			gerr = err
+			vptr := PtrOffset(next, 1)
+			vtyp := uint8(vptr.typ)
+			if vtyp == KObject {
+				next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
+				subPtr := psd.allocPtr(p)
+				if uint32(vptr.val) != 0 {
+					err := psd.fromObjFast(subPtr, vptr, p, jsonStr, copyStr, ctx)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+				}
+				*(*unsafe.Pointer)(ep) = subPtr
+				mv.SetMapIndex(kv, ev)
+				continue
+			}
+			if vtyp == KNull {
+				mv.SetMapIndex(kv, d.zeroElem)
+				next = PtrOffset(vptr, 1)
+				continue
+			}
+			valn := NewNode(vptr)
+			err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = valn.Next()
 		}
-		next = valn.Next()
+	} else if sd := d.structDec; sd != nil && !d.freshElem && sd.fast && p.options&fastStructExcludeMask == 0 {
+		jsonStr := p.Json
+		copyStr := p.options&(1<<_F_copy_string) != 0
+		for i := 0; i < obj.Len(); i++ {
+			keyn := NewNode(next)
+			key, _ := keyn.AsStr(ctx)
+			kv.SetString(key)
+
+			vptr := PtrOffset(next, 1)
+			vtyp := uint8(vptr.typ)
+			if vtyp == KObject {
+				next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
+				ev.Set(d.zeroElem)
+				if uint32(vptr.val) != 0 {
+					err := sd.fromObjFast(ep, vptr, p, jsonStr, copyStr, ctx)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+				}
+				mv.SetMapIndex(kv, ev)
+				continue
+			}
+			if vtyp == KNull {
+				mv.SetMapIndex(kv, d.zeroElem)
+				next = PtrOffset(vptr, 1)
+				continue
+			}
+			valn := NewNode(vptr)
+			err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = valn.Next()
+		}
+	} else {
+		for i := 0; i < obj.Len(); i++ {
+			keyn := NewNode(next)
+			key, _ := keyn.AsStr(ctx)
+			kv.SetString(key)
+
+			valn := NewNode(PtrOffset(next, 1))
+			err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = valn.Next()
+		}
 	}
 
 	releaseMapSlots(&d.slotPool, pooled, d.zeroKey, d.zeroElem)

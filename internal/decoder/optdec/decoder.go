@@ -42,6 +42,7 @@ type rootPtrInfo struct {
 	etp     reflect.Type
 	dec     decFunc
 	proj    *projPlan
+	flatSD  *structDecoder
 	isNamed bool
 }
 
@@ -59,60 +60,60 @@ var (
 )
 
 func unpackRootValue(val interface{}) (etp reflect.Type, vp unsafe.Pointer, err error) {
-	etp, vp, _, _, err = unpackAndCompileRoot(val)
+	etp, vp, _, _, _, err = unpackAndCompileRoot(val)
 	return
 }
 
-func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer, dec decFunc, proj *projPlan, err error) {
+func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer, dec decFunc, proj *projPlan, flatSD *structDecoder, err error) {
 	if val == nil {
-		return nil, nil, nil, nil, &json.InvalidUnmarshalError{}
+		return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{}
 	}
 	switch v := val.(type) {
 	case *interface{}:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return anyType, unsafe.Pointer(v), efaceRootDec, nil, nil
+		return anyType, unsafe.Pointer(v), efaceRootDec, nil, nil, nil
 	case *map[string]interface{}:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return mapEfaceType, unsafe.Pointer(v), mapEfaceRootDec, nil, nil
+		return mapEfaceType, unsafe.Pointer(v), mapEfaceRootDec, nil, nil, nil
 	case *[]interface{}:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return sliceEfaceType, unsafe.Pointer(v), sliceEfaceRootDec, nil, nil
+		return sliceEfaceType, unsafe.Pointer(v), sliceEfaceRootDec, nil, nil, nil
 	case *map[string]string:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return mapStringType, unsafe.Pointer(v), mapStringRootDec, nil, nil
+		return mapStringType, unsafe.Pointer(v), mapStringRootDec, nil, nil, nil
 	case *string:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return stringType, unsafe.Pointer(v), stringRootDec, projScalarPlan, nil
+		return stringType, unsafe.Pointer(v), stringRootDec, projScalarPlan, nil, nil
 	case *int:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return intType, unsafe.Pointer(v), intRootDec, projScalarPlan, nil
+		return intType, unsafe.Pointer(v), intRootDec, projScalarPlan, nil, nil
 	case *int64:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return int64Type, unsafe.Pointer(v), int64RootDec, projScalarPlan, nil
+		return int64Type, unsafe.Pointer(v), int64RootDec, projScalarPlan, nil, nil
 	case *float64:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return float64Type, unsafe.Pointer(v), float64RootDec, projScalarPlan, nil
+		return float64Type, unsafe.Pointer(v), float64RootDec, projScalarPlan, nil, nil
 	case *bool:
 		if v == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: reflect.TypeOf(v)}
 		}
-		return boolType, unsafe.Pointer(v), boolRootDec, projScalarPlan, nil
+		return boolType, unsafe.Pointer(v), boolRootDec, projScalarPlan, nil, nil
 	}
 
 	rv := reflect.ValueOf(val)
@@ -121,18 +122,18 @@ func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer,
 		info := cached.(*rootPtrInfo)
 		vp = rv.UnsafePointer()
 		if vp == nil {
-			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
+			return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
 		}
 		if info.isNamed {
 			ptrSlot := reflect.New(vt)
 			*(*unsafe.Pointer)(ptrSlot.UnsafePointer()) = vp
 			vp = ptrSlot.UnsafePointer()
 		}
-		return info.etp, vp, info.dec, info.proj, nil
+		return info.etp, vp, info.dec, info.proj, info.flatSD, nil
 	}
 
 	if vt.Kind() != reflect.Ptr || rv.IsNil() {
-		return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
+		return nil, nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
 	}
 
 	vp = rv.UnsafePointer()
@@ -149,19 +150,25 @@ func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer,
 
 	dec, err = findOrCompile(etp)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	proj = compileProjPlan(dec)
+	if !isNamed {
+		if sd, ok := dec.(*structDecoder); ok && sd.flatDirect {
+			flatSD = sd
+		}
+	}
 	rootPtrCache.PutMany([]caching.ProgramBatchItem{{
 		Vt: vt,
 		Fn: &rootPtrInfo{
 			etp:     etp,
 			dec:     dec,
 			proj:    proj,
+			flatSD:  flatSD,
 			isNamed: isNamed,
 		},
 	}})
-	return etp, vp, dec, proj, nil
+	return etp, vp, dec, proj, flatSD, nil
 }
 
 func Decode(s *string, i *int, f uint64, val interface{}) error {
@@ -174,17 +181,27 @@ var errGiantStreamFallback = stderrors.New("optdec: giant stream fallback")
 
 // DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
 func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
-	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
+	etp, vp, dec, proj, flatSD, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return s, 0, err
+	}
+	if flatSD != nil {
+		if endPos, ok := tryDecodeFlatStruct(s, 0, f, vp, flatSD, false, true); ok {
+			return s, endPos, nil
+		}
 	}
 	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUse(len(s))) {
 		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
 
-	p := newParserImpl(s, 0, f)
-	if len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) {
-		p.presizeNodesOne()
+	var p *Parser
+	if proj != nil && proj.shouldUse(len(s)) {
+		p = newParserLazy(s, 0, f)
+	} else {
+		p = newParserImpl(s, 0, f)
+		if len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) {
+			p.presizeNodesOne()
+		}
 	}
 	defer p.free()
 
@@ -212,7 +229,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		sess = *sessPtr
 	}
 
-	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
+	etp, vp, dec, proj, flatSD, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return err
 	}
@@ -223,6 +240,16 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	} else if origPos > len(*s) {
 		origPos = len(*s)
 	}
+	if flatSD != nil {
+		utf8Pre := sess != nil && sess.src == *s && origPos >= sess.base && sess.utf8Checked
+		if newPos, ok := tryDecodeFlatStruct(*s, origPos, f, vp, flatSD, utf8Pre, false); ok {
+			if sessPtr != nil && sess != nil && !hasMoreJSONTokens(*s, newPos) {
+				*sessPtr = nil
+			}
+			*i = newPos
+			return nil
+		}
+	}
 	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
 		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
 		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
@@ -232,9 +259,14 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	}
 
 	/* parse into document */
-	p := newParserFromSession(*s, origPos, uint64(f), sess)
-	if origPos == 0 && sess == nil && len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) && !looksLikeJSONLPrefix(p.Json) {
-		p.presizeNodesOne()
+	var p *Parser
+	if proj != nil && proj.shouldUse(len(*s)-origPos) {
+		p = newParserLazyFromSession(*s, origPos, uint64(f), sess)
+	} else {
+		p = newParserFromSession(*s, origPos, uint64(f), sess)
+		if origPos == 0 && sess == nil && len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) && !looksLikeJSONLPrefix(p.Json) {
+			p.presizeNodesOne()
+		}
 	}
 	defer p.free()
 
@@ -265,7 +297,20 @@ fix_error:
 		if err != nil {
 			*sessPtr = nil
 		} else if hasMoreJSONTokens(*s, newPos) {
-			if p.sessionPadded == nil {
+			if p.lazyPadded {
+				if sess == nil {
+					sess = &InputSession{}
+					*sessPtr = sess
+				}
+				if sess.src != *s || origPos < sess.base {
+					sess.src = *s
+					sess.base = origPos
+					sess.padded = nil
+					sess.utf8Checked = (f & (1 << _F_validate_string)) != 0
+				} else if (f & (1 << _F_validate_string)) != 0 {
+					sess.utf8Checked = true
+				}
+			} else if p.sessionPadded == nil {
 				if sess == nil {
 					sess = &InputSession{}
 					*sessPtr = sess

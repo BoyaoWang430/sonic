@@ -62,12 +62,13 @@ type rootEncPlan struct {
 	denseSpecs    []ir.StructFieldSpec
 	elemSize      uintptr
 	sizeHint      atomic.Uint32
-	isDirectPtr   bool
-	hasPureSpecs  bool
-	hasDenseSpecs bool
-	isPureSlice   bool
-	allowSizeHint bool
-	boxHasPtrs    bool
+	isDirectPtr    bool
+	hasPureSpecs   bool
+	hasDenseSpecs  bool
+	isPureSlice    bool
+	isPurePtrSlice bool
+	allowSizeHint  bool
+	boxHasPtrs     bool
 }
 
 func typeHasPointers(vt reflect.Type) bool {
@@ -212,6 +213,52 @@ func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, sp
 	return nil
 }
 
+func encodePurePtrStructSliceRoot(b *[]byte, rv reflect.Value, specs []ir.StructFieldSpec, denseSpecs []ir.StructFieldSpec, hasDense bool, s *vars.Stack, flags uint64) error {
+	if rv.IsNil() {
+		if flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
+			*b = append(*b, '[', ']')
+		} else {
+			*b = append(*b, 'n', 'u', 'l', 'l')
+		}
+		return nil
+	}
+	n := rv.Len()
+	if n == 0 {
+		*b = append(*b, '[', ']')
+		return nil
+	}
+	out, err := encodePtrStructSliceBody(*b, rv.UnsafePointer(), n, specs, denseSpecs, hasDense, s, flags, flags&alg.SanitizeMask)
+	if err != nil {
+		return err
+	}
+	*b = out
+	return nil
+}
+
+func extractPurePtrSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
+	n := len(*prog)
+	if (n != 29 && n != 27) || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
+		return nil, false
+	}
+	if (*prog)[n-2].Op() != ir.OP_drop || (*prog)[n-1].Op() != ir.OP_byte || (*prog)[n-1].Byte() != ']' {
+		return nil, false
+	}
+	elemEnd := 13
+	if n == 27 {
+		elemEnd = 12
+	}
+	if (*prog)[elemEnd].Op() != ir.OP_slice_next {
+		return nil, false
+	}
+	if (*prog)[1].Op() != ir.OP_is_nil || (*prog)[1].Vr() != nil ||
+		(*prog)[2].Op() != ir.OP_save || (*prog)[3].Op() != ir.OP_deref ||
+		(*prog)[elemEnd-3].Op() != ir.OP_drop || (*prog)[elemEnd-2].Op() != ir.OP_goto ||
+		(*prog)[elemEnd-1].Op() != ir.OP_null {
+		return nil, false
+	}
+	return extractPureStructSpecs(prog, 4, elemEnd-3)
+}
+
 func extractPureSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
 	n := len(*prog)
 	if (n != 17 && n != 15) || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
@@ -311,10 +358,23 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 				allowSizeHint: true,
 			}, nil
 		}
+		if vt.Elem().Kind() == reflect.Ptr && vt.Elem().Elem().Kind() == reflect.Struct {
+			if pureSpecs, ok := extractPurePtrSliceSpecs(prog); ok {
+				denseSpecs, hasDenseSpecs := ir.BuildDenseSpecs(pureSpecs)
+				return &rootEncPlan{
+					prog:           prog,
+					pureSpecs:      pureSpecs,
+					denseSpecs:     denseSpecs,
+					hasDenseSpecs:  hasDenseSpecs,
+					isPurePtrSlice: true,
+					allowSizeHint:  true,
+				}, nil
+			}
+		}
 		return &rootEncPlan{
 			prog:          prog,
 			boxPool:       newValueBoxPool(vt),
-			allowSizeHint: vt.Elem().Kind() == reflect.Struct,
+			allowSizeHint: vt.Elem().Kind() == reflect.Struct || (vt.Elem().Kind() == reflect.Ptr && vt.Elem().Elem().Kind() == reflect.Struct),
 			boxHasPtrs:    true,
 		}, nil
 	default:
@@ -628,6 +688,9 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 	if plan.isPureSlice {
 		return encodePureStructSliceRoot(buf, rv, plan.elemSize, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
 	}
+	if plan.isPurePtrSlice {
+		return encodePurePtrStructSliceRoot(buf, rv, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
+	}
 	if plan.boxPool == nil {
 		ptr := rv.UnsafePointer()
 		if plan.isDirectPtr {
@@ -700,7 +763,7 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 		if plan.isDirectPtr && rv.UnsafePointer() == nil {
 			return []byte{'n', 'u', 'l', 'l'}, true, nil
 		}
-		if plan.isPureSlice {
+		if plan.isPureSlice || plan.isPurePtrSlice {
 			if rv.IsNil() {
 				if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
 					return []byte{'[', ']'}, true, nil
@@ -725,7 +788,7 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	}
 	origBuf := (*buf)[:0]
 	var stk *vars.Stack
-	if !plan.isPureSlice && !plan.hasPureSpecs {
+	if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {
 		stk = vars.NewStack()
 	}
 	err = encodeWithRootPlan(buf, rv, plan, stk, fv)

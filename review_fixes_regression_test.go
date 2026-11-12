@@ -849,3 +849,359 @@ func TestReviewRound2_P2_1_PtrStructAndLargeStrPtrGCReclaim(t *testing.T) {
 	runtime.KeepAlive(keep)
 	require.Equal(t, int32(2), atomic.LoadInt32(&reclaimed), "sibling *richItem and >1KiB *string must be independently GC-reclaimable")
 }
+
+func TestReviewRound2_Opt1_ZeroCopySchemaProjAndEscapedCoexistence(t *testing.T) {
+	type mixedProj struct {
+		Title   string   `json:"title"`
+		Escaped string   `json:"escaped"`
+		IDs     []int    `json:"ids"`
+		Dynamic []any    `json:"dynamic"`
+		TailNum float64  `json:"tail_num"`
+		TailStr string   `json:"tail_str"`
+		Raw     []byte   `json:"raw"`
+	}
+
+	// Test across boundary lengths around 64B and 256B (tailStart and safe64 transitions).
+	for padLen := 0; padLen <= 340; padLen += 17 {
+		pad := strings.Repeat("p", padLen)
+		payload := fmt.Sprintf(
+			`{"skip_head":{"nested":[1,true,null,{"pad":%q,"esc":"a\nb\u0041"}]},`+
+				`"tit\u006ce":"hello-world","escaped":"line1\nline2\t\u4e2d\u6587",`+
+				`"ids":[10,20,30],"dynamic":["plain","in_subtree\n\u0042",{"k":"v\tw"}],`+
+				`"raw":"YWJj","tail_str":%q,"tail_num":123.456}`,
+			pad, strings.Repeat("t", (padLen%70)+1),
+		)
+
+		var gotSonic, gotStd mixedProj
+		require.NoError(t, json.Unmarshal([]byte(payload), &gotStd))
+		require.NoError(t, ConfigStd.UnmarshalFromString(payload, &gotSonic))
+		require.Equal(t, gotStd, gotSonic)
+
+		// Truncated prefixes near tail boundaries must always error cleanly without out-of-bounds reads.
+		for cut := 1; cut <= 8 && cut < len(payload); cut++ {
+			var bad mixedProj
+			require.Error(t, UnmarshalString(payload[:len(payload)-cut], &bad))
+		}
+	}
+
+	// Multi-value JSONL stream over zero-copy schema projection.
+	line := `{"title":"row","escaped":"x\ny","ids":[1,2],"tail_num":9.5,"tail_str":"end"}`
+	stream := strings.Repeat(line+"\n", 8)
+	dec := ConfigStd.NewDecoder(strings.NewReader(stream))
+	_ = dec
+	sdec := decoder.NewDecoder(stream)
+	sdec.ValidateString()
+	for i := 0; i < 8; i++ {
+		var row mixedProj
+		require.NoError(t, sdec.Decode(&row))
+		require.Equal(t, "x\ny", row.Escaped)
+		require.Equal(t, []int{1, 2}, row.IDs)
+	}
+}
+
+func TestReviewRound2_Opt2_FlatStructDirectDecode(t *testing.T) {
+	type flatRecord struct {
+		ID      int64   `json:"id"`
+		I32     int32   `json:"i32"`
+		U64     uint64  `json:"u64"`
+		U32     uint32  `json:"u32"`
+		Price   float64 `json:"price"`
+		Ratio   float32 `json:"ratio"`
+		Active  bool    `json:"active"`
+		Name    string  `json:"name"`
+		Empty   string  `json:"empty"`
+		Comment string  `json:"comment"`
+	}
+
+	raw := `{"id":-9223372036854775808,"i32":-2147483648,"u64":999999999999999999,"u32":4294967295,` +
+		`"price":-0.000125,"ratio":3.5,"active":true,"name":"sonic-direct","empty":"","comment":"中文UTF8",` +
+		`"unknown_obj":{"a":[1,2,{"k":"esc\"quote\u0041"}],"b":false,"c":null}}`
+
+	var gotSonic, gotStd flatRecord
+	require.NoError(t, json.Unmarshal([]byte(raw), &gotStd))
+	require.NoError(t, ConfigStd.UnmarshalFromString(raw, &gotSonic))
+	require.Equal(t, gotStd, gotSonic)
+
+	// CopyString independence: mutating input buffer must not mutate decoded strings.
+	buf := []byte(`{"id":42,"name":"immutable-copy","comment":"second-copy"}`)
+	var copied flatRecord
+	decCopy := decoder.NewDecoder(string(buf))
+	decCopy.CopyString()
+	require.NoError(t, Unmarshal(buf, &copied)) // ConfigDefault sets CopyString=true
+	for i := range buf {
+		buf[i] = 'X'
+	}
+	require.Equal(t, "immutable-copy", copied.Name)
+	require.Equal(t, "second-copy", copied.Comment)
+
+	// Duplicate keys & null preservation on pre-populated struct.
+	pre := flatRecord{ID: 777, Name: "keep", Active: true}
+	dupJSON := `{"id":100,"id":200,"id":null,"name":null,"active":false}`
+	preStd := pre
+	require.NoError(t, json.Unmarshal([]byte(dupJSON), &preStd))
+	require.NoError(t, UnmarshalString(dupJSON, &pre))
+	require.Equal(t, preStd, pre)
+	require.Equal(t, int64(200), pre.ID)
+	require.Equal(t, "keep", pre.Name)
+	require.False(t, pre.Active)
+
+	// Speculative rollback atomicity: if a syntax or mismatch error occurs mid-object,
+	// tryDecodeFlatStruct must not have partially mutated fields before falling back,
+	// and final result must match Sonic's standard decoder behavior.
+	errInput := `{"id":999,"i32":"not_an_int","name":"after_err"}`
+	var errGot flatRecord
+	require.Error(t, UnmarshalString(errInput, &errGot))
+	require.Equal(t, int64(999), errGot.ID)
+	require.Equal(t, "after_err", errGot.Name)
+
+	// Syntax error before '}' leaves pre-populated fields untouched on bailout if error occurs early.
+	var syntaxGot, syntaxStd flatRecord
+	syntaxGot.Name = "untouched"
+	syntaxStd.Name = "untouched"
+	badSyntax := `{"id":123, broken}`
+	require.Error(t, json.Unmarshal([]byte(badSyntax), &syntaxStd))
+	require.Error(t, UnmarshalString(badSyntax, &syntaxGot))
+	require.Equal(t, "untouched", syntaxGot.Name)
+
+	// Invalid UTF-8 replacement under ConfigStd (ValidateString = true).
+	badUTF8 := "{\"id\":7,\"name\":\"bad" + string([]byte{0xff}) + "byte\"}"
+	var utf8Got flatRecord
+	require.NoError(t, ConfigStd.UnmarshalFromString(badUTF8, &utf8Got))
+	require.Equal(t, "bad\ufffdbyte", utf8Got.Name)
+
+	// DisallowUnknownFields & CaseSensitive.
+	strictCfg := Config{
+		DisallowUnknownFields: true,
+		CaseSensitive:         true,
+	}.Froze()
+	var csGot flatRecord
+	require.Error(t, strictCfg.UnmarshalFromString(`{"ID":1}`, &csGot))
+	require.Error(t, strictCfg.UnmarshalFromString(`{"id":1,"extra":2}`, &csGot))
+	require.NoError(t, strictCfg.UnmarshalFromString(`{"id":55,"name":"exact"}`, &csGot))
+	require.Equal(t, int64(55), csGot.ID)
+	require.Equal(t, "exact", csGot.Name)
+
+	// Multi-line JSONL via decoder.NewDecoder.
+	jsonl := `{"id":1,"name":"one"}` + "\n" + `{"id":2,"name":"two\nesc"}` + "\n" + `{"id":3,"name":"three"}`
+	nd := decoder.NewDecoder(jsonl)
+	nd.ValidateString()
+	var r1, r2, r3 flatRecord
+	require.NoError(t, nd.Decode(&r1))
+	require.NoError(t, nd.Decode(&r2))
+	require.NoError(t, nd.Decode(&r3))
+	require.Equal(t, "one", r1.Name)
+	require.Equal(t, "two\nesc", r2.Name)
+	require.Equal(t, "three", r3.Name)
+}
+
+func TestReviewRound2_Opt3_PtrStructSliceAndTypedMapSymmetry(t *testing.T) {
+	type subItem struct {
+		ID   int    `json:"id"`
+		Tag  string `json:"tag,omitempty"`
+		Flag bool   `json:"flag"`
+	}
+	type holder struct {
+		Items []*subItem `json:"items"`
+		Empty []*subItem `json:"empty,omitempty"`
+		NilS  []*subItem `json:"nil_s"`
+	}
+
+	items := make([]*subItem, 70)
+	for i := range items {
+		if i%11 == 3 {
+			continue // nil element pointer
+		}
+		items[i] = &subItem{
+			ID:   i,
+			Tag:  fmt.Sprintf("t<%d>&\"x\"", i),
+			Flag: i%2 == 0,
+		}
+	}
+	src := holder{
+		Items: items,
+		Empty: []*subItem{},
+		NilS:  nil,
+	}
+
+	// Field OP_slice_ptr_struct (both sanitized ConfigStd and unsanitized ConfigDefault).
+	bStd, err := json.Marshal(src)
+	require.NoError(t, err)
+	bSonicStd, err := ConfigStd.Marshal(src)
+	require.NoError(t, err)
+	require.Equal(t, string(bStd), string(bSonicStd))
+
+	bDef, err := ConfigDefault.Marshal(src)
+	require.NoError(t, err)
+	var decHolder, decStdHolder holder
+	require.NoError(t, json.Unmarshal(bDef, &decStdHolder))
+	require.NoError(t, ConfigStd.Unmarshal(bDef, &decHolder))
+	require.Equal(t, decStdHolder, decHolder)
+
+	// Root []*subItem encode & decode (including nil, empty, NoNullSliceOrMap).
+	rootStd, err := json.Marshal(items)
+	require.NoError(t, err)
+	rootSonic, err := ConfigStd.Marshal(items)
+	require.NoError(t, err)
+	require.Equal(t, string(rootStd), string(rootSonic))
+
+	var rootDec []*subItem
+	require.NoError(t, Unmarshal(rootSonic, &rootDec))
+	require.Equal(t, items, rootDec)
+
+	noNullCfg := Config{NoNullSliceOrMap: true}.Froze()
+	var nilPtrSlice []*subItem
+	nnBytes, err := noNullCfg.Marshal(nilPtrSlice)
+	require.NoError(t, err)
+	require.Equal(t, "[]", string(nnBytes))
+	_ = encoder.EscapeHTML
+
+	// Typed map[string]T fast paths (all signed/unsigned widths, float32, SubStruct, *SubStruct).
+	type allMaps struct {
+		MI8    map[string]int8     `json:"mi8"`
+		MI16   map[string]int16    `json:"mi16"`
+		MI32   map[string]int32    `json:"mi32"`
+		MU     map[string]uint     `json:"mu"`
+		MU8    map[string]uint8    `json:"mu8"`
+		MU16   map[string]uint16   `json:"mu16"`
+		MU32   map[string]uint32   `json:"mu32"`
+		MUPtr  map[string]uintptr  `json:"muptr"`
+		MF32   map[string]float32  `json:"mf32"`
+		MStr   map[string]subItem  `json:"mstr"`
+		MPtr   map[string]*subItem `json:"mptr"`
+	}
+	mapJSON := `{
+		"mi8":{"a":-128,"b":127,"z":null},
+		"mi16":{"a":-32768,"b":32767,"z":null},
+		"mi32":{"a":-2147483648,"b":2147483647,"z":null},
+		"mu":{"a":0,"b":42,"z":null},
+		"mu8":{"a":0,"b":255,"z":null},
+		"mu16":{"a":0,"b":65535,"z":null},
+		"mu32":{"a":0,"b":4294967295,"z":null},
+		"muptr":{"a":1,"b":1024,"z":null},
+		"mf32":{"a":-1.5,"b":3.25,"z":null},
+		"mstr":{"k\u0031":{"id":1,"tag":"ok","flag":true},"z":null},
+		"mptr":{"k1":{"id":2,"tag":"ptr","flag":false},"z":null}
+	}`
+	initMaps := func() allMaps {
+		old := subItem{ID: 99, Tag: "old", Flag: true}
+		return allMaps{
+			MI8:   map[string]int8{"z": 9},
+			MI16:  map[string]int16{"z": 9},
+			MI32:  map[string]int32{"z": 9},
+			MU:    map[string]uint{"z": 9},
+			MU8:   map[string]uint8{"z": 9},
+			MU16:  map[string]uint16{"z": 9},
+			MU32:  map[string]uint32{"z": 9},
+			MUPtr: map[string]uintptr{"z": 9},
+			MF32:  map[string]float32{"z": 9.5},
+			MStr:  map[string]subItem{"z": old},
+			MPtr:  map[string]*subItem{"z": &old},
+		}
+	}
+	gotMaps := initMaps()
+	stdMaps := initMaps()
+	require.NoError(t, json.Unmarshal([]byte(mapJSON), &stdMaps))
+	require.NoError(t, ConfigStd.UnmarshalFromString(mapJSON, &gotMaps))
+	require.Equal(t, stdMaps, gotMaps)
+
+	// Overflow checks on narrow map types.
+	var badI8 map[string]int8
+	require.Error(t, UnmarshalString(`{"a":128}`, &badI8))
+	var badU8 map[string]uint8
+	require.Error(t, UnmarshalString(`{"a":256}`, &badU8))
+	var badF32 map[string]float32
+	require.Error(t, UnmarshalString(`{"a":1e50}`, &badF32))
+}
+
+type benchFlatEvent struct {
+	ID        int64   `json:"id"`
+	UserID    int64   `json:"user_id"`
+	Code      int32   `json:"code"`
+	Flags     uint32  `json:"flags"`
+	LatencyMs float64 `json:"latency_ms"`
+	Success   bool    `json:"success"`
+	Service   string  `json:"service"`
+	Endpoint  string  `json:"endpoint"`
+	TraceID   string  `json:"trace_id"`
+	Region    string  `json:"region"`
+}
+
+type benchPtrElem struct {
+	ID    int64   `json:"id"`
+	Name  string  `json:"name"`
+	Score float64 `json:"score"`
+	Valid bool    `json:"valid"`
+}
+
+func BenchmarkReviewRound2_FlatStructDirect(b *testing.B) {
+	raw := `{"id":9876543210,"user_id":12345678,"code":200,"flags":15,"latency_ms":12.375,"success":true,"service":"order-gateway","endpoint":"/api/v2/checkout","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","region":"ap-northeast-1"}`
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	var dst benchFlatEvent
+	for i := 0; i < b.N; i++ {
+		if err := ConfigFastest.UnmarshalFromString(raw, &dst); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReviewRound2_ZeroCopySchemaProj(b *testing.B) {
+	type projTarget struct {
+		ID      int64  `json:"id"`
+		Title   string `json:"title"`
+		BookIDs []int  `json:"book_ids"`
+	}
+	noise := strings.Repeat(`"x",`, 250)
+	raw := `{"id":12125924,"noise":[` + noise + `"end"],"title":"sonic-zero-copy-schema","book_ids":[101,102,103,104,105]}`
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	var dst projTarget
+	for i := 0; i < b.N; i++ {
+		if err := ConfigFastest.UnmarshalFromString(raw, &dst); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReviewRound2_PtrStructSliceEncode(b *testing.B) {
+	items := make([]*benchPtrElem, 32)
+	for i := range items {
+		items[i] = &benchPtrElem{ID: int64(i + 1), Name: "elem-name", Score: 98.5, Valid: true}
+	}
+	out, _ := ConfigFastest.Marshal(items)
+	b.SetBytes(int64(len(out)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := ConfigFastest.Marshal(items); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReviewRound2_PtrStructSliceDecode(b *testing.B) {
+	items := make([]*benchPtrElem, 32)
+	for i := range items {
+		items[i] = &benchPtrElem{ID: int64(i + 1), Name: "elem-name", Score: 98.5, Valid: true}
+	}
+	raw, _ := ConfigFastest.MarshalToString(items)
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var dst []*benchPtrElem
+		if err := ConfigFastest.UnmarshalFromString(raw, &dst); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReviewRound2_MapStrI32Decode(b *testing.B) {
+	raw := `{"k0":10,"k1":20,"k2":30,"k3":40,"k4":50,"k5":60,"k6":70,"k7":80,"k8":90,"k9":100,"k10":110,"k11":120}`
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var dst map[string]int32
+		if err := ConfigFastest.UnmarshalFromString(raw, &dst); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

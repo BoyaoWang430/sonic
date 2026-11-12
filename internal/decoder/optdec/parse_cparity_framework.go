@@ -34,6 +34,14 @@ func hasMoreJSONTokens(s string, pos int) bool {
 
 // The immutable source and mutable padded buffer share the token-offset origin.
 func newParserImpl(data string, pos int, opt uint64) *Parser {
+	p := newParserLazy(data, pos, opt)
+	p.ensurePadded()
+	return p
+}
+
+// newParserLazy initializes a Parser over data[pos:] without copying the input
+// into p.padded, allowing zero-copy schema projection scans to avoid the full-input memcpy.
+func newParserLazy(data string, pos int, opt uint64) *Parser {
 	if pos < 0 {
 		pos = 0
 	} else if pos > len(data) {
@@ -46,8 +54,24 @@ func newParserImpl(data string, pos int, opt uint64) *Parser {
 		p.Json = rt.Mem2Str(dbuf)
 		p.Utf8Inv = true
 	}
-	// Escaped strings are decoded in place. Keep that storage separate from
-	// p.Json, which still supplies raw strings, numbers, and corrected input.
+	p.lazyPadded = true
+	p.pos = 0
+	p.end = len(p.Json)
+	p.options = opt
+	p.nbuf.init(p.nodes)
+	return p
+}
+
+func (p *Parser) ensurePadded() {
+	if !p.lazyPadded {
+		return
+	}
+	p.lazyPadded = false
+	if p.sessionPadded != nil {
+		return
+	}
+	// Escaped strings are decoded in place by cParityParseWithPadding. Keep that
+	// storage separate from p.Json, which still supplies raw strings, numbers, and corrected input.
 	needed := len(p.Json) + len(padding)
 	if needed > cap(p.padded) {
 		if uintptr(needed) > maxPooledJsonPaddedCap {
@@ -63,13 +87,8 @@ func newParserImpl(data string, pos int, opt uint64) *Parser {
 			p.padded = make([]byte, 0, allocCap)
 		}
 	}
-	p.padded = append(p.padded, p.Json...)
+	p.padded = append(p.padded[:0], p.Json...)
 	p.padded = append(p.padded, padding...)
-	p.pos = 0
-	p.end = len(p.Json)
-	p.options = opt
-	p.nbuf.init(p.nodes)
-	return p
 }
 
 func newParserFromSession(data string, pos int, opt uint64, sess *InputSession) *Parser {
@@ -86,6 +105,25 @@ func newParserFromSession(data string, pos int, opt uint64, sess *InputSession) 
 	p.options = opt
 	p.nbuf.init(p.nodes)
 	return p
+}
+
+func newParserLazyFromSession(data string, pos int, opt uint64, sess *InputSession) *Parser {
+	if sess != nil && sess.src == data && pos >= sess.base && pos <= len(data) &&
+		((opt&(1<<_F_validate_string)) == 0 || sess.utf8Checked) {
+		p := parsePool.Get().(*Parser)
+		p.Json = data[pos:]
+		if sess.padded != nil {
+			p.sessionPadded = sess.padded[pos-sess.base:]
+		} else {
+			p.lazyPadded = true
+		}
+		p.pos = 0
+		p.end = len(p.Json)
+		p.options = opt
+		p.nbuf.init(p.nodes)
+		return p
+	}
+	return newParserLazy(data, pos, opt)
 }
 
 func parserJSONBytes(p *Parser) []byte {
@@ -125,6 +163,7 @@ func (p *Parser) growNodeTape() {
 }
 
 func parseImpl(p *Parser) ErrorCode {
+	p.ensurePadded()
 	old := p.options
 	if !p.isEface && !p.keepUseNumber {
 		p.options &^= 1 << _F_use_number
