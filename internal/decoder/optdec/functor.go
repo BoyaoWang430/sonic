@@ -27,7 +27,11 @@ func (d *ptrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	}
 
 	if *(*unsafe.Pointer)(vp) == nil {
-		*(*unsafe.Pointer)(vp) = reflect.New(d.typ).UnsafePointer()
+		if sd, ok := d.deref.(*structDecoder); ok && sd.goType == d.typ {
+			*(*unsafe.Pointer)(vp) = sd.allocPtr(ctx.Parser)
+		} else {
+			*(*unsafe.Pointer)(vp) = reflect.New(d.typ).UnsafePointer()
+		}
 	}
 
 	return d.deref.FromDom(*(*unsafe.Pointer)(vp), node, ctx)

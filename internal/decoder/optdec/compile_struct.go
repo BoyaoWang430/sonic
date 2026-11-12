@@ -213,6 +213,11 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 	if ptrStrCount > 16 {
 		ptrStrCount = 16
 	}
+	elemSize := vt.Size()
+	var sliceType reflect.Type
+	if elemSize > 0 && elemSize <= 4096 {
+		sliceType = reflect.SliceOf(vt)
+	}
 	return &structDecoder{
 		fieldMap:      caching.NewFieldCache(fv),
 		fields:        entries,
@@ -221,6 +226,8 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 		structName:    vt.Name(),
 		typ:           vt,
 		goType:        vt,
+		sliceType:     sliceType,
+		elemSize:      elemSize,
 		fast:          len(wideOffsets) == 0,
 		ptrScalarHint: uint8(ptrScalarCount),
 		ptrStrHint:    uint8(ptrStrCount),

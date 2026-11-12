@@ -1159,18 +1159,30 @@ func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
 	return b64, nil
 }
 
-const smallUintAnyLimit = 4096
+const (
+	smallUintAnyLimit = 4096
+	smallNegIntLimit  = 128
+)
 
 var (
-	emptyEfaceSliceAny any = []interface{}{}
-	smallFloat64Any    [smallUintAnyLimit]any
-	smallInt64Any      [smallUintAnyLimit]any
+	emptyEfaceSliceAny  any = []interface{}{}
+	emptyStringAny      any = ""
+	smallFloat64Any     [smallUintAnyLimit]any
+	smallNegFloat64Any  [smallNegIntLimit + 1]any
+	smallInt64Any       [smallUintAnyLimit]any
+	smallASCIIStringAny [128]any
 )
 
 func init() {
 	for i := 0; i < smallUintAnyLimit; i++ {
 		smallFloat64Any[i] = float64(i)
 		smallInt64Any[i] = int64(i)
+	}
+	for i := 1; i <= smallNegIntLimit; i++ {
+		smallNegFloat64Any[i] = float64(-i)
+	}
+	for i := 0; i < 128; i++ {
+		smallASCIIStringAny[i] = string(byte(i))
 	}
 }
 
@@ -1181,11 +1193,37 @@ func uintToFloat64Any(v uint64) any {
 	return float64(v)
 }
 
+func sintToFloat64Any(v int64) any {
+	if v >= 0 {
+		if v < smallUintAnyLimit {
+			return smallFloat64Any[v]
+		}
+		return float64(v)
+	}
+	if v >= -smallNegIntLimit {
+		return smallNegFloat64Any[-v]
+	}
+	return float64(v)
+}
+
 func uintToInt64Any(v uint64) any {
 	if v < smallUintAnyLimit {
 		return smallInt64Any[v]
 	}
 	return int64(v)
+}
+
+func strCommonAny(p *Parser, off, length int, copyStr bool) any {
+	if length == 0 {
+		return emptyStringAny
+	}
+	if copyStr && length == 1 {
+		b := p.Json[off]
+		if b < 0x80 {
+			return smallASCIIStringAny[b]
+		}
+	}
+	return p.strCommon(off, length, copyStr)
 }
 
 // AsEface will always ok, because we have parse in native.
@@ -1201,13 +1239,17 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 	opts := p.options
 	copyStr := opts&(1<<_F_copy_string) != 0
 	numSpecial := opts&((1<<_F_use_number)|(1<<_F_use_int64)) != 0
+	val, next, err := decodeEfaceAt(node.ptr, p, ctx, opts, copyStr, numSpecial)
+	node.ptr = next
+	return val, err
+}
 
-	switch node.Type() {
+func decodeEfaceAt(cur *node, p *Parser, ctx *Context, opts uint64, copyStr bool, numSpecial bool) (interface{}, *node, error) {
+	switch uint8(cur.typ) {
 	case KObject:
-		obj := node.Object()
-		size := obj.Len()
+		size := int(uint32(cur.val))
 		m := make(map[string]interface{}, size)
-		cur := obj.Children()
+		cur = PtrOffset(cur, 1)
 		var gerr, err error
 		for i := 0; i < size; i++ {
 			knode := cur
@@ -1234,7 +1276,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KStringCommon:
-					m[key] = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+					m[key] = strCommonAny(p, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KStringEscaped:
@@ -1246,7 +1288,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KSint:
-					m[key] = float64(int64(vnode.val))
+					m[key] = sintToFloat64Any(int64(vnode.val))
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KReal:
@@ -1261,21 +1303,17 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					}
 				}
 			}
-			*node = Node{ptr: vptr}
-			m[key], err = node.AsEfaceFallback(ctx)
-			cur = node.ptr
+			m[key], cur, err = decodeEfaceAt(vptr, p, ctx, opts, copyStr, numSpecial)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
-		*node = Node{ptr: cur}
-		return m, gerr
+		return m, cur, gerr
 	case KArray:
-		arr := node.Array()
-		size := arr.Len()
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
 		if size == 0 {
-			*node = Node{ptr: arr.Children()}
-			return emptyEfaceSliceAny, nil
+			return emptyEfaceSliceAny, next, nil
 		}
 		var a []interface{}
 		if ctx.sliceArena != nil {
@@ -1283,7 +1321,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 		} else {
 			a = make([]interface{}, size)
 		}
-		cur := arr.Children()
+		cur = next
 		var gerr, err error
 		for i := 0; i < size; i++ {
 			if !numSpecial {
@@ -1301,7 +1339,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					cur = PtrOffset(cur, 1)
 					continue
 				case KStringCommon:
-					a[i] = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+					a[i] = strCommonAny(p, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
 					cur = PtrOffset(cur, 1)
 					continue
 				case KStringEscaped:
@@ -1313,7 +1351,7 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					cur = PtrOffset(cur, 1)
 					continue
 				case KSint:
-					a[i] = float64(int64(vnode.val))
+					a[i] = sintToFloat64Any(int64(vnode.val))
 					cur = PtrOffset(cur, 1)
 					continue
 				case KReal:
@@ -1328,84 +1366,54 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 					}
 				}
 			}
-			*node = Node{ptr: cur}
-			a[i], err = node.AsEfaceFallback(ctx)
-			cur = node.ptr
+			a[i], cur, err = decodeEfaceAt(cur, p, ctx, opts, copyStr, numSpecial)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
-		*node = Node{ptr: cur}
-		return a, gerr
+		return a, cur, gerr
 	case KStringCommon:
-		str, _ := node.AsStr(ctx)
-		*node = NewNode(PtrOffset(node.ptr, 1))
-		return str, nil
+		return strCommonAny(p, int(cur.typ>>PosBits), int(cur.val), copyStr), PtrOffset(cur, 1), nil
 	case KStringEscaped:
-		str := node.StringCopyEsc(ctx)
-		*node = NewNode(PtrOffset(node.ptr, 1))
-		return str, nil
+		return p.strEscaped(int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
 	case KTrue:
-		*node = NewNode(PtrOffset(node.ptr, 1))
-		return true, nil
+		return true, PtrOffset(cur, 1), nil
 	case KFalse:
-		*node = NewNode(PtrOffset(node.ptr, 1))
-		return false, nil
+		return false, PtrOffset(cur, 1), nil
 	case KNull:
-		*node = NewNode(PtrOffset(node.ptr, 1))
-		return nil, nil
+		return nil, PtrOffset(cur, 1), nil
 	case KUint:
 		if !numSpecial {
-			v := node.ptr.val
-			*node = NewNode(PtrOffset(node.ptr, 1))
-			return uintToFloat64Any(v), nil
+			return uintToFloat64Any(cur.val), PtrOffset(cur, 1), nil
 		}
-		if opts&(1<<_F_use_int64) != 0 && node.ptr.val <= math.MaxInt64 {
-			v := node.ptr.val
-			*node = NewNode(PtrOffset(node.ptr, 1))
-			return uintToInt64Any(v), nil
+		if opts&(1<<_F_use_int64) != 0 && cur.val <= math.MaxInt64 {
+			return uintToInt64Any(cur.val), PtrOffset(cur, 1), nil
 		}
 		fallthrough
 	default:
-		// use float64
-		if ctx.Parser.options&(1<<_F_use_number) != 0 {
-			num, ok := node.AsNumber(ctx)
+		nd := Node{ptr: cur}
+		if opts&(1<<_F_use_number) != 0 {
+			num, ok := nd.AsNumber(ctx)
 			if !ok {
-				// skip the unmatched type
-				*node = NewNode(node.Next())
-				return nil, newUnmatched(node.Position(), jsonNumberType)
-			} else {
-				*node = NewNode(PtrOffset(node.ptr, 1))
-				return num, nil
+				return nil, nd.Next(), newUnmatched(nd.Position(), jsonNumberType)
 			}
-		} else if ctx.Parser.options&(1<<_F_use_int64) != 0 {
-			// first try int64
-			i, ok := node.AsI64(ctx)
+			return num, PtrOffset(cur, 1), nil
+		} else if opts&(1<<_F_use_int64) != 0 {
+			i, ok := nd.AsI64(ctx)
 			if ok {
-				*node = NewNode(PtrOffset(node.ptr, 1))
-				return i, nil
+				return i, PtrOffset(cur, 1), nil
 			}
-
-			// is not integer, then use float64
-			f, ok := node.AsF64(ctx)
+			f, ok := nd.AsF64(ctx)
 			if ok {
-				*node = NewNode(PtrOffset(node.ptr, 1))
-				return f, nil
+				return f, PtrOffset(cur, 1), nil
 			}
-
-			// skip the unmatched type
-			*node = NewNode(node.Next())
-			return nil, newUnmatched(node.Position(), int64Type)
+			return nil, nd.Next(), newUnmatched(nd.Position(), int64Type)
 		} else {
-			num, ok := node.AsF64(ctx)
+			num, ok := nd.AsF64(ctx)
 			if !ok {
-				// skip the unmatched type
-				*node = NewNode(node.Next())
-				return nil, newUnmatched(node.Position(), float64Type)
-			} else {
-				*node = NewNode(PtrOffset(node.ptr, 1))
-				return num, nil
+				return nil, nd.Next(), newUnmatched(nd.Position(), float64Type)
 			}
+			return num, PtrOffset(cur, 1), nil
 		}
 	}
 }

@@ -185,9 +185,72 @@ type structDecoder struct {
 	structName    string
 	typ           reflect.Type
 	goType        reflect.Type
+	sliceType     reflect.Type
+	elemSize      uintptr
 	fast          bool
 	ptrScalarHint uint8
 	ptrStrHint    uint8
+}
+
+func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {
+	if d.elemSize == 0 || d.sliceType == nil || p == nil {
+		return reflect.New(d.goType).UnsafePointer()
+	}
+	for i := range p.ptrStructSlabs {
+		slot := &p.ptrStructSlabs[i]
+		if slot.sd == d {
+			if slot.rem > 0 {
+				ptr := slot.base
+				slot.rem--
+				if slot.rem > 0 {
+					slot.base = unsafe.Add(ptr, d.elemSize)
+				} else {
+					slot.base = nil
+				}
+				return ptr
+			}
+			return d.allocPtrBatchSlow(slot)
+		}
+		if slot.sd == nil {
+			slot.sd = d
+			slot.next = 4
+			return reflect.New(d.goType).UnsafePointer()
+		}
+	}
+	for i := range p.ptrStructSlabs {
+		slot := &p.ptrStructSlabs[i]
+		if slot.rem == 0 {
+			slot.sd = d
+			slot.next = 4
+			return reflect.New(d.goType).UnsafePointer()
+		}
+	}
+	return reflect.New(d.goType).UnsafePointer()
+}
+
+//go:noinline
+func (d *structDecoder) allocPtrBatchSlow(slot *ptrStructSlabSlot) unsafe.Pointer {
+	n := slot.next
+	if n < 2 {
+		n = 4
+	}
+	maxBatch := int(8192 / d.elemSize)
+	if maxBatch < 2 {
+		return reflect.New(d.goType).UnsafePointer()
+	}
+	if n > maxBatch {
+		n = maxBatch
+	}
+	next := n * 2
+	if next > maxBatch {
+		next = maxBatch
+	}
+	slot.next = next
+	rv := reflect.MakeSlice(d.sliceType, n, n)
+	base := rv.UnsafePointer()
+	slot.base = unsafe.Add(base, d.elemSize)
+	slot.rem = n - 1
+	return base
 }
 
 func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -602,7 +665,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					sd := (*structDecoder)(fe.subDec)
 					dst := *(*unsafe.Pointer)(elem)
 					if dst == nil {
-						dst = reflect.New(sd.goType).UnsafePointer()
+						dst = sd.allocPtr(p)
 						*(*unsafe.Pointer)(elem) = dst
 					}
 					if uint32(vnode.val) != 0 {
@@ -651,17 +714,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 				if *(*interface{})(elem) == nil {
 					switch vtyp {
 					case KStringCommon:
-						off := int(vnode.typ >> PosBits)
-						n := int(vnode.val)
-						s := jsonStr[off : off+n]
-						if copyStr && n != 0 {
-							if copied, ok := p.copyArenaHit(s); ok {
-								s = copied
-							} else {
-								s = p.copyArenaStringSlow(s)
-							}
-						}
-						*(*interface{})(elem) = s
+						*(*interface{})(elem) = strCommonAny(p, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
 						continue
 					case KStringEscaped:
 						*(*interface{})(elem) = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
@@ -676,7 +729,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 						*(*interface{})(elem) = uintToFloat64Any(vnode.val)
 						continue
 					case KSint:
-						*(*interface{})(elem) = float64(int64(vnode.val))
+						*(*interface{})(elem) = sintToFloat64Any(int64(vnode.val))
 						continue
 					case KReal:
 						*(*interface{})(elem) = math.Float64frombits(vnode.val)
@@ -1051,7 +1104,7 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					sd := (*structDecoder)(fe.subDec)
 					dst := *(*unsafe.Pointer)(elem)
 					if dst == nil {
-						dst = reflect.New(sd.goType).UnsafePointer()
+						dst = sd.allocPtr(p)
 						*(*unsafe.Pointer)(elem) = dst
 					}
 					err := sd.FromDom(dst, Node{ptr: vptr}, ctx)
@@ -1085,7 +1138,7 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 				if *(*interface{})(elem) == nil {
 					switch vtyp {
 					case KStringCommon:
-						*(*interface{})(elem) = p.strCommon(int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+						*(*interface{})(elem) = strCommonAny(p, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
 						continue
 					case KStringEscaped:
 						*(*interface{})(elem) = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)

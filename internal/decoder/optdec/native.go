@@ -138,6 +138,14 @@ type Parser struct {
 	strPtrSlab     []string
 	strPtrSlabOff  int
 	strPtrSlabNext int
+	ptrStructSlabs [4]ptrStructSlabSlot
+}
+
+type ptrStructSlabSlot struct {
+	sd   *structDecoder
+	base unsafe.Pointer
+	rem  int
+	next int
 }
 
 // only when parse non-empty object/array are needed.
@@ -196,7 +204,7 @@ func (p *Parser) strRefCommon(off, length int) string {
 const (
 	minStrSlabCap  = 64
 	initStrSlabCap = 512
-	maxStrSlabCap  = 4096
+	maxStrSlabCap  = 16384
 	maxArenaStrLen = 1024
 	maxPtrSlabCap  = 64
 )
@@ -211,6 +219,7 @@ func (p *Parser) resetSlabs() {
 	p.strPtrSlab = nil
 	p.strPtrSlabOff = 0
 	p.strPtrSlabNext = 0
+	p.ptrStructSlabs = [4]ptrStructSlabSlot{}
 }
 
 func (p *Parser) allocScalarPtr(hint int) unsafe.Pointer {
@@ -352,7 +361,12 @@ func (p *Parser) allocStrSlab(n int) []byte {
 		} else if jsonLen <= 1024 {
 			nextCap = 256
 		} else {
-			nextCap = initStrSlabCap
+			nextCap = jsonLen / 3
+			if nextCap < initStrSlabCap {
+				nextCap = initStrSlabCap
+			} else if nextCap > 8192 {
+				nextCap = 8192
+			}
 		}
 	}
 	if nextCap < n*2 {

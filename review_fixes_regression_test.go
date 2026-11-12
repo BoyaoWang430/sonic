@@ -556,3 +556,49 @@ func TestOptBatchA_PtrStructAndSortedMapsParity(t *testing.T) {
 		require.True(t, json.Valid(gotFast), "case %d ConfigFastest valid JSON", idx)
 	}
 }
+
+func TestOptBatchC_DecoderPtrStructSlabAndEfaceTables(t *testing.T) {
+	type s1 struct{ A string }
+	type s2 struct{ B int }
+	type s3 struct{ C bool }
+	type s4 struct{ D float64 }
+	type s5 struct{ E string }
+	type item struct {
+		P1 *s1   `json:"p1"`
+		P2 *s2   `json:"p2"`
+		P3 *s3   `json:"p3"`
+		P4 *s4   `json:"p4"`
+		P5 *s5   `json:"p5"`
+		SP []*s1 `json:"sp"`
+	}
+
+	var items []item
+	for i := 0; i < 20; i++ {
+		items = append(items, item{
+			P1: &s1{A: "x"},
+			P2: &s2{B: -i - 1},
+			P3: &s3{C: i%2 == 0},
+			P4: &s4{D: 1.25},
+			P5: &s5{E: "y"},
+			SP: []*s1{{A: "p"}, nil, {A: "q"}},
+		})
+	}
+	raw, err := json.Marshal(items)
+	require.NoError(t, err)
+
+	var got []item
+	require.NoError(t, ConfigStd.Unmarshal(raw, &got))
+	require.Equal(t, items, got)
+
+	// Verify 1-char ASCII strings & negative integer tables in generic interface{} decode with CopyString.
+	mutBuf := []byte(`{"empty":"","one":"Z","neg":-42,"big_neg":-5000,"arr":["0","9",-1,-128,42]}`)
+	var genericOut any
+	require.NoError(t, ConfigStd.Unmarshal(mutBuf, &genericOut))
+	var stdOut any
+	require.NoError(t, json.Unmarshal(mutBuf, &stdOut))
+	// Overwrite mutBuf in place to confirm CopyString isolation.
+	for i := range mutBuf {
+		mutBuf[i] = '#'
+	}
+	require.Equal(t, stdOut, genericOut)
+}
