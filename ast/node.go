@@ -903,6 +903,37 @@ func (self *Node) SetAnyByIndex(index int, val interface{}) (bool, error) {
 // WARN: this will change address of elements, which is a dangerous action.
 // Use Unset() for object or Pop() for array instead.
 func (self *Node) UnsetByIndex(index int) (bool, error) {
+	if self != nil {
+		t := self.loadt()
+		if t == types.V_ARRAY {
+			if uint(index) >= self.l {
+				return false, ErrNotExist
+			}
+			p := self.nodeAt(index)
+			if !p.Exists() {
+				return false, ErrNotExist
+			}
+			if index == int(self.l)-1 {
+				return true, self.Pop()
+			}
+			self.removeNode(index)
+			return true, nil
+		}
+		if t == types.V_OBJECT {
+			if uint(index) >= self.l {
+				return false, ErrNotExist
+			}
+			pr := self.pairAt(index)
+			if pr == nil || !pr.Value.Exists() {
+				return false, ErrNotExist
+			}
+			if index == int(self.l)-1 {
+				return true, self.Pop()
+			}
+			self.removePair(index)
+			return true, nil
+		}
+	}
 	if err := self.checkRaw(); err != nil {
 		return false, err
 	}
@@ -1093,6 +1124,15 @@ func (self *Node) GetByPath(path ...interface{}) *Node {
 
 // Get loads given key of an object node on demands
 func (self *Node) Get(key string) *Node {
+	if self != nil && self.loadt() == types.V_OBJECT {
+		if self.l == 0 {
+			return nil
+		}
+		if p, _ := (*linkedPairs)(self.p).Get(key); p != nil {
+			return &p.Value
+		}
+		return nil
+	}
 	if err := self.should(types.V_OBJECT); err != nil {
 		return unwrapError(err)
 	}
@@ -1103,6 +1143,39 @@ func (self *Node) Get(key string) *Node {
 // Index indexies node at given idx,
 // node type CAN be either V_OBJECT or V_ARRAY
 func (self *Node) Index(idx int) *Node {
+	if self != nil {
+		t := self.loadt()
+		if t == types.V_ARRAY {
+			if uint(idx) >= self.l {
+				return nil
+			}
+			if p := (*linkedNodes)(self.p); p != nil && p.size == int(self.l) {
+				if idx < _DEFAULT_NODE_CAP {
+					return &p.head[idx]
+				}
+				return p.At(idx)
+			}
+			return self.nodeAt(idx)
+		}
+		if t == types.V_OBJECT {
+			var pr *Pair
+			if uint(idx) < self.l {
+				if p := (*linkedPairs)(self.p); p != nil && p.size == int(self.l) {
+					if idx < _DEFAULT_NODE_CAP {
+						pr = &p.head[idx]
+					} else {
+						pr = p.At(idx)
+					}
+				} else {
+					pr = self.pairAt(idx)
+				}
+			}
+			if pr == nil {
+				return newError(_ERR_NOT_FOUND, "value not exists")
+			}
+			return &pr.Value
+		}
+	}
 	if err := self.checkRaw(); err != nil {
 		return unwrapError(err)
 	}
@@ -1633,6 +1706,9 @@ func (self *Node) nodeAt(i int) *Node {
 		_, stack := self.getParserAndArrayStack()
 		p = &stack.v
 	} else {
+		if uint(i) >= self.l {
+			return nil
+		}
 		p = (*linkedNodes)(self.p)
 		if l := p.Len(); l != self.len() {
 			// some nodes got unset, iterate to skip them
@@ -1657,6 +1733,9 @@ func (self *Node) pairAt(i int) *Pair {
 		_, stack := self.getParserAndObjectStack()
 		p = &stack.v
 	} else {
+		if uint(i) >= self.l {
+			return nil
+		}
 		p = (*linkedPairs)(self.p)
 		if l := p.Len(); l != self.len() {
 			// some nodes got unset, iterate to skip them

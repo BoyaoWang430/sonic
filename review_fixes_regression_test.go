@@ -602,3 +602,59 @@ func TestOptBatchC_DecoderPtrStructSlabAndEfaceTables(t *testing.T) {
 	}
 	require.Equal(t, stdOut, genericOut)
 }
+
+func TestOptBatchD_ASTMaterializedFastPathsAndTokenObjectSWAR(t *testing.T) {
+	// Exercise tokenObject SWAR short/medium/long keys, backslash-after-quote in same 8B word, and escaped keys.
+	raw := `[{"a":"\\","abcdefghi":"0123456789ab","seventeen_byte_key":"val_over_sixteen_bytes","esc\"key":"esc\"val","sp" : "x"},{"target":99}]`
+	target, err := Get([]byte(raw), 1, "target")
+	require.NoError(t, err)
+	v, err := target.Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(99), v)
+
+	r0 := ast.NewRaw(raw)
+	require.NoError(t, r0.Check())
+
+	// Materialized V_ARRAY (>16 elements to cover both head and tail chunks) + UnsetByIndex + Index bounds.
+	var arrNodes []ast.Node
+	for i := 0; i < 20; i++ {
+		arrNodes = append(arrNodes, ast.NewNumber(fmt.Sprintf("%d", i)))
+	}
+	arr := ast.NewArray(arrNodes)
+	n18, err := arr.Index(18).Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(18), n18)
+	require.Nil(t, arr.Index(20))
+	require.Nil(t, arr.Index(-1))
+
+	ok, err := arr.UnsetByIndex(2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	shifted, err := arr.Index(2).Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(3), shifted)
+	ok, err = arr.UnsetByIndex(99)
+	require.Error(t, err)
+	require.False(t, ok)
+
+	// Materialized V_OBJECT (>16 pairs) + Get + Index + UnsetByIndex.
+	var pairs []ast.Pair
+	for i := 0; i < 20; i++ {
+		pairs = append(pairs, ast.NewPair(fmt.Sprintf("k%d", i), ast.NewNumber(fmt.Sprintf("%d", i*10))))
+	}
+	obj := ast.NewObject(pairs)
+	gv, err := obj.Get("k17").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(170), gv)
+	require.Nil(t, obj.Get("missing"))
+	iv, err := obj.Index(17).Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(170), iv)
+	require.False(t, obj.Index(25).Valid())
+	ok, err = obj.UnsetByIndex(1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	afterUnset, err := obj.Index(1).Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(20), afterUnset)
+}

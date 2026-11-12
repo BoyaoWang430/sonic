@@ -171,40 +171,63 @@ func tokenObject(src string, pos, depth int) int {
 	if src[pos] == '}' {
 		return pos + 1
 	}
+	base := unsafe.Pointer(rt.StringData(src))
+	se := len(src)
 	for {
 		if src[pos] != '"' {
 			return -1
 		}
 		{
-			limit := pos + 1 + 16
-			if limit > len(src) {
-				limit = len(src)
-			}
-			for p := pos + 1; p < limit; p++ {
-				c := src[p]
-				if c == '"' {
-					if p+1 < len(src) && src[p+1] == ':' {
-						pos = p + 2
-						goto afterColon
+			sp := pos + 1
+			if se-sp >= 8 {
+				x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
+				q := x ^ ('"' * tokenByteOnes)
+				quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
+				b := x ^ ('\\' * tokenByteOnes)
+				backslashes := (b - tokenByteOnes) &^ b & tokenByteHighBits
+				if quotes != 0 {
+					tz := bits.TrailingZeros64(quotes)
+					if backslashes == 0 || tz < bits.TrailingZeros64(backslashes) {
+						p := sp + (tz >> 3)
+						if p+1 < se && src[p+1] == ':' {
+							pos = p + 2
+							goto afterColon
+						}
+						pos = p + 1
+						goto expectColon
 					}
-					pos = p + 1
-					goto expectColon
-				}
-				if c == '\\' {
-					pos = tokenString(src, p)
-					if pos < 0 {
-						return -1
+				} else if backslashes == 0 {
+					sp += 8
+					if se-sp >= 8 {
+						x = binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
+						q = x ^ ('"' * tokenByteOnes)
+						quotes = (q - tokenByteOnes) &^ q & tokenByteHighBits
+						b = x ^ ('\\' * tokenByteOnes)
+						backslashes = (b - tokenByteOnes) &^ b & tokenByteHighBits
+						if quotes != 0 {
+							tz := bits.TrailingZeros64(quotes)
+							if backslashes == 0 || tz < bits.TrailingZeros64(backslashes) {
+								p := sp + (tz >> 3)
+								if p+1 < se && src[p+1] == ':' {
+									pos = p + 2
+									goto afterColon
+								}
+								pos = p + 1
+								goto expectColon
+							}
+						} else if backslashes == 0 {
+							sp += 8
+						}
 					}
-					goto expectColon
 				}
 			}
-			pos = tokenString(src, limit)
+			pos = tokenString(src, sp)
 			if pos < 0 {
 				return -1
 			}
 		}
 	expectColon:
-		if uint(pos) >= uint(len(src)) || src[pos] != ':' {
+		if uint(pos) >= uint(se) || src[pos] != ':' {
 			pos = tokenSpace(src, pos)
 			if pos < 0 || src[pos] != ':' {
 				return -1
@@ -213,10 +236,10 @@ func tokenObject(src string, pos, depth int) int {
 		pos++
 	afterColon:
 		// Consume the usual formatted-object separator without a slow-path call.
-		if uint(pos) < uint(len(src)) && src[pos] == ' ' {
+		if uint(pos) < uint(se) && src[pos] == ' ' {
 			pos++
 		}
-		if uint(pos) >= uint(len(src)) || src[pos] <= ' ' {
+		if uint(pos) >= uint(se) || src[pos] <= ' ' {
 			pos = tokenSpaceSlow(src, pos)
 			if pos < 0 {
 				return -1
@@ -224,23 +247,40 @@ func tokenObject(src string, pos, depth int) int {
 		}
 		switch src[pos] {
 		case '"':
-			limit := pos + 1 + 16
-			if limit > len(src) {
-				limit = len(src)
-			}
-			p := pos + 1
-			for p < limit {
-				c := src[p]
-				if c == '"' {
-					pos = p + 1
-					goto afterObjVal
+			sp := pos + 1
+			if se-sp >= 8 {
+				x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
+				q := x ^ ('"' * tokenByteOnes)
+				quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
+				b := x ^ ('\\' * tokenByteOnes)
+				backslashes := (b - tokenByteOnes) &^ b & tokenByteHighBits
+				if quotes != 0 {
+					tz := bits.TrailingZeros64(quotes)
+					if backslashes == 0 || tz < bits.TrailingZeros64(backslashes) {
+						pos = sp + (tz >> 3) + 1
+						goto afterObjVal
+					}
+				} else if backslashes == 0 {
+					sp += 8
+					if se-sp >= 8 {
+						x = binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
+						q = x ^ ('"' * tokenByteOnes)
+						quotes = (q - tokenByteOnes) &^ q & tokenByteHighBits
+						b = x ^ ('\\' * tokenByteOnes)
+						backslashes = (b - tokenByteOnes) &^ b & tokenByteHighBits
+						if quotes != 0 {
+							tz := bits.TrailingZeros64(quotes)
+							if backslashes == 0 || tz < bits.TrailingZeros64(backslashes) {
+								pos = sp + (tz >> 3) + 1
+								goto afterObjVal
+							}
+						} else if backslashes == 0 {
+							sp += 8
+						}
+					}
 				}
-				if c == '\\' {
-					break
-				}
-				p++
 			}
-			pos = tokenString(src, p)
+			pos = tokenString(src, sp)
 		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			p := pos + 1
 			limit := p + 18
@@ -467,14 +507,21 @@ func tokenString(src string, pos int) int {
 	stop := minNative(se, sp+32)
 	for sp < stop && se-sp >= 8 {
 		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(base, sp))[:])
+		q := x ^ ('"' * tokenByteOnes)
+		quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
 		b := x ^ ('\\' * tokenByteOnes)
-		if (b-tokenByteOnes)&^b&tokenByteHighBits != 0 {
+		backslashes := (b - tokenByteOnes) &^ b & tokenByteHighBits
+		if quotes != 0 {
+			tz := bits.TrailingZeros64(quotes)
+			if backslashes == 0 || tz < bits.TrailingZeros64(backslashes) {
+				return sp + (tz >> 3) + 1
+			}
+			sp += bits.TrailingZeros64(backslashes) >> 3
 			goto scanNative
 		}
-		q := x ^ ('"' * tokenByteOnes)
-		mask := (q - tokenByteOnes) &^ q & tokenByteHighBits
-		if mask != 0 {
-			return sp + (bits.TrailingZeros64(mask) >> 3) + 1
+		if backslashes != 0 {
+			sp += bits.TrailingZeros64(backslashes) >> 3
+			goto scanNative
 		}
 		sp += 8
 	}
