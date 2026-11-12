@@ -310,7 +310,10 @@ func typeHasPointersSeen(vt reflect.Type, seen map[reflect.Type]bool) bool {
 
 // typeHasUnboundedPtrGraph reports whether vt holds references that can pin arbitrary
 // external heap graphs (slices, maps, interfaces, nested pointer structs, funcs, chans,
-// or unsafe.Pointer). Structs with only scalars, strings, or *Scalar/*string are bounded.
+// or unsafe.Pointer). Structs with only scalars, strings, or *Scalar/*string are treated
+// as bounded in pointer count (maxPtrBatch <= 8, so 1 retained struct can keep at most 7
+// sibling structs alive; note that under CopyString, >1 KiB copied string backing bytes
+// are allocated individually and bounded to at most those <= 7 sibling string headers).
 func typeHasUnboundedPtrGraph(vt reflect.Type) bool {
 	for i := 0; i < vt.NumField(); i++ {
 		ft := vt.Field(i).Type

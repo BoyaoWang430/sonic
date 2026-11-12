@@ -178,14 +178,14 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 }
 
 type structDecoder struct {
-	fieldMap      *caching.FieldCache
-	fields        []fieldEntry
-	fieldDecs     []decFunc
-	wideOffsets   []uintptr
-	structName    string
-	typ           reflect.Type
-	goType        reflect.Type
-	sliceType     reflect.Type
+	fieldMap          *caching.FieldCache
+	fields            []fieldEntry
+	fieldDecs         []decFunc
+	wideOffsets       []uintptr
+	structName        string
+	typ               reflect.Type
+	goType            reflect.Type
+	sliceType         reflect.Type
 	elemSize          uintptr
 	maxPtrBatch       uint16
 	fast              bool
@@ -193,6 +193,8 @@ type structDecoder struct {
 	flatPureASCIIKeys bool
 	ptrScalarHint     uint8
 	ptrStrHint        uint8
+	flatFailStreak    uint32
+	flatProbeTick     uint32
 }
 
 func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {
@@ -436,7 +438,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				dst = (*float64)(p.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
-			*dst = float64(int64(vnode.val))
+			*dst = sintToFloat64(int64(vnode.val))
 			return true
 		}
 	case fieldKindPtrF32:
@@ -468,7 +470,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				dst = (*float32)(p.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
-			*dst = float32(int64(vnode.val))
+			*dst = sintToFloat32(int64(vnode.val))
 			return true
 		}
 	}
@@ -644,7 +646,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					continue
 				}
 				if vtyp == KSint {
-					*(*float64)(elem) = float64(int64(vnode.val))
+					*(*float64)(elem) = sintToFloat64(int64(vnode.val))
 					continue
 				}
 			case fieldKindF32:
@@ -658,7 +660,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					*(*float32)(elem) = float32(vnode.val)
 					continue
 				} else if vtyp == KSint {
-					*(*float32)(elem) = float32(int64(vnode.val))
+					*(*float32)(elem) = sintToFloat32(int64(vnode.val))
 					continue
 				}
 			case fieldKindU64:
@@ -1083,7 +1085,7 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					continue
 				}
 				if vtyp == KSint {
-					*(*float64)(elem) = float64(int64(vnode.val))
+					*(*float64)(elem) = sintToFloat64(int64(vnode.val))
 					continue
 				}
 			case fieldKindF32:
@@ -1097,7 +1099,7 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					*(*float32)(elem) = float32(vnode.val)
 					continue
 				} else if vtyp == KSint {
-					*(*float32)(elem) = float32(int64(vnode.val))
+					*(*float32)(elem) = sintToFloat32(int64(vnode.val))
 					continue
 				}
 			case fieldKindU64:

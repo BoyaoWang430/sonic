@@ -384,12 +384,26 @@ func (val Node) ParseNumber(ctx *Context) (json.Number, bool) {
 	return json.Number(s), true
 }
 
+func sintToFloat64(v int64) float64 {
+	if v == 0 {
+		return math.Copysign(0, -1)
+	}
+	return float64(v)
+}
+
+func sintToFloat32(v int64) float32 {
+	if v == 0 {
+		return float32(math.Copysign(0, -1))
+	}
+	return float32(v)
+}
+
 func (val Node) AsF64(ctx *Context) (float64, bool) {
 	switch val.Type() {
 	case KUint:
 		return float64(val.U64()), true
 	case KSint:
-		return float64(val.I64()), true
+		return sintToFloat64(val.I64()), true
 	case KReal:
 		return float64(val.F64()), true
 	case KRawNumber:
@@ -1199,6 +1213,7 @@ func init() {
 		smallFloat64Any[i] = float64(i)
 		smallInt64Any[i] = int64(i)
 	}
+	smallNegFloat64Any[0] = math.Copysign(0, -1)
 	for i := 1; i <= smallNegIntLimit; i++ {
 		smallNegFloat64Any[i] = float64(-i)
 	}
@@ -1215,7 +1230,7 @@ func uintToFloat64Any(v uint64) any {
 }
 
 func sintToFloat64Any(v int64) any {
-	if v >= 0 {
+	if v > 0 {
 		if v < smallUintAnyLimit {
 			return smallFloat64Any[v]
 		}

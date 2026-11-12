@@ -9,13 +9,18 @@ jobs:
 
     strategy:
       matrix:
-        go-version: [1.26.x]
-        riscv_profile:
-          - goriscv64: rva22u64
+        include:
+          - go-version: '1.26.x'
+            goriscv64: rva22u64
             qemu_cpu: rv64,zba=true,zbb=true,zbs=true
-          - goriscv64: rva23u64
+          - go-version: '1.27.x'
+            goriscv64: rva22u64
+            qemu_cpu: rv64,zba=true,zbb=true,zbs=true
+          - go-version: '1.27.x'
+            goriscv64: rva23u64
             qemu_cpu: rv64,v=true,vlen=128,zba=true,zbb=true,zbs=true,zicond=true,zfa=true,zfhmin=true,zcb=true
-          - goriscv64: rva23u64
+          - go-version: '1.27.x'
+            goriscv64: rva23u64
             qemu_cpu: rv64,v=true,vlen=256,zba=true,zbb=true,zbs=true,zicond=true,zfa=true,zfhmin=true,zcb=true
 
     runs-on: ubuntu-24.04
@@ -34,12 +39,12 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
-      - name: Build and Run Unit Tests under QEMU (${{ matrix.riscv_profile.goriscv64 }} / ${{ matrix.riscv_profile.qemu_cpu }})
+      - name: Build and Run Unit Tests under QEMU (${{ matrix.goriscv64 }} / ${{ matrix.qemu_cpu }})
         env:
           GOOS: linux
           GOARCH: riscv64
-          GORISCV64: ${{ matrix.riscv_profile.goriscv64 }}
-          QEMU_CPU: ${{ matrix.riscv_profile.qemu_cpu }}
+          GORISCV64: ${{ matrix.goriscv64 }}
+          QEMU_CPU: ${{ matrix.qemu_cpu }}
           CGO_ENABLED: "0"
         run: |
           EXEC_WRAPPER="$(mktemp)"
@@ -51,4 +56,7 @@ jobs:
           GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./...
           GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./issue_test
           GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./generic_test
-          GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./compatibility/
+          if [[ "${{ matrix.go-version }}" == 1.27* ]]; then
+            GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./compatibility/
+            GOEXPERIMENT=nojsonv2 GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./compatibility/
+          fi

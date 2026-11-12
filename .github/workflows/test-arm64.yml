@@ -11,7 +11,7 @@ jobs:
 
     strategy:
       matrix:
-        go-version: [1.20.x, 1.22.x, 1.25.x, '1.27.0-rc.2']
+        go-version: [1.20.x, 1.22.x, 1.25.x, '1.27.x']
         runner_arch: [ubuntu-24.04-arm, macos-15]
 
     runs-on: ${{ matrix.runner_arch }}
@@ -47,13 +47,11 @@ jobs:
       - name: Issue Test
         run: GOMAXPROCS=4 go test -race ./issue_test
 
-      - name: Compatibility Test
-        run: GOMAXPROCS=4 go test ./compatibility/ -count=1
-
       - name: Go 1.27 Compatibility Tests
         if: startsWith(matrix.go-version, '1.27')
         run: |
           GOEXPERIMENT=nojsonv2 GOMAXPROCS=4 go test -race ./issue_test
+          GOMAXPROCS=4 go test ./compatibility/ -count=1
           GOEXPERIMENT=nojsonv2 GOMAXPROCS=4 go test ./compatibility/ -count=1
 
       - name: Generic Test

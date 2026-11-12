@@ -13,10 +13,11 @@ func TestRVVNativeContracts(t *testing.T) {
 	if APIKind != UseSonicJSON {
 		t.Fatal("RISC-V native target selected the compatibility backend")
 	}
-	// native/parse_with_padding.c represents the integer token -0 as SINT 0.
+	// Decoding "-0" into float64 preserves IEEE-754 negative zero (-0.0),
+	// matching encoding/json across all native architectures.
 	var zero float64
-	if err := ConfigStd.UnmarshalFromString("-0", &zero); err != nil || math.Float64bits(zero) != 0 {
-		t.Fatalf("integer negative zero: %v, %v", zero, err)
+	if err := ConfigStd.UnmarshalFromString("-0", &zero); err != nil || zero != 0 || !math.Signbit(zero) {
+		t.Fatalf("integer negative zero: %v (signbit=%v), %v", zero, math.Signbit(zero), err)
 	}
 	// internal/encoder/alg/spec.go normalizes both floating zero signs.
 	encoded, err := ConfigStd.Marshal(math.Copysign(0, -1))

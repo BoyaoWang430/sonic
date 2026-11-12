@@ -810,6 +810,8 @@ func TestCase_F64_LONG_OVF(t *testing.T) {
 		if stdJSONV2Pre1273 {
 			require.True(t, math.IsInf(j[0].(float64), 1))
 		} else if stdUsesJSONV2 {
+			// Go 1.27.3+ stops saturating overflow to +Inf, leaving the allocated float64(0)
+			// in the interface{} element (legacy nojsonv2 leaves the interface{} slot nil).
 			require.Equal(t, float64(0), j[0])
 		} else {
 			require.Nil(t, j[0])

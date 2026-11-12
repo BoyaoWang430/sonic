@@ -106,9 +106,9 @@ a promise that the final Go 1.27 implementation will keep the same behavior.
 
 | Case and test | Input or type | SonicStd | GoStd127 | LegacyStd | Compatibility impact |
 |---|---|---|---|---|---|
-| [`F32-OVF`](../compatibility/catalog_test.go#L40) | Value above float32 range | Error; destination remains `0` | Error; destination becomes `+Inf` | Error; destination remains `0` | Error-time mutation |
-| [`F64-OVF`](../compatibility/catalog_test.go#L58) | `1e1000` | Error; destination remains `0` | Error; destination becomes `+Inf` | Error; destination remains `0` | Error-time mutation |
-| [`F64-LONG-OVF`](../compatibility/catalog_test.go#L793) | 1,712-digit mantissa followed by `e-913` | No error; incorrectly returns a finite value near `5.33e-114` | Range error; element becomes `+Inf` | Range error; element remains `nil` | Historical range-detection bug exposed by Go 1.27 |
+| [`F32-OVF`](../compatibility/catalog_test.go#L40) | Value above float32 range | Error; destination remains `0` | Error; `+Inf` (< 1.27.3) or `0` (>= 1.27.3) | Error; destination remains `0` | Error-time mutation (fixed in Go 1.27.3) |
+| [`F64-OVF`](../compatibility/catalog_test.go#L58) | `1e1000` | Error; destination remains `0` | Error; `+Inf` (< 1.27.3) or `0` (>= 1.27.3) | Error; destination remains `0` | Error-time mutation (fixed in Go 1.27.3) |
+| [`F64-LONG-OVF`](../compatibility/catalog_test.go#L793) | 1,712-digit mantissa followed by `e-913` | No error; incorrectly returns a finite value near `5.33e-114` | Range error; element becomes `+Inf` (< 1.27.3) or `float64(0)` (>= 1.27.3) | Range error; element remains `nil` | Historical range-detection bug exposed by Go 1.27 |
 | [`MAP-F64-ENC`](../compatibility/catalog_test.go#L80) | `map[float64]string` | Unsupported | Encodes successfully | Unsupported | Accepted type set |
 | [`MAP-PTR-ENC`](../compatibility/catalog_test.go#L98) | `map[*int]*int` | Unsupported | Encodes successfully | Unsupported | Accepted type set |
 | [`MAP-F64-DEC`](../compatibility/catalog_test.go#L118) | Float map keys | Decodes successfully | Decodes successfully | Error | Accepted type set |

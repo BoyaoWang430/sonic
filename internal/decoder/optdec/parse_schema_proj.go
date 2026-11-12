@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/bits"
 	"runtime"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
@@ -14,14 +15,19 @@ import (
 )
 
 const (
-	swarOnes   uint64 = 0x0101010101010101
-	swarHigh   uint64 = 0x8080808080808080
-	swarQuote  uint64 = uint64('"') * swarOnes
-	swarBS     uint64 = uint64('\\') * swarOnes
-	swarCtrl   uint64 = uint64(0x20) * swarOnes
-	swarSpaces uint64 = uint64(' ') * swarOnes
-	spaceMask  uint64 = (uint64(1) << ' ') | (uint64(1) << '\n') | (uint64(1) << '\r') | (uint64(1) << '\t')
+	swarOnes      uint64 = 0x0101010101010101
+	swarHigh      uint64 = 0x8080808080808080
+	swarQuote     uint64 = uint64('"') * swarOnes
+	swarBS        uint64 = uint64('\\') * swarOnes
+	swarCtrl      uint64 = uint64(0x20) * swarOnes
+	swarSpaces    uint64 = uint64(' ') * swarOnes
+	spaceMask     uint64 = (uint64(1) << ' ') | (uint64(1) << '\n') | (uint64(1) << '\r') | (uint64(1) << '\t')
+	numContMaskLo uint64 = (uint64(0x3ff) << '0') | (uint64(1) << '.') | (uint64(1) << '+') | (uint64(1) << '-')
 )
+
+func isNumberContByte(b byte) bool {
+	return (b < 64 && (numContMaskLo&(uint64(1)<<b)) != 0) || (b|0x20) == 'e'
+}
 
 type schemaScanner struct {
 	p             *Parser
@@ -96,6 +102,7 @@ func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 }
 
 func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
+	atomic.AddUint64(&schemaFallbackCount, 1)
 	wasLazy := p.lazyPadded
 	if mutated && !wasLazy {
 		if p.sessionPadded != nil {
@@ -180,7 +187,7 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		nIdx:          0,
 		depth:         0,
 		opts:          p.options,
-		validateStr:   p.options&(1<<5) != 0,
+		validateStr:   p.options&(1<<_F_validate_string) != 0,
 		caseSensitive: p.options&uint64(consts.OptionCaseSensitive) != 0,
 		disUnknown:    Options(p.options)&OptionDisableUnknown != 0,
 	}
@@ -375,6 +382,11 @@ func (sc *schemaScanner) scanByPlan(plan *projPlan, c byte, valStart int) bool {
 	}
 	switch plan.kind {
 	case projScalar:
+		return sc.scanScalar(c, valStart)
+	case projBytes:
+		if c == '[' {
+			return sc.scanSlice(plan, c, valStart)
+		}
 		return sc.scanScalar(c, valStart)
 	case projRaw:
 		return sc.scanRaw(c, valStart)
@@ -1123,7 +1135,7 @@ func (sc *schemaScanner) scanStringSlow(contentStart int) (uint64, uint64, bool,
 			sc.pos = afterQuote
 			return KStringCommon | uint64(contentStart)<<PosBits, uint64(afterQuote - contentStart - 1), false, true
 		}
-		if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
+		if opts&(1<<_F_validate_string) != 0 && cParityAtFirst(control, bs|quote) {
 			return 0, 0, false, false
 		}
 		if cParityAtFirst(bs, quote) {
@@ -1245,6 +1257,9 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 		}
 	} else if first == '0' {
 		d := schemaByteAt(strPtr, pos, end)
+		if d >= '0' && d <= '9' {
+			return false
+		}
 		if d != '.' && (d|0x20) != 'e' {
 			if pos > end {
 				return false
@@ -1285,49 +1300,73 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 				p2++
 				digits++
 			}
+			pos = p2
 		}
 	}
 
-	numEnd, ok := skipNumberAt(strPtr, first, sc.pos, end, false)
-	if !ok {
-		return false
-	}
 	neg := first == '-'
 	numBody := valStart
 	if neg {
 		numBody++
 	}
 	var numVal cParityNum
-	var code ErrorCode
-	if numEnd <= sc.safe64 {
-		var nextCur unsafe.Pointer
+	var numEnd int
+	if sc.strPtr == sc.tailPtr {
 		startPtr := unsafe.Add(strPtr, numBody)
-		nextCur, numVal, code = cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
-		if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
+		nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+		if code != SONIC_OK {
 			return false
 		}
-	} else if numBody >= sc.tailStart {
-		var nextCur unsafe.Pointer
-		startPtr := unsafe.Add(sc.tailPtr, numBody-sc.tailStart)
-		nextCur, numVal, code = cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
-		if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
-			return false
-		}
-	} else {
-		p := sc.p
-		savedLen := len(p.unescBuf)
-		p.unescBuf = append(p.unescBuf, sc.jsonStr[numBody:numEnd]...)
-		p.unescBuf = append(p.unescBuf, 'x', 0, 0, 0, 0, 0, 0, 0)
-		startPtr := unsafe.Pointer(&p.unescBuf[savedLen])
-		nextCur, nv, c := cParityParseNumberValue(startPtr, sc.num, neg, p.dbuf)
-		p.unescBuf = p.unescBuf[:savedLen]
-		if p.unesc != nil {
-			p.unesc = p.unescBuf
-		}
-		if c != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
+		numEnd = numBody + int(uintptr(nextCur)-uintptr(startPtr))
+		if numEnd > end || isNumberContByte(schemaByteAt(strPtr, numEnd, end)) {
 			return false
 		}
 		numVal = nv
+	} else if numBody >= sc.tailStart {
+		startPtr := unsafe.Add(sc.tailPtr, numBody-sc.tailStart)
+		nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+		if code != SONIC_OK {
+			return false
+		}
+		numEnd = numBody + int(uintptr(nextCur)-uintptr(startPtr))
+		if numEnd > end || isNumberContByte(schemaByteAt(strPtr, numEnd, end)) {
+			return false
+		}
+		numVal = nv
+	} else {
+		endCur := pos
+		for endCur <= sc.safe64 && isNumberContByte(*(*byte)(unsafe.Add(strPtr, endCur))) {
+			endCur++
+		}
+		if endCur <= sc.safe64 {
+			startPtr := unsafe.Add(strPtr, numBody)
+			nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+			if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != endCur-numBody {
+				return false
+			}
+			numEnd = endCur
+			numVal = nv
+		} else {
+			var ok bool
+			numEnd, ok = skipNumberAt(strPtr, first, sc.pos, end, false)
+			if !ok {
+				return false
+			}
+			p := sc.p
+			savedLen := len(p.unescBuf)
+			p.unescBuf = append(p.unescBuf, sc.jsonStr[numBody:numEnd]...)
+			p.unescBuf = append(p.unescBuf, 'x', 0, 0, 0, 0, 0, 0, 0)
+			startPtr := unsafe.Pointer(&p.unescBuf[savedLen])
+			nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, p.dbuf)
+			p.unescBuf = p.unescBuf[:savedLen]
+			if p.unesc != nil {
+				p.unesc = p.unescBuf
+			}
+			if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
+				return false
+			}
+			numVal = nv
+		}
 	}
 	sc.num = numVal
 	sc.pos = numEnd
@@ -2300,7 +2339,7 @@ func skipStringBodyAt(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStar
 			pos += bits.TrailingZeros32(quote) + 1
 			return pos, pos <= end
 		}
-		if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
+		if opts&(1<<_F_validate_string) != 0 && cParityAtFirst(control, bs|quote) {
 			return pos, false
 		}
 		if cParityAtFirst(bs, quote) {

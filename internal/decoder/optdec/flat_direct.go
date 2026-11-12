@@ -5,6 +5,7 @@ package optdec
 import (
 	"math"
 	"math/bits"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
@@ -18,8 +19,9 @@ type flatStagedField struct {
 }
 
 const (
-	flatMaxInputLen     int    = 1 << 20
-	flatUnsupportedOpts uint64 = (1 << _F_use_number) | (1 << _F_use_int64)
+	flatMaxInputLen      int    = 1 << 20
+	flatBackoffThreshold uint32 = 8
+	flatUnsupportedOpts  uint64 = (1 << _F_use_number) | (1 << _F_use_int64)
 )
 
 // tryDecodeFlatStruct scans s[startPos:] directly into a flat struct (1..32 scalar/string fields)
@@ -32,6 +34,26 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 	if startPos < 0 || startPos >= end || end-startPos > flatMaxInputLen || f&flatUnsupportedOpts != 0 {
 		return 0, false
 	}
+	streak := atomic.LoadUint32(&sd.flatFailStreak)
+	if streak >= flatBackoffThreshold {
+		if (atomic.AddUint32(&sd.flatProbeTick, 1) & 255) != 0 {
+			return 0, false
+		}
+	}
+	nextPos, ok := tryDecodeFlatStructBody(s, startPos, end, f, vp, sd, utf8Prechecked, checkTrailing)
+	if ok {
+		if streak != 0 {
+			atomic.StoreUint32(&sd.flatFailStreak, 0)
+		}
+		return nextPos, true
+	}
+	if streak < 16 {
+		atomic.AddUint32(&sd.flatFailStreak, 1)
+	}
+	return 0, false
+}
+
+func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Pointer, sd *structDecoder, utf8Prechecked, checkTrailing bool) (int, bool) {
 
 	strPtr := unsafe.Pointer(unsafe.StringData(s))
 	validateStr := f&(1<<_F_validate_string) != 0
@@ -606,6 +628,9 @@ func flatParseFloat(strPtr unsafe.Pointer, c byte, pos, end int) (float64, int, 
 				pos++
 			}
 		} else if (d | 0x20) != 'e' {
+			if neg {
+				return math.Copysign(0, -1), pos, true
+			}
 			return 0, pos, true
 		}
 	} else if c >= '1' && c <= '9' {

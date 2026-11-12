@@ -28,9 +28,11 @@ import (
 // Go 1.27 uses the jsonv2 backend for encoding/json by default.
 const stdUsesJSONV2 = true
 
-// Go 1.27.3 fixed seven DefaultOptionsV1 regressions in the jsonv2-backed
-// encoding/json facade (F32-OVF, F64-OVF, F64-LONG-OVF, STR-NULL, TM-KEY-QUOTE,
-// MAP-STRING-TEXT, UNSUPPORTED-VALUE-PAYLOAD), restoring legacy v1 behavior.
+// Go 1.27.3 changed seven DefaultOptionsV1 cases in the jsonv2-backed
+// encoding/json facade: six restored legacy v1 behavior (F32-OVF, F64-OVF,
+// STR-NULL, TM-KEY-QUOTE, MAP-STRING-TEXT, UNSUPPORTED-VALUE-PAYLOAD), while
+// F64-LONG-OVF stopped saturating the interface{} slot to +Inf and leaves the
+// allocated float64 zero value (float64(0), whereas legacy v1 leaves nil).
 var stdJSONV2Pre1273 = isPreGo1273(runtime.Version())
 
 func isPreGo1273(v string) bool {

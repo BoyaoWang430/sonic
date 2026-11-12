@@ -10,6 +10,7 @@ type projKind uint8
 const (
 	projFull projKind = iota
 	projScalar
+	projBytes
 	projRaw
 	projStruct
 	projSlice
@@ -51,9 +52,11 @@ func (p *projPlan) recordSparse() {
 }
 
 var (
-	projFullPlan   = &projPlan{kind: projFull, isBounded: false}
-	projScalarPlan = &projPlan{kind: projScalar, isBounded: true, totalFields: 1}
-	projRawPlan    = &projPlan{kind: projRaw, hasRawSubtree: true, isBounded: true, totalFields: 1}
+	projFullPlan        = &projPlan{kind: projFull, isBounded: false}
+	projScalarPlan      = &projPlan{kind: projScalar, isBounded: true, totalFields: 1}
+	projBytesPlan       = &projPlan{kind: projBytes, isBounded: true, totalFields: 1, elem: projScalarPlan}
+	projRawPlan         = &projPlan{kind: projRaw, hasRawSubtree: true, isBounded: true, totalFields: 1}
+	schemaFallbackCount uint64
 )
 
 func compileProjPlan(dec decFunc) *projPlan {
@@ -198,10 +201,11 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 			maxStructWidth: ep.maxStructWidth,
 			elem:           ep,
 		}
+	case *sliceBytesDecoder:
+		return projBytesPlan
 	case *sliceIntDecoder, *sliceI64Decoder, *sliceI32Decoder,
 		*sliceUintDecoder, *sliceU64Decoder, *sliceU32Decoder,
-		*sliceF64Decoder, *sliceF32Decoder, *sliceBoolDecoder, *sliceStringDecoder,
-		*sliceBytesDecoder:
+		*sliceF64Decoder, *sliceF32Decoder, *sliceBoolDecoder, *sliceStringDecoder:
 		return &projPlan{
 			kind:        projSlice,
 			isBounded:   false,
@@ -255,7 +259,7 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 }
 
 func (p *projPlan) shouldUse(jsonLen int) bool {
-	if p == nil || p.kind == projFull || p.kind == projScalar {
+	if p == nil || p.kind == projFull || p.kind == projScalar || p.kind == projBytes {
 		return false
 	}
 	if p.hasRawSubtree {
