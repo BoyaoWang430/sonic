@@ -38,22 +38,26 @@ TEXT ·quote(SB), NOSPLIT, $0-56
 	CMPB ·hasAVX2(SB), $0
 	JE   q_short_entry
 
-	MOVQ $1, R15
 	VMOVDQU q_ctrl_vec<>(SB), Y3
 	VMOVDQU q_quote_vec<>(SB), Y4
 	VMOVDQU q_slash_vec<>(SB), Y5
+	MOVQ $1, R15
 	JMP  q_scan
 
 q_short_entry:
-	XORQ R15, R15                 // R15 = 1 if YMM registers used
 	CMPQ CX, $16
-	JB   q_scan_word_entry
+	JB   q_scan_word_zero_r15
 	CMPQ DX, $16
-	JB   q_scan_word_entry
+	JB   q_scan_word_zero_r15
 	MOVOU q_ctrl_vec<>(SB), X3
 	MOVOU q_quote_vec<>(SB), X4
 	MOVOU q_slash_vec<>(SB), X5
+	XORQ R15, R15                 // R15 = 1 if YMM registers used
 	JMP  q_scan_16
+
+q_scan_word_zero_r15:
+	XORQ R15, R15
+	JMP  q_scan_word_entry
 
 q_scan:
 	CMPQ CX, $64
@@ -438,8 +442,7 @@ TEXT ·quoteHTML(SB), NOSPLIT, $0-48
 	MOVQ capacity+24(FP), DX
 	MOVQ CX, R9                   // R9 = original size
 	MOVQ DX, R10                  // R10 = original capacity
-	XORQ R14, R14                 // R14 = 1 if XMM LUT loaded
-	XORQ R15, R15                 // R15 = 1 if YMM LUT loaded
+	XORQ R8, R8                   // R8 = 0 (scalar), 1 (XMM), 2 (YMM); keep R14 (g) and R15 (GOT) untouched
 
 	CMPQ CX, $16
 	JB   qh_scan_word_entry
@@ -453,19 +456,19 @@ TEXT ·quoteHTML(SB), NOSPLIT, $0-48
 	CMPQ DX, $32
 	JB   qh_xmm_entry
 
-	MOVQ $1, R15
 	VMOVDQU qh_nibble_mask<>(SB), Y3
 	VMOVDQU qh_lo_lut<>(SB), Y4
 	VMOVDQU qh_hi_lut<>(SB), Y5
 	VPXOR Y8, Y8, Y8
+	MOVQ $2, R8
 	JMP  qh_scan
 
 qh_xmm_entry:
-	MOVQ $1, R14
 	VMOVDQU qh_nibble_mask<>(SB), X3
 	VMOVDQU qh_lo_lut<>(SB), X4
 	VMOVDQU qh_hi_lut<>(SB), X5
 	VPXOR X8, X8, X8
+	MOVQ $1, R8
 	JMP  qh_scan_16
 
 qh_scan:
@@ -849,10 +852,10 @@ qh_escaped2:
 	SUBQ $2, DX
 
 qh_resume_scan:
-	TESTQ R15, R15
-	JNZ  qh_scan
-	TESTQ R14, R14
-	JNZ  qh_scan_16
+	CMPQ R8, $2
+	JE   qh_scan
+	CMPQ R8, $1
+	JE   qh_scan_16
 	JMP  qh_scan_word_entry
 
 qh_exhausted:
@@ -868,8 +871,8 @@ qh_done:
 	SUBQ DX, R10
 	MOVQ AX, consumed+32(FP)
 	MOVQ R10, written+40(FP)
-	TESTQ R15, R15
-	JZ   qh_ret
+	CMPQ R8, $2
+	JNE  qh_ret
 	VZEROUPPER
 qh_ret:
 	RET
