@@ -155,14 +155,12 @@ backslashes:
 	SUB	$1, X23
 	BNEZ	X23, backslashes
 	BEQZ	X24, short_body
-	MOV	$117, X22
-	MOVB	X22, 0(X20)
-	MOV	$48, X22
-	MOVB	X22, 1(X20)
-	MOVB	X22, 2(X20)
+	MOV	$0x00303075, X23
 	SRLI	$4, X7, X22
 	ADD	$48, X22
-	MOVB	X22, 3(X20)
+	SLLI	$24, X22
+	OR	X22, X23
+	MOVW	X23, 0(X20)
 	AND	$15, X7, X22
 	MOV	$10, X23
 	BLTU	X22, X23, hex_digit
@@ -340,24 +338,21 @@ qh_classify_loaded:
 
 	MOV	$6, X5
 	BLTU	X13, X5, qh_exhausted
-	MOVB	X19, 0(X12)
-	MOV	$117, X22
-	MOVB	X22, 1(X12)
-	MOV	$48, X22
-	MOVB	X22, 2(X12)
-	MOVB	X22, 3(X12)
+	MOV	$0x3030755c, X22
+	MOVW	X22, 0(X12)
 	SRLI	$4, X7, X22
 	ADD	$48, X22
-	MOVB	X22, 4(X12)
-	AND	$15, X7, X22
-	MOV	$10, X23
-	BLTU	X22, X23, qh_hex_digit
-	ADD	$87, X22
+	AND	$15, X7, X23
+	MOV	$10, X5
+	BLTU	X23, X5, qh_hex_digit
+	ADD	$87, X23
 	JMP	qh_hex_store
 qh_hex_digit:
-	ADD	$48, X22
+	ADD	$48, X23
 qh_hex_store:
-	MOVB	X22, 5(X12)
+	SLLI	$8, X23
+	OR	X23, X22
+	MOVH	X22, 4(X12)
 	ADD	$1, X10
 	SUB	$1, X11
 	ADD	$6, X12
@@ -376,17 +371,12 @@ qh_check_e2:
 	BNE	X5, X6, qh_plain_e2
 	MOV	$6, X5
 	BLTU	X13, X5, qh_exhausted
-	MOVB	X19, 0(X12)
-	MOV	$117, X6
-	MOVB	X6, 1(X12)
-	MOV	$50, X6
-	MOVB	X6, 2(X12)
-	MOV	$48, X6
-	MOVB	X6, 3(X12)
-	MOV	$50, X6
-	MOVB	X6, 4(X12)
+	MOV	$0x3032755c, X6
+	MOVW	X6, 0(X12)
 	ADD	$-112, X24
-	MOVB	X24, 5(X12)
+	SLLI	$8, X24
+	OR	$0x32, X24
+	MOVH	X24, 4(X12)
 	ADD	$3, X10
 	SUB	$3, X11
 	ADD	$6, X12
