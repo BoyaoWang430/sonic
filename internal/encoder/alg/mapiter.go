@@ -18,6 +18,7 @@ package alg
 
 import (
 	"encoding"
+	"encoding/json"
 	"reflect"
 	"sync"
 	"unsafe"
@@ -171,9 +172,12 @@ func appendKey(p *_MapPair, kt reflect.Type, keySlot reflect.Value) error {
 		return nil
 	}
 	if kt.Implements(vars.EncodingTextMarshalerType) {
-		if (kind == reflect.Ptr || kind == reflect.Interface) && keySlot.IsNil() {
+		if kind == reflect.Ptr && keySlot.IsNil() {
 			p.k = ""
 			return nil
+		}
+		if kind == reflect.Interface && keySlot.IsNil() {
+			return &json.UnsupportedValueError{Value: keySlot, Str: "nil interface map key"}
 		}
 		out, err := keySlot.Interface().(encoding.TextMarshaler).MarshalText()
 		if err != nil {
@@ -198,7 +202,7 @@ func appendKey(p *_MapPair, kt reflect.Type, keySlot reflect.Value) error {
 		return nil
 	case reflect.Interface:
 		if keySlot.IsNil() {
-			panic("map key is nil")
+			return &json.UnsupportedValueError{Value: keySlot, Str: "nil interface map key"}
 		}
 		elem := keySlot.Elem()
 		return appendKey(p, elem.Type(), elem)

@@ -78,6 +78,9 @@ func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj 
 	} else {
 		ecode = p.parse()
 	}
+	if ecode == errCodeGiantStreamFallback {
+		return ctx, errGiantStreamFallback
+	}
 	if ecode != 0 {
 		return ctx, p.fixError(ecode)
 	}
@@ -728,6 +731,10 @@ func (node *Node) AsMapString(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(PtrOffset(next, 1))
 		m[key], ok = val.AsStr(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), stringType)
 			}
@@ -776,6 +783,40 @@ func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 	return nil
 }
 
+func (node *Node) AsSliceInt(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceIntType)
+	}
+
+	size := arr.Len()
+	dst := (*[]int)(vp)
+	s := prepareSlice(dst, size)
+	next := arr.Children()
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsI64(ctx)
+		if !ok || ret > math.MaxInt || ret < math.MinInt {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), intType)
+			}
+			next = val.Next()
+		} else {
+			s[i] = int(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
 func (node *Node) AsSliceI32(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
@@ -792,6 +833,10 @@ func (node *Node) AsSliceI32(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(next)
 		ret, ok := val.AsI64(ctx)
 		if !ok || ret > math.MaxInt32 || ret < math.MinInt32 {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), int32Type)
 			}
@@ -823,12 +868,50 @@ func (node *Node) AsSliceI64(ctx *Context, vp unsafe.Pointer) error {
 
 		ret, ok := val.AsI64(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), int64Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceUint(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceUintType)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]uint)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsU64(ctx)
+		if !ok || ret > math.MaxUint {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), uintType)
+			}
+			next = val.Next()
+		} else {
+			s[i] = uint(ret)
 			next = PtrOffset(val.ptr, 1)
 		}
 	}
@@ -853,6 +936,10 @@ func (node *Node) AsSliceU32(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(next)
 		ret, ok := val.AsU64(ctx)
 		if !ok || ret > math.MaxUint32 {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), uint32Type)
 			}
@@ -883,6 +970,10 @@ func (node *Node) AsSliceU64(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(next)
 		ret, ok := val.AsU64(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), uint64Type)
 			}
@@ -913,6 +1004,10 @@ func (node *Node) AsSliceString(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(next)
 		ret, ok := val.AsStr(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
 				gerr = newUnmatched(val.Position(), stringType)
 			}

@@ -59,7 +59,9 @@ func (d *embeddedFieldPtrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *con
 	return d.fieldDec.FromDom(vp, node, ctx)
 }
 
-type i8Decoder struct{}
+type i8Decoder struct {
+	typ reflect.Type
+}
 
 func (d *i8Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -68,14 +70,16 @@ func (d *i8Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsI64(ctx)
 	if !ok || ret > math.MaxInt8 || ret < math.MinInt8 {
-		return error_mismatch(node, ctx, int8Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*int8)(vp) = int8(ret)
 	return nil
 }
 
-type i16Decoder struct{}
+type i16Decoder struct {
+	typ reflect.Type
+}
 
 func (d *i16Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -84,14 +88,16 @@ func (d *i16Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsI64(ctx)
 	if !ok || ret > math.MaxInt16 || ret < math.MinInt16 {
-		return error_mismatch(node, ctx, int16Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*int16)(vp) = int16(ret)
 	return nil
 }
 
-type i32Decoder struct{}
+type i32Decoder struct {
+	typ reflect.Type
+}
 
 func (d *i32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -100,14 +106,16 @@ func (d *i32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsI64(ctx)
 	if !ok || ret > math.MaxInt32 || ret < math.MinInt32 {
-		return error_mismatch(node, ctx, int32Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*int32)(vp) = int32(ret)
 	return nil
 }
 
-type i64Decoder struct{}
+type i64Decoder struct {
+	typ reflect.Type
+}
 
 func (d *i64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -116,14 +124,16 @@ func (d *i64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsI64(ctx)
 	if !ok {
-		return error_mismatch(node, ctx, int64Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*int64)(vp) = int64(ret)
 	return nil
 }
 
-type u8Decoder struct{}
+type u8Decoder struct {
+	typ reflect.Type
+}
 
 func (d *u8Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -132,15 +142,16 @@ func (d *u8Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsU64(ctx)
 	if !ok || ret > math.MaxUint8 {
-		err := error_mismatch(node, ctx, uint8Type)
-		return err
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*uint8)(vp) = uint8(ret)
 	return nil
 }
 
-type u16Decoder struct{}
+type u16Decoder struct {
+	typ reflect.Type
+}
 
 func (d *u16Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -149,13 +160,15 @@ func (d *u16Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsU64(ctx)
 	if !ok || ret > math.MaxUint16 {
-		return error_mismatch(node, ctx, uint16Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 	*(*uint16)(vp) = uint16(ret)
 	return nil
 }
 
-type u32Decoder struct{}
+type u32Decoder struct {
+	typ reflect.Type
+}
 
 func (d *u32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -164,14 +177,16 @@ func (d *u32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsU64(ctx)
 	if !ok || ret > math.MaxUint32 {
-		return error_mismatch(node, ctx, uint32Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*uint32)(vp) = uint32(ret)
 	return nil
 }
 
-type u64Decoder struct{}
+type u64Decoder struct {
+	typ reflect.Type
+}
 
 func (d *u64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -180,14 +195,16 @@ func (d *u64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsU64(ctx)
 	if !ok {
-		return error_mismatch(node, ctx, uint64Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*uint64)(vp) = uint64(ret)
 	return nil
 }
 
-type f32Decoder struct{}
+type f32Decoder struct {
+	typ reflect.Type
+}
 
 func (d *f32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -196,14 +213,16 @@ func (d *f32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsF64(ctx)
 	if !ok || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
-		return error_mismatch(node, ctx, float32Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*float32)(vp) = float32(ret)
 	return nil
 }
 
-type f64Decoder struct{}
+type f64Decoder struct {
+	typ reflect.Type
+}
 
 func (d *f64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
@@ -212,7 +231,7 @@ func (d *f64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 
 	ret, ok := node.AsF64(ctx)
 	if !ok {
-		return error_mismatch(node, ctx, float64Type)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*float64)(vp) = float64(ret)
@@ -220,6 +239,7 @@ func (d *f64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 }
 
 type boolDecoder struct {
+	typ reflect.Type
 }
 
 func (d *boolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -229,7 +249,7 @@ func (d *boolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error 
 
 	ret, ok := node.AsBool()
 	if !ok {
-		return error_mismatch(node, ctx, boolType)
+		return error_mismatch(node, ctx, d.typ)
 	}
 
 	*(*bool)(vp) = bool(ret)
@@ -237,6 +257,7 @@ func (d *boolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error 
 }
 
 type stringDecoder struct {
+	typ reflect.Type
 }
 
 func (d *stringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -246,7 +267,7 @@ func (d *stringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 
 	ret, ok := node.AsStr(ctx)
 	if !ok {
-		return error_mismatch(node, ctx, stringType)
+		return error_mismatch(node, ctx, d.typ)
 	}
 	*(*string)(vp) = ret
 	return nil

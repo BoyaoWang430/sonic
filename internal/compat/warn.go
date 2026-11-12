@@ -1,4 +1,4 @@
-//go:build ((!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
+//go:build ((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
 
 package compat
 
@@ -8,5 +8,5 @@ import (
 )
 
 func Warn(prefix string) {
-	fmt.Fprintf(os.Stderr, "WARNING: %s only supports (go1.17~1.27 and amd64 CPU) or (go1.20~1.27 and arm64 CPU), but your environment is not suitable and will fallback to encoding/json\n", prefix)
+	fmt.Fprintf(os.Stderr, "WARNING: %s only supports (go1.20~1.27 and amd64/arm64 CPU) or (go1.26~1.27 and riscv64 rva22u64+ CPU), but your environment is not suitable and will fallback to encoding/json\n", prefix)
 }

@@ -149,17 +149,17 @@ strict:
 strict_event:
 	BEQZ	X26, advance
 	CTZ	X26, X30
-	ADD	X30, X10, X8
-	MOVBU	0(X8), X7
+	ADD	X30, X10, X24
+	MOVBU	0(X24), X7
 	BEQ	X7, X16, event_quote
 	BNE	X7, X17, invalid
 	BGEZ	X14, escape_seen
 	ADD	X13, X30, X14
 escape_seen:
 	SUB	X30, X11, X9           // bytes available at this backslash
-	MOV	$2, X31
-	BLT	X9, X31, eof
-	MOVBU	1(X8), X7
+	MOV	$2, X25
+	BLT	X9, X25, eof
+	MOVBU	1(X24), X7
 	BEQ	X7, X16, consume_escape
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
@@ -178,12 +178,12 @@ unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
-	MOV	$6, X31
-	BLT	X9, X31, eof
-	ADD	$2, X8
+	MOV	$6, X25
+	BLT	X9, X25, eof
+	ADD	$2, X24
 	MOV	$4, X9
 hex:
-	MOVBU	0(X8), X7
+	MOVBU	0(X24), X7
 	ADD	$-48, X7, X5
 	MOV	$10, X6
 	BLTU	X5, X6, hex_valid
@@ -192,19 +192,19 @@ hex:
 	MOV	$6, X6
 	BGEU	X7, X6, invalid
 hex_valid:
-	ADD	$1, X8
+	ADD	$1, X24
 	SUB	$1, X9
 	BNEZ	X9, hex
 consume_escape:
-	ADD	X30, X31
-	BLTU	X20, X31, crossing_escape
+	ADD	X30, X25
+	BLTU	X20, X25, crossing_escape
 	// The second byte of a simple escape is already absent from the event
 	// mask. A valid Unicode escape's hex digits cannot contain any events.
 	ADD	$-1, X26, X5
 	AND	X5, X26
 	JMP	strict_event
 crossing_escape:
-	MOV	X31, X20                // advance beyond the consumed escape
+	MOV	X25, X20                // advance beyond the consumed escape
 advance:
 	ADD	X20, X10
 	ADD	X20, X13
@@ -393,17 +393,17 @@ strict:
 strict_event:
 	BEQZ	X26, advance
 	CTZ	X26, X30
-	ADD	X30, X10, X8
-	MOVBU	0(X8), X7
+	ADD	X30, X10, X24
+	MOVBU	0(X24), X7
 	BEQ	X7, X16, event_quote
 	BNE	X7, X17, invalid
 	BGEZ	X14, escape_seen
 	ADD	X13, X30, X14
 escape_seen:
 	SUB	X30, X11, X9           // bytes available at this backslash
-	MOV	$2, X31
-	BLT	X9, X31, eof
-	MOVBU	1(X8), X7
+	MOV	$2, X25
+	BLT	X9, X25, eof
+	MOVBU	1(X24), X7
 	BEQ	X7, X16, consume_escape
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
@@ -422,12 +422,12 @@ unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
-	MOV	$6, X31
-	BLT	X9, X31, eof
-	ADD	$2, X8
+	MOV	$6, X25
+	BLT	X9, X25, eof
+	ADD	$2, X24
 	MOV	$4, X9
 hex:
-	MOVBU	0(X8), X7
+	MOVBU	0(X24), X7
 	ADD	$-48, X7, X5
 	MOV	$10, X6
 	BLTU	X5, X6, hex_valid
@@ -436,19 +436,19 @@ hex:
 	MOV	$6, X6
 	BGEU	X7, X6, invalid
 hex_valid:
-	ADD	$1, X8
+	ADD	$1, X24
 	SUB	$1, X9
 	BNEZ	X9, hex
 consume_escape:
-	ADD	X30, X31
-	BLTU	X20, X31, crossing_escape
+	ADD	X30, X25
+	BLTU	X20, X25, crossing_escape
 	// The second byte of a simple escape is already absent from the event
 	// mask. A valid Unicode escape's hex digits cannot contain any events.
 	ADD	$-1, X26, X5
 	AND	X5, X26
 	JMP	strict_event
 crossing_escape:
-	MOV	X31, X20                // advance beyond the consumed escape
+	MOV	X25, X20                // advance beyond the consumed escape
 advance:
 	ADD	X20, X10
 	ADD	X20, X13
@@ -581,17 +581,17 @@ strict:
 strict_event:
 	BEQZ	X26, advance
 	CTZ	X26, X30
-	ADD	X30, X10, X8
-	MOVBU	0(X8), X7
+	ADD	X30, X10, X24
+	MOVBU	0(X24), X7
 	BEQ	X7, X16, event_quote
 	BNE	X7, X17, invalid
 	BGEZ	X14, escape_seen
 	ADD	X13, X30, X14
 escape_seen:
 	SUB	X30, X11, X9           // bytes available at this backslash
-	MOV	$2, X31
-	BLT	X9, X31, eof
-	MOVBU	1(X8), X7
+	MOV	$2, X25
+	BLT	X9, X25, eof
+	MOVBU	1(X24), X7
 	BEQ	X7, X16, consume_escape
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
@@ -610,12 +610,12 @@ unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
-	MOV	$6, X31
-	BLT	X9, X31, eof
-	ADD	$2, X8
+	MOV	$6, X25
+	BLT	X9, X25, eof
+	ADD	$2, X24
 	MOV	$4, X9
 hex:
-	MOVBU	0(X8), X7
+	MOVBU	0(X24), X7
 	ADD	$-48, X7, X5
 	MOV	$10, X6
 	BLTU	X5, X6, hex_valid
@@ -624,19 +624,19 @@ hex:
 	MOV	$6, X6
 	BGEU	X7, X6, invalid
 hex_valid:
-	ADD	$1, X8
+	ADD	$1, X24
 	SUB	$1, X9
 	BNEZ	X9, hex
 consume_escape:
-	ADD	X30, X31
-	BLTU	X20, X31, crossing_escape
+	ADD	X30, X25
+	BLTU	X20, X25, crossing_escape
 	// The second byte of a simple escape is already absent from the event
 	// mask. A valid Unicode escape's hex digits cannot contain any events.
 	ADD	$-1, X26, X5
 	AND	X5, X26
 	JMP	strict_event
 crossing_escape:
-	MOV	X31, X20                // advance beyond the consumed escape
+	MOV	X25, X20                // advance beyond the consumed escape
 advance:
 	ADD	X20, X10
 	ADD	X20, X13
@@ -786,17 +786,17 @@ strict:
 strict_event:
 	BEQZ	X26, advance
 	CTZ	X26, X30
-	ADD	X30, X10, X8
-	MOVBU	0(X8), X7
+	ADD	X30, X10, X24
+	MOVBU	0(X24), X7
 	BEQ	X7, X16, event_quote
 	BNE	X7, X17, invalid
 	BGEZ	X14, escape_seen
 	ADD	X13, X30, X14
 escape_seen:
 	SUB	X30, X11, X9           // bytes available at this backslash
-	MOV	$2, X31
-	BLT	X9, X31, eof
-	MOVBU	1(X8), X7
+	MOV	$2, X25
+	BLT	X9, X25, eof
+	MOVBU	1(X24), X7
 	BEQ	X7, X16, consume_escape
 	BEQ	X7, X17, consume_escape
 	MOV	$47, X6                 // /
@@ -815,12 +815,12 @@ unicode:
 
 	// Require all four hex bytes before checking their syntax, retaining the
 	// EOF/backslash error-position contract. Lone surrogates remain allowed.
-	MOV	$6, X31
-	BLT	X9, X31, eof
-	ADD	$2, X8
+	MOV	$6, X25
+	BLT	X9, X25, eof
+	ADD	$2, X24
 	MOV	$4, X9
 hex:
-	MOVBU	0(X8), X7
+	MOVBU	0(X24), X7
 	ADD	$-48, X7, X5
 	MOV	$10, X6
 	BLTU	X5, X6, hex_valid
@@ -829,19 +829,19 @@ hex:
 	MOV	$6, X6
 	BGEU	X7, X6, invalid
 hex_valid:
-	ADD	$1, X8
+	ADD	$1, X24
 	SUB	$1, X9
 	BNEZ	X9, hex
 consume_escape:
-	ADD	X30, X31
-	BLTU	X20, X31, crossing_escape
+	ADD	X30, X25
+	BLTU	X20, X25, crossing_escape
 	// The second byte of a simple escape is already absent from the event
 	// mask. A valid Unicode escape's hex digits cannot contain any events.
 	ADD	$-1, X26, X5
 	AND	X5, X26
 	JMP	strict_event
 crossing_escape:
-	MOV	X31, X20                // advance beyond the consumed escape
+	MOV	X25, X20                // advance beyond the consumed escape
 advance:
 	ADD	X20, X10
 	ADD	X20, X13

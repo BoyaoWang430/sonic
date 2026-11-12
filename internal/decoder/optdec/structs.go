@@ -31,8 +31,10 @@ const (
 	fieldKindSlice
 	fieldKindEface
 	fieldKindSliceEface
+	fieldKindSliceInt
 	fieldKindSliceI64
 	fieldKindSliceI32
+	fieldKindSliceUint
 	fieldKindSliceU64
 	fieldKindSliceU32
 	fieldKindSliceF64
@@ -151,10 +153,14 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 		fe.kind = fieldKindEface
 	case *sliceEfaceDecoder:
 		fe.kind = fieldKindSliceEface
+	case *sliceIntDecoder:
+		fe.kind = fieldKindSliceInt
 	case *sliceI64Decoder:
 		fe.kind = fieldKindSliceI64
 	case *sliceI32Decoder:
 		fe.kind = fieldKindSliceI32
+	case *sliceUintDecoder:
+		fe.kind = fieldKindSliceUint
 	case *sliceU64Decoder:
 		fe.kind = fieldKindSliceU64
 	case *sliceU32Decoder:
@@ -461,11 +467,17 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			case fieldKindSliceEface:
 				*(*[]interface{})(elem) = nil
 				continue
+			case fieldKindSliceInt:
+				*(*[]int)(elem) = nil
+				continue
 			case fieldKindSliceI64:
 				*(*[]int64)(elem) = nil
 				continue
 			case fieldKindSliceI32:
 				*(*[]int32)(elem) = nil
+				continue
+			case fieldKindSliceUint:
+				*(*[]uint)(elem) = nil
 				continue
 			case fieldKindSliceU64:
 				*(*[]uint64)(elem) = nil
@@ -684,6 +696,19 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					}
 					continue
 				}
+			case fieldKindSliceInt:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]int)(elem) = []int{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceInt(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
 			case fieldKindSliceI64:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
@@ -705,6 +730,19 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					}
 					n := Node{ptr: vptr}
 					err := n.AsSliceI32(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
+			case fieldKindSliceUint:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]uint)(elem) = []uint{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceUint(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
 					}
@@ -878,11 +916,17 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			case fieldKindSliceEface:
 				*(*[]interface{})(elem) = nil
 				continue
+			case fieldKindSliceInt:
+				*(*[]int)(elem) = nil
+				continue
 			case fieldKindSliceI64:
 				*(*[]int64)(elem) = nil
 				continue
 			case fieldKindSliceI32:
 				*(*[]int32)(elem) = nil
+				continue
+			case fieldKindSliceUint:
+				*(*[]uint)(elem) = nil
 				continue
 			case fieldKindSliceU64:
 				*(*[]uint64)(elem) = nil
@@ -1067,6 +1111,19 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					}
 					continue
 				}
+			case fieldKindSliceInt:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]int)(elem) = []int{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceInt(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
 			case fieldKindSliceI64:
 				if vtyp == KArray {
 					if uint32(vnode.val) == 0 {
@@ -1088,6 +1145,19 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					}
 					n := Node{ptr: vptr}
 					err := n.AsSliceI32(ctx, elem)
+					if gerr == nil && err != nil {
+						gerr = err
+					}
+					continue
+				}
+			case fieldKindSliceUint:
+				if vtyp == KArray {
+					if uint32(vnode.val) == 0 {
+						*(*[]uint)(elem) = []uint{}
+						continue
+					}
+					n := Node{ptr: vptr}
+					err := n.AsSliceUint(ctx, elem)
 					if gerr == nil && err != nil {
 						gerr = err
 					}

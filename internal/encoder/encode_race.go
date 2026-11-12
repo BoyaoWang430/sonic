@@ -27,10 +27,13 @@ import (
 
 const raceEnabled = true
 
-func helpDetectDataRace(val interface{}) {
+func helpDetectDataRace(val interface{}, ignorePanic bool) {
 	var out []byte
 	defer func() {
 		if v := recover(); v != nil {
+			if ignorePanic {
+				return
+			}
 			// NOTICE: help user to locate where panic occurs
 			println("panic when encoding on: ", truncate(out))
 			panic(v)
@@ -42,7 +45,7 @@ func helpDetectDataRace(val interface{}) {
 func encodeIntoCheckRace(buf *[]byte, val interface{}, opts Options) error {
 	err := encodeInto(buf, val, opts)
 	/* put last to make the panic from sonic will always be caught at first */
-	helpDetectDataRace(val)
+	helpDetectDataRace(val, err != nil)
 	return err
 }
 

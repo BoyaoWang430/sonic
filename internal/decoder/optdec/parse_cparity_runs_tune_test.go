@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
 
 package optdec
 
@@ -23,10 +23,9 @@ func cParityRunsTuneParser(src string, offset, capacity int, options uint64) *Pa
 	return p
 }
 
-// The existing block scanner retains the original 32-byte C priority. Compare
-// cursor, escape status, partial node and all modified string bytes against it,
-// including first-control/first-backslash cases that a first-event fast path
-// must not decide itself. An earlier value supplies both possible stale flags.
+// Compare cursor, escape status, partial node and all modified string bytes
+// against the reference Go block scanner across all alignments and prefix lengths,
+// including strict RFC 8259 control-character-before-backslash error precedence.
 func TestCParityRunsStringProbeBoundary(t *testing.T) {
 	suffixes := []string{
 		`"`, `中🚀"`, `\n"`, `\u4e2d\ud800\u0041"`, `\q"`, `\u00xx"`,

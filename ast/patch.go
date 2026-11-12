@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -262,7 +263,13 @@ func appendScalarPatchValue(buf *[]byte, val interface{}) bool {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return false
 		}
-		*buf = strconv.AppendFloat(*buf, v, 'g', -1, 64)
+		*buf = number.AppendFloat64(*buf, v)
+		return true
+	case float32:
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return false
+		}
+		*buf = number.AppendFloat32(*buf, v)
 		return true
 	default:
 		return false

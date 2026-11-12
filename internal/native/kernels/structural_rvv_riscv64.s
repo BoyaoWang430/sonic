@@ -107,8 +107,8 @@ structural_close:
 	BEQZ	X28, structural_count
 	ADD	$-1, X28, X29
 	AND	X26, X29, X30
-	CPOP	X30, X31
-	ADD	X31, X13
+	CPOP	X30, X5
+	ADD	X5, X13
 	XOR	X30, X26              // remove opening brackets already counted
 	SUB	$1, X13
 	BEQZ	X13, structural_success

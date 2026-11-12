@@ -1218,8 +1218,7 @@ func TestStepD4BuiltinAndPooledMaps(t *testing.T) {
 		}
 	}
 
-	// 3. Pre-populated map + JSON null values: UseSonicJSON preserves existing map entry (MAP-VALUE-REPLACE),
-	// whereas SONIC_BACKEND=stdlib replaces with zero value.
+	// 3. Pre-populated map + JSON null values: replaces existing map entry with zero value matching encoding/json.
 	rawNulls := `{"si":{"keep":null,"new":null},"si64":{"keep":null,"new":null},"su64":{"keep":null,"new":null},"sf64":{"keep":null,"new":null},"sb":{"keep":null,"new":null},"is":{"1":null,"2":null},"i64s":{"1":null,"2":null},"named_si":{"keep":null,"new":null}}`
 	seed := func() stepD4MapHolder {
 		return stepD4MapHolder{
@@ -1237,28 +1236,12 @@ func TestStepD4BuiltinAndPooledMaps(t *testing.T) {
 	if err := ConfigStd.UnmarshalFromString(rawNulls, &gotNulls); err != nil {
 		t.Fatalf("ConfigStd.UnmarshalFromString nulls failed: %v", err)
 	}
-	if APIKind == UseSonicJSON {
-		wantSonic := stepD4MapHolder{
-			SI:      map[string]int{"keep": 7, "new": 0},
-			SI64:    map[string]int64{"keep": -7, "new": 0},
-			SU64:    map[string]uint64{"keep": 7, "new": 0},
-			SF64:    map[string]float64{"keep": 7.5, "new": 0},
-			SB:      map[string]bool{"keep": true, "new": false},
-			IS:      map[int]string{1: "kept", 2: ""},
-			I64S:    map[int64]string{1: "kept64", 2: ""},
-			NamedSI: customStringIntMap{"keep": 9, "new": 0},
-		}
-		if !reflect.DeepEqual(gotNulls, wantSonic) {
-			t.Fatalf("pre-populated null map Sonic merge mismatch:\ngot:  %+v\nwant: %+v", gotNulls, wantSonic)
-		}
-	} else {
-		wantStd := seed()
-		if err := json.Unmarshal([]byte(rawNulls), &wantStd); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(gotNulls, wantStd) {
-			t.Fatalf("pre-populated null map stdlib mismatch:\ngot:  %+v\nwant: %+v", gotNulls, wantStd)
-		}
+	wantStdNulls := seed()
+	if err := json.Unmarshal([]byte(rawNulls), &wantStdNulls); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotNulls, wantStdNulls) {
+		t.Fatalf("pre-populated null map stdlib mismatch:\ngot:  %+v\nwant: %+v", gotNulls, wantStdNulls)
 	}
 
 	// 4. NaN/Inf handling on map[string]float64.

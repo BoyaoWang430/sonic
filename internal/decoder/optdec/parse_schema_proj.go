@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
 
 package optdec
 
@@ -42,14 +42,22 @@ type schemaScanner struct {
 	num           cParityNum
 }
 
+const errCodeGiantStreamFallback ErrorCode = -1
+
 func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 	if !plan.shouldUse(p.end) {
+		if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
+			return errCodeGiantStreamFallback
+		}
 		return parseImpl(p)
 	}
 	ok, mutated := parseSchemaRoot(p, plan)
 	if ok {
 		runtime.KeepAlive(p)
 		return SONIC_OK
+	}
+	if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
+		return errCodeGiantStreamFallback
 	}
 	return resetAndRunFullParse(p, mutated)
 }
@@ -1650,12 +1658,12 @@ func skipStringBodyAt(rawPtr unsafe.Pointer, pos, end int, opts uint64) (int, bo
 			pos += bits.TrailingZeros32(quote) + 1
 			return pos, pos <= end
 		}
+		if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
+			return pos, false
+		}
 		if cParityAtFirst(bs, quote) {
 			pos += bits.TrailingZeros32(bs)
 			break
-		}
-		if opts&(1<<5) != 0 && cParityAtFirst(control, quote) {
-			return pos, false
 		}
 		pos += 32
 	}

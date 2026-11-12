@@ -76,6 +76,7 @@ const (
 	OP_marshal_p
 	OP_marshal_text
 	OP_marshal_text_p
+	OP_marshal_text_key
 	OP_marshal_append
 	OP_marshal_append_p
 	OP_cond_set
@@ -105,6 +106,8 @@ const (
 	OP_is_zero_2
 	OP_is_zero_4
 	OP_is_zero_8
+	OP_is_zero_f32
+	OP_is_zero_f64
 	OP_is_zero_map
 	OP_is_zero
 )
@@ -145,23 +148,26 @@ var _OpNames = [256]string{
 	OP_is_nil_p1:        "is_nil_p1",
 	OP_is_zero_1:        "is_zero_1",
 	OP_is_zero_2:        "is_zero_2",
-	OP_is_zero_4:        "is_zero_4",
-	OP_is_zero_8:        "is_zero_8",
-	OP_is_zero_map:      "is_zero_map",
-	OP_is_zero:          "is_zero",
-	OP_goto:             "goto",
-	OP_map_iter:         "map_iter",
-	OP_map_stop:         "map_stop",
-	OP_map_check_key:    "map_check_key",
-	OP_map_write_key:    "map_write_key",
-	OP_map_value_next:   "map_value_next",
-	OP_map_string_any:   "map_string_any",
-	OP_slice_begin:      "slice_begin",
-	OP_slice_next:       "slice_next",
-	OP_marshal:          "marshal",
-	OP_marshal_p:        "marshal_p",
-	OP_marshal_text:     "marshal_text",
-	OP_marshal_text_p:   "marshal_text_p",
+	OP_is_zero_4:           "is_zero_4",
+	OP_is_zero_8:           "is_zero_8",
+	OP_is_zero_f32:         "is_zero_f32",
+	OP_is_zero_f64:         "is_zero_f64",
+	OP_is_zero_map:         "is_zero_map",
+	OP_is_zero:             "is_zero",
+	OP_goto:                "goto",
+	OP_map_iter:            "map_iter",
+	OP_map_stop:            "map_stop",
+	OP_map_check_key:       "map_check_key",
+	OP_map_write_key:       "map_write_key",
+	OP_map_value_next:      "map_value_next",
+	OP_map_string_any:      "map_string_any",
+	OP_slice_begin:         "slice_begin",
+	OP_slice_next:          "slice_next",
+	OP_marshal:             "marshal",
+	OP_marshal_p:           "marshal_p",
+	OP_marshal_text:        "marshal_text",
+	OP_marshal_text_p:      "marshal_text_p",
+	OP_marshal_text_key:    "marshal_text_key",
 	OP_marshal_append:   "marshal_append",
 	OP_marshal_append_p: "marshal_append_p",
 	OP_cond_set:         "cond_set",
@@ -498,6 +504,8 @@ func (self Instr) Disassemble() string {
 		OP_is_zero_2,
 		OP_is_zero_4,
 		OP_is_zero_8,
+		OP_is_zero_f32,
+		OP_is_zero_f64,
 		OP_is_zero_map,
 		OP_goto,
 		OP_map_check_key,
@@ -512,6 +520,7 @@ func (self Instr) Disassemble() string {
 		OP_marshal_p,
 		OP_marshal_text,
 		OP_marshal_text_p,
+		OP_marshal_text_key,
 		OP_marshal_append,
 		OP_marshal_append_p,
 		OP_map_iter,

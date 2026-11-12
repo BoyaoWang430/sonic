@@ -72,18 +72,18 @@ func (c *compiler) compileInt(vt reflect.Type) decFunc {
 		case reflect.Uint:
 			fallthrough
 		case reflect.Uintptr:
-			return &u32Decoder{}
+			return &u32Decoder{typ: vt}
 		case reflect.Int:
-			return &i32Decoder{}
+			return &i32Decoder{typ: vt}
 		}
 	case 8:
 		switch vt.Kind() {
 		case reflect.Uint:
 			fallthrough
 		case reflect.Uintptr:
-			return &u64Decoder{}
+			return &u64Decoder{typ: vt}
 		case reflect.Int:
-			return &i64Decoder{}
+			return &i64Decoder{typ: vt}
 		}
 	default:
 		panic("not supported pointer size: " + fmt.Sprint(vt.Size()))
@@ -139,27 +139,27 @@ func (c *compiler) compileBasic(vt reflect.Type) decFunc {
 	}()
 	switch vt.Kind() {
 	case reflect.Bool:
-		return &boolDecoder{}
+		return &boolDecoder{typ: vt}
 	case reflect.Int8:
-		return &i8Decoder{}
+		return &i8Decoder{typ: vt}
 	case reflect.Int16:
-		return &i16Decoder{}
+		return &i16Decoder{typ: vt}
 	case reflect.Int32:
-		return &i32Decoder{}
+		return &i32Decoder{typ: vt}
 	case reflect.Int64:
-		return &i64Decoder{}
+		return &i64Decoder{typ: vt}
 	case reflect.Uint8:
-		return &u8Decoder{}
+		return &u8Decoder{typ: vt}
 	case reflect.Uint16:
-		return &u16Decoder{}
+		return &u16Decoder{typ: vt}
 	case reflect.Uint32:
-		return &u32Decoder{}
+		return &u32Decoder{typ: vt}
 	case reflect.Uint64:
-		return &u64Decoder{}
+		return &u64Decoder{typ: vt}
 	case reflect.Float32:
-		return &f32Decoder{}
+		return &f32Decoder{typ: vt}
 	case reflect.Float64:
-		return &f64Decoder{}
+		return &f64Decoder{typ: vt}
 	case reflect.Uint:
 		fallthrough
 	case reflect.Uintptr:
@@ -223,7 +223,7 @@ func (c *compiler) compileString(vt reflect.Type) decFunc {
 	if vt == jsonNumberType {
 		return &numberDecoder{}
 	}
-	return &stringDecoder{}
+	return &stringDecoder{typ: vt}
 
 }
 
@@ -273,34 +273,25 @@ func (c *compiler) compileSlice(vt reflect.Type) decFunc {
 	switch vt {
 	case sliceEfaceType:
 		return &sliceEfaceDecoder{}
+	case sliceIntType:
+		return &sliceIntDecoder{}
+	case sliceI32Type:
+		return &sliceI32Decoder{}
+	case sliceI64Type:
+		return &sliceI64Decoder{}
+	case sliceUintType:
+		return &sliceUintDecoder{}
+	case sliceU32Type:
+		return &sliceU32Decoder{}
+	case sliceU64Type:
+		return &sliceU64Decoder{}
 	case sliceF64Type:
 		return &sliceF64Decoder{}
 	case sliceF32Type:
 		return &sliceF32Decoder{}
 	case sliceBoolType:
 		return &sliceBoolDecoder{}
-	}
-	switch et.Kind() {
-	case reflect.Int32:
-		return &sliceI32Decoder{}
-	case reflect.Int64:
-		return &sliceI64Decoder{}
-	case reflect.Int:
-		if et.Size() == 8 {
-			return &sliceI64Decoder{}
-		}
-		return &sliceI32Decoder{}
-	case reflect.Uint32:
-		return &sliceU32Decoder{}
-	case reflect.Uint64:
-		return &sliceU64Decoder{}
-	case reflect.Uint, reflect.Uintptr:
-		if et.Size() == 8 {
-			return &sliceU64Decoder{}
-		}
-		return &sliceU32Decoder{}
-	}
-	if et.Kind() == reflect.String && et != jsonNumberType {
+	case sliceStringType:
 		return &sliceStringDecoder{}
 	}
 

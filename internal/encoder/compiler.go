@@ -440,7 +440,9 @@ func (self *Compiler) compileMapBodyTextKey(p *ir.Program, vk reflect.Type) {
 }
 
 func (self *Compiler) compileMapBodyUtextKey(p *ir.Program, vk reflect.Type) {
-	if vk.Kind() != reflect.Ptr {
+	if vk.Kind() == reflect.Interface {
+		p.Rtt(ir.OP_marshal_text_key, vk)
+	} else if vk.Kind() != reflect.Ptr {
 		self.addMarshalerOp(p, ir.OP_marshal_text, vk, vars.EncodingTextMarshalerType)
 	} else {
 		self.compileMapBodyUtextPtr(p, vk)
@@ -1044,9 +1046,9 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 	case reflect.Uintptr:
 		p.Add(ir.OP_is_zero_ints())
 	case reflect.Float32:
-		p.Add(ir.OP_is_zero_4)
+		p.Add(ir.OP_is_zero_f32)
 	case reflect.Float64:
-		p.Add(ir.OP_is_zero_8)
+		p.Add(ir.OP_is_zero_f64)
 	case reflect.String:
 		p.Add(ir.OP_is_nil_p1)
 	case reflect.Interface:

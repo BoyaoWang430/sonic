@@ -63,11 +63,13 @@ func (d *mapStrIntDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsI64(ctx)
 		if !ok || (is32BitInt && (ret > math.MaxInt32 || ret < math.MinInt32)) {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, intType)
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = 0
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, intType)
 			}
 			next = val.Next()
 		} else {
@@ -104,11 +106,13 @@ func (d *mapStrI64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsI64(ctx)
 		if !ok {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, int64Type)
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = 0
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, int64Type)
 			}
 			next = val.Next()
 		} else {
@@ -145,11 +149,13 @@ func (d *mapStrU64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsU64(ctx)
 		if !ok {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, uint64Type)
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = 0
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, uint64Type)
 			}
 			next = val.Next()
 		} else {
@@ -186,11 +192,13 @@ func (d *mapStrF64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsF64(ctx)
 		if !ok {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, float64Type)
+			m[key] = 0
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = 0
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, float64Type)
 			}
 			next = val.Next()
 		} else {
@@ -227,11 +235,13 @@ func (d *mapStrBoolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) 
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsBool()
 		if !ok {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, boolType)
+			m[key] = false
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = false
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, boolType)
 			}
 			next = val.Next()
 		} else {
@@ -277,11 +287,13 @@ func (d *mapIntStrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsStr(ctx)
 		if !ok {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, stringType)
+			m[key] = ""
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = ""
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, stringType)
 			}
 			next = val.Next()
 		} else {
@@ -326,11 +338,13 @@ func (d *mapI64StrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsStr(ctx)
 		if !ok {
-			if !val.IsNull() && gerr == nil {
-				gerr = error_mismatch(val, ctx, stringType)
+			m[key] = ""
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
 			}
-			if _, exists := m[key]; !exists {
-				m[key] = ""
+			if gerr == nil {
+				gerr = error_mismatch(val, ctx, stringType)
 			}
 			next = val.Next()
 		} else {
@@ -377,17 +391,6 @@ func decodeMapEntry(mv, kv, ev, zeroElem reflect.Value, ep unsafe.Pointer, elemT
 	if freshElem {
 		ev = reflect.New(elemType).Elem()
 		ep = ev.Addr().UnsafePointer()
-		if mv.Len() > 0 {
-			if existing := mv.MapIndex(kv); existing.IsValid() {
-				ev.Set(existing)
-			}
-		}
-	} else if mv.Len() > 0 {
-		if existing := mv.MapIndex(kv); existing.IsValid() {
-			ev.Set(existing)
-		} else {
-			ev.Set(zeroElem)
-		}
 	} else {
 		ev.Set(zeroElem)
 	}

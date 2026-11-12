@@ -8,8 +8,8 @@
 // X14/X15 input/output bases; X16 original length; X17 saw-escape.
 // X18 current Unicode escape's original offset; X19 first UTF-16/code point.
 // X22-X24 hex cursor/count/accumulator; X29 selects first/second UTF-16 unit.
-// X8 classified block end; X9 current 64-bit mask chunk's input base.
-// X20 event mask; X31 mask chunk index. V2 retains the whole block's mask.
+// X28 classified block end; X9 current 64-bit mask chunk's input base.
+// X20 event mask; X30 mask chunk index. V2 retains the whole block's mask.
 TEXT ·stringDecode(SB), NOSPLIT, $0-72
 	MOV	src+0(FP), X10
 	MOV	size+8(FP), X11
@@ -62,8 +62,8 @@ decode_mask:
 	// A mask occupies one vector register regardless of the input LMUL.
 	// Read its current 64-bit chunk, including when actual VL exceeds 64.
 	VSETIVLI $1, E64, M1, TA, MA, X0
-	BEQZ	X31, decode_mask_chunk0
-	VSLIDEDOWNVX X31, V2, V4
+	BEQZ	X30, decode_mask_chunk0
+	VSLIDEDOWNVX X30, V2, V4
 	VMVXS	V4, X20
 	JMP	decode_escape
 decode_mask_chunk0:
@@ -82,10 +82,10 @@ decode_non_escape:
 	JMP	decode_error
 
 decode_event_block:
-	ADD	X5, X10, X8
+	ADD	X5, X10, X28
 	AND	$-64, X6, X9
 	ADD	X10, X9
-	SRL	$6, X6, X31
+	SRL	$6, X6, X30
 	JMP	decode_copy
 
 decode_escape:
@@ -150,16 +150,16 @@ decode_resume:
 	// Escape decoding consumes input independently of output contraction.
 	// Reuse classifications ahead of the new input cursor; crossing escapes
 	// may consume a chunk boundary or the end of the classified block.
-	BGEU	X10, X8, decode_scan
+	BGEU	X10, X28, decode_scan
 	SUB	X9, X10, X6
 	MOV	$64, X5
 	BLTU	X6, X5, decode_mask_ready
 	AND	$-64, X6, X5
 	ADD	X5, X9
 	SRL	$6, X5
-	ADD	X5, X31
+	ADD	X5, X30
 	VSETIVLI $1, E64, M1, TA, MA, X0
-	VSLIDEDOWNVX X31, V2, V4
+	VSLIDEDOWNVX X30, V2, V4
 	VMVXS	V4, X20
 	AND	$63, X6
 decode_mask_ready:
@@ -168,7 +168,7 @@ decode_mask_ready:
 	SRL	X6, X20, X7
 	CTZ	X7, X6
 	ADD	$64, X9, X5
-	MINU	X8, X5, X5
+	MINU	X28, X5, X5
 	SUB	X10, X5, X5
 	// Without another event, resume the ordinary full-width scan rather
 	// than splitting clean input into individual mask chunks for copying.

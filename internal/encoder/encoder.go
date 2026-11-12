@@ -238,6 +238,7 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	origLen := len(*buf)
 	err := encodeIntoCheckRace(buf, val, opts)
 	if err != nil {
+		*buf = (*buf)[:origLen]
 		return err
 	}
 	if !vars.UseVM {

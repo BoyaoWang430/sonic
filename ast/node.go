@@ -753,13 +753,20 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 			}
 			if wi < len(raw) {
 				if raw[wi] == '}' {
-					lp := new(linkedPairs)
-					lp.head[0] = Pair{Key: key, Value: node}
-					lp.size = 1
-					*self = Node{t: types.V_OBJECT, l: 1, p: unsafe.Pointer(lp)}
-					return false, nil
+					ti := wi + 1
+					for ti < len(raw) && (raw[ti] == ' ' || raw[ti] == '\n' || raw[ti] == '\r' || raw[ti] == '\t') {
+						ti++
+					}
+					if ti == len(raw) {
+						lp := new(linkedPairs)
+						lp.head[0] = Pair{Key: key, Value: node}
+						lp.size = 1
+						*self = Node{t: types.V_OBJECT, l: 1, p: unsafe.Pointer(lp)}
+						return false, nil
+					}
 				}
 				if raw[wi] == '"' {
+					orig := *self
 					st := new(parseObjectStack)
 					st.parser.s = raw
 					st.parser.p = wi
@@ -767,7 +774,17 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 					self.l = 0
 					self.p = unsafe.Pointer(st)
 					p, _ := self.skipKeyLazy(key, 0)
+					if p != nil && p.t == V_ERROR {
+						*self = orig
+						return false, &Node{t: p.t, l: p.l, p: p.p, m: p.m}
+					}
 					if !p.Exists() {
+						if self.isLazy() {
+							if err := self.skipAllKey(); err != nil {
+								*self = orig
+								return false, err
+							}
+						}
 						if self.len() == 0 {
 							*self = newObject(new(linkedPairs))
 						}
@@ -775,8 +792,6 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 						s.Push(NewPair(key, node))
 						self.l++
 						return false, nil
-					} else if p.t == V_ERROR {
-						return false, &Node{t: p.t, l: p.l, p: p.p, m: p.m}
 					}
 					*p = node
 					return true, nil
@@ -802,9 +817,16 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 	}
 
 	p := self.Get(key)
+	if p != nil && p.t == V_ERROR {
+		return false, p.Check()
+	}
 
 	if !p.Exists() {
-		// self must be fully-loaded here
+		if self.isLazy() {
+			if err := self.skipAllKey(); err != nil {
+				return false, err
+			}
+		}
 		if self.len() == 0 {
 			*self = newObject(new(linkedPairs))
 		}
@@ -812,9 +834,6 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 		s.Push(NewPair(key, node))
 		self.l++
 		return false, nil
-
-	} else if err := p.Check(); err != nil {
-		return false, err
 	}
 
 	*p = node
@@ -836,10 +855,11 @@ func (self *Node) Unset(key string) (bool, error) {
 		return false, err
 	}
 	p, i := self.skipKey(key)
+	if p != nil && p.t == V_ERROR {
+		return false, p.Check()
+	}
 	if !p.Exists() {
 		return false, nil
-	} else if err := p.Check(); err != nil {
-		return false, err
 	}
 	self.removePairAt(i)
 	return true, nil
@@ -862,10 +882,11 @@ func (self *Node) SetByIndex(index int, node Node) (bool, error) {
 	}
 
 	p := self.Index(index)
+	if p != nil && p.t == V_ERROR {
+		return false, p.Check()
+	}
 	if !p.Exists() {
 		return false, ErrNotExist
-	} else if err := p.Check(); err != nil {
-		return false, err
 	}
 
 	*p = node

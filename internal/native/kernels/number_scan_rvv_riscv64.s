@@ -115,8 +115,8 @@ strict_short_limit:
 	MOV	$8, X14
 strict_short_scan:
 	BEQ	X5, X11, strict_short_done
-	ADD	X5, X10, X8
-	MOVBU	0(X8), X6
+	ADD	X5, X10, X28
+	MOVBU	0(X28), X6
 	SUB	X16, X6, X7
 	BGEU	X7, X17, strict_short_boundary
 	BEQ	X5, X14, strict_continue_markers // ninth digit: continue with RVV
@@ -156,16 +156,16 @@ strict_scan:
 	VSETIVLI $1, E64, M1, TA, MA, X0
 	VMVXS	V2, X23
 	SUB	X5, X7, X7
-	MOV	$-1, X8
-	SRL	X7, X8
-	AND	X8, X23                 // discard mask-agnostic tail bits
+	MOV	$-1, X28
+	SRL	X7, X28
+	AND	X28, X23                // discard mask-agnostic tail bits
 strict_event:
 	CTZ	X23, X6
-	ADD	X6, X10, X8
-	MOVBU	0(X8), X7
+	ADD	X6, X10, X28
+	MOVBU	0(X28), X7
 	BEQ	X7, X18, strict_dot_event
-	OR	X26, X7, X8
-	BEQ	X8, X19, strict_exponent_event
+	OR	X26, X7, X28
+	BEQ	X28, X19, strict_exponent_event
 	BEQ	X7, X24, strict_sign_event
 	BEQ	X7, X25, strict_sign_event
 	// The first non-candidate ends this number. Later mask bits belong to

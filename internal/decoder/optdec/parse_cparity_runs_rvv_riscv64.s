@@ -890,16 +890,10 @@ runs_string_event:
 	MOVBU 0(X7), X10
 	BEQ X10, X29, runs_string_plain_at
 	BEQ X10, X30, runs_string_first_escape
-	// A raw control comes first. The first backslash before the block's first
-	// quote still takes priority; otherwise report this control.
-	VFIRSTM V2, X14
-	BLTZ X14, runs_string_plain_control_error
-	VFIRSTM V3, X16
-	BLTZ X16, runs_string_control_escape
-	BLTU X16, X14, runs_string_plain_control_error
-runs_string_control_escape:
-	MOV X14, X6
-	JMP runs_string_first_escape
+	ADD X6, X21
+	MOV $-const_SONIC_CONTROL_CHAR, X10
+	MOV $-1, X11
+	RET
 
 runs_string_plain_at:
 	ADD X6, X21
@@ -914,12 +908,6 @@ runs_string_first_escape:
 	// ASCII decoding and Unicode resumes share one escaped-string body,
 	// without a nested call.
 	JMP runs_string_continue<>(SB)
-
-runs_string_plain_control_error:
-	ADD X6, X21
-	MOV $-const_SONIC_CONTROL_CHAR, X10
-	MOV $-1, X11
-	RET
 
 // Input: X21 source, X11 next output byte, X12 original content start, X20
 // options. Entry is either the first backslash or the byte after Go's Unicode

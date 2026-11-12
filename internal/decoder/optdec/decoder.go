@@ -2,6 +2,7 @@ package optdec
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"reflect"
 	"unsafe"
 
@@ -50,11 +51,11 @@ var (
 	mapEfaceRootDec   = &mapEfaceDecoder{}
 	sliceEfaceRootDec = &sliceEfaceDecoder{}
 	mapStringRootDec  = &mapStringDecoder{}
-	stringRootDec     = &stringDecoder{}
+	stringRootDec     = &stringDecoder{typ: stringType}
 	intRootDec        = (&compiler{}).compileInt(intType)
-	int64RootDec      = &i64Decoder{}
-	float64RootDec    = &f64Decoder{}
-	boolRootDec       = &boolDecoder{}
+	int64RootDec      = &i64Decoder{typ: int64Type}
+	float64RootDec    = &f64Decoder{typ: float64Type}
+	boolRootDec       = &boolDecoder{typ: boolType}
 )
 
 func unpackRootValue(val interface{}) (etp reflect.Type, vp unsafe.Pointer, err error) {
@@ -169,13 +170,15 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 
 const giantReadOnlyScanThreshold uintptr = 4 << 20
 
+var errGiantStreamFallback = stderrors.New("optdec: giant stream fallback")
+
 // DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
 func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return s, 0, err
 	}
-	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree) {
+	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUse(len(s))) {
 		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
 
@@ -186,6 +189,9 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	defer p.free()
 
 	ctx, err := newContextOnParserWithPlan(p, f, etp, proj)
+	if err == errGiantStreamFallback {
+		return decodeGiantOneCompiled(s, f, etp, vp, dec)
+	}
 	if p.Utf8Inv {
 		s = p.Json
 	}
@@ -220,7 +226,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
 		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
 		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
-		(proj == nil || !proj.hasRawSubtree) {
+		(proj == nil || !proj.hasRawSubtree || !proj.shouldUse(len(*s)-origPos)) {
 		*i = origPos
 		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
@@ -233,6 +239,10 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	defer p.free()
 
 	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, proj)
+	if err == errGiantStreamFallback {
+		*i = origPos
+		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
+	}
 	if p.Utf8Inv {
 		*s = parserCorrectedSource(p, *s, origPos)
 	}

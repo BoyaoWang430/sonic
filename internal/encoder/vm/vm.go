@@ -361,6 +361,15 @@ func ExecuteRange(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog
 			if err := prim.EncodeTextMarshaler(&buf, v, flags); err != nil {
 				return err
 			}
+		case ir.OP_marshal_text_key:
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				return &json.UnsupportedValueError{Value: rv, Str: "nil interface map key"}
+			}
+			if err := prim.EncodeTextMarshaler(&buf, rv.Interface().(encoding.TextMarshaler), flags); err != nil {
+				return err
+			}
 		case ir.OP_map_write_key:
 			if has_opts(flags, alg.BitSortMapKeys) {
 				v := *(*string)(p)
@@ -429,6 +438,16 @@ func ExecuteRange(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog
 			}
 		case ir.OP_is_zero_8:
 			if *(*uint64)(p) == 0 {
+				pc = ins.Vi()
+				continue
+			}
+		case ir.OP_is_zero_f32:
+			if (*(*uint32)(p) &^ (1 << 31)) == 0 {
+				pc = ins.Vi()
+				continue
+			}
+		case ir.OP_is_zero_f64:
+			if (*(*uint64)(p) &^ (1 << 63)) == 0 {
 				pc = ins.Vi()
 				continue
 			}

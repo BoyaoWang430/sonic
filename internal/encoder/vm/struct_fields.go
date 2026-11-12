@@ -1164,7 +1164,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			}
 			buf = alg.AppendPaddedKeyU64(buf, keyPtr, keyLen, uint64(v))
 		case ir.OP_f64:
-			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint64)(fp) == 0 {
+			if (sflags&ir.SpecFlagOmitEmpty != 0) && (*(*uint64)(fp)&^(1<<63)) == 0 {
 				continue
 			}
 			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
@@ -1183,7 +1183,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			}
 			buf = alg.F64toa(buf, v)
 		case ir.OP_f32:
-			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint32)(fp) == 0 {
+			if (sflags&ir.SpecFlagOmitEmpty != 0) && (*(*uint32)(fp)&^(1<<31)) == 0 {
 				continue
 			}
 			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
@@ -1704,7 +1704,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			}
 			buf = alg.AppendPaddedKeyU64(buf, keyPtr, keyLen, uint64(v))
 		case ir.OP_f64:
-			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint64)(fp) == 0 {
+			if (sflags&ir.SpecFlagOmitEmpty != 0) && (*(*uint64)(fp)&^(1<<63)) == 0 {
 				continue
 			}
 			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)
@@ -1723,7 +1723,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			}
 			buf = alg.F64toa(buf, v)
 		case ir.OP_f32:
-			if (sflags&ir.SpecFlagOmitEmpty != 0) && *(*uint32)(fp) == 0 {
+			if (sflags&ir.SpecFlagOmitEmpty != 0) && (*(*uint32)(fp)&^(1<<31)) == 0 {
 				continue
 			}
 			keyPtr, keyLen := (*byte)(spec.Ptr), int(spec.KeyLen)

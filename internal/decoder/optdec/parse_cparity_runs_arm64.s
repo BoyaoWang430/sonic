@@ -912,9 +912,9 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	MOVD $0, R8
 
 	// Most keys fit in one vector. A single combined event mask is enough
-	// when the first event is the closing quote. Every other outcome falls
-	// back without changing the cursor or input, preserving C's full 32-byte
-	// error priority. This probe runs only once, not in the long-string loop.
+	// Short plain-string probe: inspect 16 bytes for earliest quote, backslash,
+	// or (when ValidateString is enabled) raw control byte. This probe runs only
+	// once before entering the 32-byte loop.
 	VLD1 (R22), [V0.B16]
 	VCMEQ V20.B16, V0.B16, V4.B16
 	VCMEQ V21.B16, V0.B16, V6.B16
@@ -941,12 +941,15 @@ runs_string_short_check:
 	MOVBU (R22)(R9), R11
 	CMP $34, R11
 	BEQ runs_string_plain_at
-	TBZ $5, R21, runs_string_first_escape_at
-	B runs_string_scan_val
+	CMP $92, R11
+	BEQ runs_string_first_escape_at
+	ADD R9, R22
+	MOVD $-const_SONIC_CONTROL_CHAR, R9
+	B runs_string_plain_return
 
 runs_string_short_miss:
-	TBNZ $5, R21, runs_string_scan_val
 	ADD $16, R22
+	TBNZ $5, R21, runs_string_scan_val
 runs_string_scan_fast:
 	CP_RUNS_STRING_MASKS
 	SUBW $1, R6, R9
@@ -965,12 +968,13 @@ runs_string_scan_val:
 	SUBW $1, R9, R9
 	TSTW R7, R9
 	BNE runs_string_plain_done
-	// Initial C scan prioritizes a backslash even if a control precedes it.
+	ORRW R6, R7, R9
+	SUBW $1, R9, R9
+	TSTW R8, R9
+	BNE runs_string_plain_control_error
 	SUBW $1, R7, R9
 	TSTW R6, R9
 	BNE runs_string_first_escape
-	TSTW R8, R9
-	BNE runs_string_plain_control_error
 	ADD $32, R22
 	B runs_string_scan_val
 

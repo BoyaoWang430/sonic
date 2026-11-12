@@ -1002,7 +1002,7 @@ func LoadsUseNumber(src string) (int, interface{}, error) {
 	ps := Parser{s: src, noLazy: true, noIndex: true}
 	x, perr, err := ps.parseInterface(true)
 	if perr != 0 {
-		return 0, nil, perr
+		return 0, nil, ps.ExportError(perr)
 	}
 	if err != nil {
 		return 0, nil, err

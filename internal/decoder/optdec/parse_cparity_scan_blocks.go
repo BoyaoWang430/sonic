@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
 
 package optdec
 
@@ -71,13 +71,12 @@ func cParityParseStringOpt(cur *unsafe.Pointer, hasEsc *bool, opts uint64, stric
 			*cur, *hasEsc = p, false
 			return int(uintptr(p)-uintptr(start)) - 1
 		}
-		// C checks backslash before raw controls in the initial scan.
-		if cParityAtFirst(bs, quote) {
-			break
-		}
-		if opts&(1<<5) != 0 && cParityAtFirst(control, quote) {
+		if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
 			*cur = unsafe.Add(p, bits.TrailingZeros32(control))
 			return -SONIC_CONTROL_CHAR
+		}
+		if cParityAtFirst(bs, quote) {
+			break
 		}
 		p = unsafe.Add(p, 32)
 	}

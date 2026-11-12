@@ -176,6 +176,18 @@ func (d *sliceEfaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) 
 	return decoder.FromDom(vp, node, ctx)
 }
 
+type sliceIntDecoder struct {
+}
+
+func (d *sliceIntDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]int)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceInt(ctx, vp)
+}
+
 type sliceI32Decoder struct {
 }
 
@@ -198,6 +210,18 @@ func (d *sliceI64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) er
 	}
 
 	return node.AsSliceI64(ctx, vp)
+}
+
+type sliceUintDecoder struct {
+}
+
+func (d *sliceUintDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]uint)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceUint(ctx, vp)
 }
 
 type sliceU32Decoder struct {

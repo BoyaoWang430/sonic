@@ -559,7 +559,8 @@ func TestCase_SYN_PREMUT(t *testing.T) {
 }
 
 // Case MAP-VALUE-REPLACE: v1 replaces an existing map value before decoding
-// an object into it. Sonic merges the object into the old map value instead.
+// an object into it. Sonic OptDec now aligns with encoding/json and replaces
+// the old map value rather than merging into stale state.
 func TestCase_MAP_VALUE_REPLACE(t *testing.T) {
 	type V struct {
 		Old bool
@@ -571,8 +572,8 @@ func TestCase_MAP_VALUE_REPLACE(t *testing.T) {
 
 	require.NoError(t, sonic.ConfigStd.Unmarshal(data, &s))
 	require.NoError(t, json.Unmarshal(data, &j))
-	require.Equal(t, V{Old: true, New: true}, s["k"], "sonic merges into the old map value")
 	require.Equal(t, V{New: true}, j["k"], "std replaces the old map value")
+	require.Equal(t, j["k"], s["k"], "sonic replaces the old map value matching std")
 }
 
 // Case STRING-GONUM: v1's ,string mode delegates numeric parsing to strconv.

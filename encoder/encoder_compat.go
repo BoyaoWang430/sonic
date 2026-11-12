@@ -1,4 +1,4 @@
-//go:build ((!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
+//go:build ((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -195,16 +195,21 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	if buf == nil {
 		panic("user-supplied buffer buf is nil")
 	}
+	origLen := len(*buf)
 	w := bytes.NewBuffer(*buf)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML((opts & EscapeHTML) != 0)
 	err := enc.Encode(val)
+	if err != nil {
+		*buf = (*buf)[:origLen]
+		return err
+	}
 	*buf = w.Bytes()
 	l := len(*buf)
 	if l > 0 && (opts&NoEncoderNewline != 0) && (*buf)[l-1] == '\n' {
 		*buf = (*buf)[:l-1]
 	}
-	return err
+	return nil
 }
 
 // HTMLEscape appends to dst the JSON-encoded src with <, >, &, U+2028 and U+2029

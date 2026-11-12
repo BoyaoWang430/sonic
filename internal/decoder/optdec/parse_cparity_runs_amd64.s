@@ -1,4 +1,4 @@
-//go:build amd64 && go1.17 && !go1.28
+//go:build amd64 && go1.20 && !go1.28
 
 #include "textflag.h"
 #include "funcdata.h"
@@ -1046,17 +1046,7 @@ runs_string_avx2_event_val:
 	JE   runs_string_plain_at
 	CMPB AL, $92
 	JE   runs_string_avx2_escape
-	// Raw control char at CX; preserve C-parity backslash priority before first quote.
-	MOVL CX, R8
-	VPCMPEQB Y13, Y0, Y4
-	VPMOVMSKB Y4, R9
-	VPCMPEQB Y14, Y0, Y5
-	VPMOVMSKB Y5, R10
-	MOVL R10, AX
-	DECL AX
-	TESTL R9, AX
-	JNZ  runs_string_first_escape
-	ADDQ R8, SI
+	ADDQ CX, SI
 	MOVQ $-const_SONIC_CONTROL_CHAR, AX
 	MOVQ R11, BX
 	RET
@@ -1105,12 +1095,15 @@ runs_string_scan_sse_events:
 	DECL AX
 	TESTL R10, AX
 	JNZ  runs_string_plain_done
+	MOVL R9, AX
+	ORL  R10, AX
+	DECL AX
+	TESTL R8, AX
+	JNZ  runs_string_plain_control_error
 	MOVL R10, AX
 	DECL AX
 	TESTL R9, AX
 	JNZ  runs_string_first_escape
-	TESTL R8, AX
-	JNZ  runs_string_plain_control_error
 	ADDQ $32, SI
 	JMP  runs_string_scan_sse
 
