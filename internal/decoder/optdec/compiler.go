@@ -327,7 +327,10 @@ func (c *compiler) compileSliceBytes(vt reflect.Type) decFunc {
 		}
 	}
 
-	return &sliceBytesDecoder{}
+	return &sliceBytesDecoder{
+		typ:      vt,
+		elemType: vt.Elem(),
+	}
 }
 
 func (c *compiler) compileInterface(vt reflect.Type) decFunc {

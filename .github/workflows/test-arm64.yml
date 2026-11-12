@@ -47,6 +47,15 @@ jobs:
       - name: Issue Test
         run: GOMAXPROCS=4 go test -race ./issue_test
 
+      - name: Compatibility Test
+        run: GOMAXPROCS=4 go test ./compatibility/ -count=1
+
+      - name: Go 1.27 Compatibility Tests
+        if: startsWith(matrix.go-version, '1.27')
+        run: |
+          GOEXPERIMENT=nojsonv2 GOMAXPROCS=4 go test -race ./issue_test
+          GOEXPERIMENT=nojsonv2 GOMAXPROCS=4 go test ./compatibility/ -count=1
+
       - name: Generic Test
         run: GOMAXPROCS=4 go test -race ./generic_test
 

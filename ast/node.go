@@ -2052,17 +2052,29 @@ func (self *Node) removePair(i int) {
 	if last == nil {
 		return
 	}
-	*last = Pair{}
+	if !last.isUnset() {
+		if !self.isLazy() {
+			if s := (*linkedPairs)(self.p); s != nil && s.index != nil {
+				delete(s.index, last.Key)
+			}
+		} else {
+			_, stack := self.getParserAndObjectStack()
+			if stack.v.index != nil {
+				delete(stack.v.index, last.Key)
+			}
+		}
+	}
+	*last = tombstonePair
 	// NOTICE: should be consistent with linkedPair.Len()
 	self.l--
 }
 
 func (self *Node) removePairAt(i int) {
-	p := (*linkedPairs)(self.p).At(i)
-	if p == nil {
+	s := (*linkedPairs)(self.p)
+	if s == nil || s.At(i) == nil {
 		return
 	}
-	*p = Pair{}
+	s.Unset(i)
 	// NOTICE: should be consistent with linkedPair.Len()
 	self.l--
 }
@@ -2272,7 +2284,19 @@ func (self *Node) toGenericArrayUseNode() ([]Node, error) {
 
 	var s = (*linkedNodes)(self.p)
 	var out = make([]Node, nb)
-	s.ToSlice(out)
+	if !self.isLazy() && s != nil && s.Len() == nb {
+		s.ToSlice(out)
+		return out, nil
+	}
+	it := self.values()
+	for i := 0; i < nb; i++ {
+		n := it.next()
+		if n == nil {
+			out = out[:i]
+			break
+		}
+		out[i] = *n
+	}
 
 	return out, nil
 }

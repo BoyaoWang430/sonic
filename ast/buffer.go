@@ -198,6 +198,14 @@ func (self *linkedNodes) FromSlice(con []Node) {
 
 type pairChunk [_DEFAULT_NODE_CAP]Pair
 
+const _L_TOMBSTONE = ^uint(0)
+
+var tombstonePair = Pair{Value: Node{t: _V_NONE, l: _L_TOMBSTONE}}
+
+func (self *Pair) isUnset() bool {
+	return self.Value.loadt() == _V_NONE && self.Value.l == _L_TOMBSTONE
+}
+
 type linkedPairs struct {
 	index   map[string]int
 	head    pairChunk
@@ -225,13 +233,17 @@ func (self *linkedPairs) BuildIndex() {
 	if n <= _DEFAULT_NODE_CAP {
 		for i := 0; i < n; i++ {
 			p := &self.head[i]
-			self.index[p.Key] = i
+			if !p.isUnset() {
+				self.index[p.Key] = i
+			}
 		}
 		return
 	}
 	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
 		p := &self.head[i]
-		self.index[p.Key] = i
+		if !p.isUnset() {
+			self.index[p.Key] = i
+		}
 	}
 	idx := _DEFAULT_NODE_CAP
 	for _, chunk := range self.tail {
@@ -241,7 +253,9 @@ func (self *linkedPairs) BuildIndex() {
 		}
 		for j := 0; j < limit; j++ {
 			p := &chunk[j]
-			self.index[p.Key] = idx + j
+			if !p.isUnset() {
+				self.index[p.Key] = idx + j
+			}
 		}
 		idx += limit
 		if idx >= n {
@@ -308,10 +322,11 @@ func (self *linkedPairs) Pop() {
 
 func (self *linkedPairs) Unset(i int) {
 	if self.index != nil {
-		p := self.At(i)
-		delete(self.index, p.Key)
+		if p := self.At(i); p != nil && !p.isUnset() {
+			delete(self.index, p.Key)
+		}
 	}
-	self.set(i, Pair{})
+	self.set(i, tombstonePair)
 }
 
 func (self *linkedPairs) Set(i int, v Pair) {
@@ -373,7 +388,7 @@ func (self *linkedPairs) Get(key string) (*Pair, int) {
 		i, ok := self.index[key]
 		if ok {
 			n := self.At(i)
-			if n.Key == key {
+			if n != nil && n.Key == key && !n.isUnset() {
 				return n, i
 			}
 			// fallback
@@ -385,14 +400,14 @@ func (self *linkedPairs) Get(key string) (*Pair, int) {
 linear_search:
 	if self.size <= _DEFAULT_NODE_CAP {
 		for i := 0; i < self.size; i++ {
-			if n := &self.head[i]; n.Key == key {
+			if n := &self.head[i]; n.Key == key && !n.isUnset() {
 				return n, i
 			}
 		}
 		return nil, -1
 	}
 	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
-		if n := &self.head[i]; n.Key == key {
+		if n := &self.head[i]; n.Key == key && !n.isUnset() {
 			return n, i
 		}
 	}
@@ -403,7 +418,7 @@ linear_search:
 			limit = rem
 		}
 		for j := 0; j < limit; j++ {
-			if n := &chunk[j]; n.Key == key {
+			if n := &chunk[j]; n.Key == key && !n.isUnset() {
 				return n, (cIdx+1)*_DEFAULT_NODE_CAP + j
 			}
 		}
@@ -442,13 +457,17 @@ func (self *linkedPairs) ToMap(con map[string]Node) {
 	if n <= _DEFAULT_NODE_CAP {
 		for i := 0; i < n; i++ {
 			p := &self.head[i]
-			con[p.Key] = p.Value
+			if !p.isUnset() {
+				con[p.Key] = p.Value
+			}
 		}
 		return
 	}
 	for i := 0; i < _DEFAULT_NODE_CAP; i++ {
 		p := &self.head[i]
-		con[p.Key] = p.Value
+		if !p.isUnset() {
+			con[p.Key] = p.Value
+		}
 	}
 	rem := n - _DEFAULT_NODE_CAP
 	for _, chunk := range self.tail {
@@ -458,7 +477,9 @@ func (self *linkedPairs) ToMap(con map[string]Node) {
 		}
 		for j := 0; j < limit; j++ {
 			p := &chunk[j]
-			con[p.Key] = p.Value
+			if !p.isUnset() {
+				con[p.Key] = p.Value
+			}
 		}
 		rem -= limit
 		if rem <= 0 {
@@ -511,8 +532,12 @@ func (self *linkedPairs) Less(i, j int) bool {
 func (self *linkedPairs) Swap(i, j int) {
 	a, b := self.At(i), self.At(j)
 	if self.index != nil {
-		self.index[a.Key] = j
-		self.index[b.Key] = i
+		if !a.isUnset() {
+			self.index[a.Key] = j
+		}
+		if !b.isUnset() {
+			self.index[b.Key] = i
+		}
 	}
 	*a, *b = *b, *a
 }

@@ -14,9 +14,9 @@ jobs:
           - goriscv64: rva22u64
             qemu_cpu: rv64,zba=true,zbb=true,zbs=true
           - goriscv64: rva23u64
-            qemu_cpu: rv64,v=true,vlen=128,zba=true,zbb=true,zbs=true
+            qemu_cpu: rv64,v=true,vlen=128,zba=true,zbb=true,zbs=true,zicond=true,zfa=true,zfhmin=true,zcb=true
           - goriscv64: rva23u64
-            qemu_cpu: rv64,v=true,vlen=256,zba=true,zbb=true,zbs=true
+            qemu_cpu: rv64,v=true,vlen=256,zba=true,zbb=true,zbs=true,zicond=true,zfa=true,zfhmin=true,zcb=true
 
     runs-on: ubuntu-24.04
 
@@ -51,3 +51,4 @@ jobs:
           GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./...
           GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./issue_test
           GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./generic_test
+          GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 ./compatibility/

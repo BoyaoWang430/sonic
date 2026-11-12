@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bytedance/sonic/ast"
@@ -657,4 +659,193 @@ func TestOptBatchD_ASTMaterializedFastPathsAndTokenObjectSWAR(t *testing.T) {
 	afterUnset, err := obj.Index(1).Int64()
 	require.NoError(t, err)
 	require.Equal(t, int64(20), afterUnset)
+}
+
+func TestReviewRound2_P1_1_ASTTombstoneEmptyKeyAndIndex(t *testing.T) {
+	// 1. Object containing a valid empty key "": Unset("a") must not shadow "": 42 or produce duplicate "".
+	n1, err := GetFromString(`{"a": 1, "": 42}`)
+	require.NoError(t, err)
+	existed, err := n1.Unset("a")
+	require.NoError(t, err)
+	require.True(t, existed)
+
+	emptyVal, err := n1.Get("").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(42), emptyVal)
+
+	replaced, err := n1.Set("", ast.NewNumber("99"))
+	require.NoError(t, err)
+	require.True(t, replaced)
+
+	out1, err := n1.MarshalJSON()
+	require.NoError(t, err)
+	require.Equal(t, `{"":99}`, string(out1))
+
+	m1, err := n1.MapUseNode()
+	require.NoError(t, err)
+	require.Len(t, m1, 1)
+	mn := m1[""]
+	v99, err := mn.Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(99), v99)
+
+	// 2. Object without empty key: Unset("a") must still return nil / !Valid() / ErrNotExist on Get("").
+	n2, err := GetFromString(`{"a": 1, "b": 2}`)
+	require.NoError(t, err)
+	existed, err = n2.Unset("a")
+	require.NoError(t, err)
+	require.True(t, existed)
+	gEmpty := n2.Get("")
+	require.Nil(t, gEmpty)
+	require.False(t, gEmpty.Valid())
+	require.ErrorIs(t, gEmpty.Check(), ast.ErrNotExist)
+
+	// 3. Large indexed object (>16 keys, triggers BuildIndex) with "", Unset, UnsetByIndex, SortKeys, Pop.
+	var pairs []ast.Pair
+	pairs = append(pairs, ast.NewPair("", ast.NewNumber("777")))
+	for i := 0; i < 20; i++ {
+		pairs = append(pairs, ast.NewPair(fmt.Sprintf("k%02d", i), ast.NewNumber(fmt.Sprintf("%d", i))))
+	}
+	bigObj := ast.NewObject(pairs)
+	require.NoError(t, bigObj.LoadAll())
+
+	ok, err := bigObj.Unset("k00")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Nil(t, bigObj.Get("k00"))
+
+	ok, err = bigObj.UnsetByIndex(1) // removes k01
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Nil(t, bigObj.Get("k01"))
+
+	// Unset trailing k19 then Pop (exercises Pop over trailing tombstones without deleting "" from index).
+	ok, err = bigObj.Unset("k19")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, bigObj.Pop()) // pops k18
+	require.Nil(t, bigObj.Get("k18"))
+
+	require.NoError(t, bigObj.SortKeys(false))
+	v777, err := bigObj.Get("").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(777), v777)
+
+	// 4. Explicit Set("", Node{}) placeholder remains addressable via Get("") (TestNodeAny contract).
+	placeholderObj := ast.Node{}
+	_, err = placeholderObj.Set("", ast.Node{})
+	require.NoError(t, err)
+	require.NoError(t, placeholderObj.Get("").AddAny(nil))
+	pOut, err := placeholderObj.MarshalJSON()
+	require.NoError(t, err)
+	require.Equal(t, `{"":[null]}`, string(pOut))
+
+	// 5. Soft-deleted array ArrayUseNode consistency.
+	arrNode, err := GetFromString(`[10, 20, 30]`)
+	require.NoError(t, err)
+	ok, err = arrNode.UnsetByIndex(0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	elems, err := arrNode.ArrayUseNode()
+	require.NoError(t, err)
+	require.Len(t, elems, 2)
+	e0, _ := elems[0].Int64()
+	e1, _ := elems[1].Int64()
+	require.Equal(t, int64(20), e0)
+	require.Equal(t, int64(30), e1)
+}
+
+func TestReviewRound2_P1_2_AsSliceEfaceErrorReturned(t *testing.T) {
+	// End-to-end verification alongside optdec.TestAsSliceEfacePropagatesElementError.
+	var top []any
+	err := Unmarshal([]byte(`[1, 1e999, "ok"]`), &top)
+	require.Error(t, err)
+
+	type wrap struct {
+		Items []any `json:"items"`
+	}
+	var w wrap
+	err2 := Unmarshal([]byte(`{"items":[1, 1e999, "ok"]}`), &w)
+	require.Error(t, err2)
+}
+
+func TestReviewRound2_P1_3_AsSliceBytesArrayNullAndMismatch(t *testing.T) {
+	// 1. Pre-populated slice preserves element on null.
+	s1 := []byte{9, 8, 7, 6}
+	std1 := []byte{9, 8, 7, 6}
+	require.NoError(t, Unmarshal([]byte(`[1, null, 3]`), &s1))
+	require.NoError(t, json.Unmarshal([]byte(`[1, null, 3]`), &std1))
+	require.Equal(t, std1, s1)
+
+	// 2. Nested object inside []byte array skips subtree cleanly via Next() and reports byte element type.
+	s2 := []byte{9, 8, 7, 6}
+	std2 := []byte{9, 8, 7, 6}
+	errSonic := Unmarshal([]byte(`[{"a": 1}, 2]`), &s2)
+	errStd := json.Unmarshal([]byte(`[{"a": 1}, 2]`), &std2)
+	require.Error(t, errSonic)
+	require.Error(t, errStd)
+	require.Equal(t, std2, s2)
+	var mm *decoder.MismatchTypeError
+	require.ErrorAs(t, errSonic, &mm)
+	require.Equal(t, reflect.TypeOf(byte(0)), mm.Type)
+	require.Equal(t, 1, mm.Pos)
+
+	// 3. Named byte and named byte-slice types preserve custom reflect.Type in MismatchTypeError.
+	type MyByte uint8
+	type MyBytes []MyByte
+	var mb MyBytes
+	errElem := Unmarshal([]byte(`[1, "x", 3]`), &mb)
+	var mmElem *decoder.MismatchTypeError
+	require.ErrorAs(t, errElem, &mmElem)
+	require.Equal(t, reflect.TypeOf(MyByte(0)), mmElem.Type)
+	require.Equal(t, MyBytes{1, 0, 3}, mb)
+
+	var mb2 MyBytes
+	errOuter := Unmarshal([]byte(`123`), &mb2)
+	var mmOuter *decoder.MismatchTypeError
+	require.ErrorAs(t, errOuter, &mmOuter)
+	require.Equal(t, reflect.TypeOf(MyBytes(nil)), mmOuter.Type)
+}
+
+func TestReviewRound2_P2_1_PtrStructAndLargeStrPtrGCReclaim(t *testing.T) {
+	type richItem struct {
+		ID      int    `json:"id"`
+		Payload []byte `json:"payload"`
+		BigStr  *string `json:"big_str"`
+	}
+
+	bigText := strings.Repeat("Z", 2048)
+	var src []richItem
+	for i := 0; i < 16; i++ {
+		s := bigText
+		src = append(src, richItem{
+			ID:      i,
+			Payload: bytes.Repeat([]byte{byte(i + 1)}, 4096),
+			BigStr:  &s,
+		})
+	}
+	raw, err := json.Marshal(src)
+	require.NoError(t, err)
+
+	var reclaimed int32
+	keep := func() *richItem {
+		var decoded []*richItem
+		require.NoError(t, Unmarshal(raw, &decoded))
+		require.Len(t, decoded, 16)
+		// Attach finalizers to sibling *richItem and sibling *string (> maxArenaStrLen)
+		// while keeping decoded[0] alive.
+		runtime.SetFinalizer(decoded[5], func(*richItem) {
+			atomic.AddInt32(&reclaimed, 1)
+		})
+		runtime.SetFinalizer(decoded[5].BigStr, func(*string) {
+			atomic.AddInt32(&reclaimed, 1)
+		})
+		return decoded[0]
+	}()
+
+	for i := 0; i < 5 && atomic.LoadInt32(&reclaimed) < 2; i++ {
+		runtime.GC()
+	}
+	runtime.KeepAlive(keep)
+	require.Equal(t, int32(2), atomic.LoadInt32(&reclaimed), "sibling *richItem and >1KiB *string must be independently GC-reclaimable")
 }

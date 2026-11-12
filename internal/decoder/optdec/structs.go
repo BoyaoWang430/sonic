@@ -187,13 +187,14 @@ type structDecoder struct {
 	goType        reflect.Type
 	sliceType     reflect.Type
 	elemSize      uintptr
+	maxPtrBatch   uint16
 	fast          bool
 	ptrScalarHint uint8
 	ptrStrHint    uint8
 }
 
 func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {
-	if d.elemSize == 0 || d.sliceType == nil || p == nil {
+	if d.maxPtrBatch < 2 || d.sliceType == nil || p == nil {
 		return reflect.New(d.goType).UnsafePointer()
 	}
 	for i := range p.ptrStructSlabs {
@@ -234,7 +235,7 @@ func (d *structDecoder) allocPtrBatchSlow(slot *ptrStructSlabSlot) unsafe.Pointe
 	if n < 2 {
 		n = 4
 	}
-	maxBatch := int(8192 / d.elemSize)
+	maxBatch := int(d.maxPtrBatch)
 	if maxBatch < 2 {
 		return reflect.New(d.goType).UnsafePointer()
 	}
@@ -290,7 +291,11 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**string)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = p.allocStrPtr(int(d.ptrStrHint))
+				if len(s) > maxArenaStrLen {
+					dst = new(string)
+				} else {
+					dst = p.allocStrPtr(int(d.ptrStrHint))
+				}
 				*pp = dst
 			}
 			*dst = s
@@ -301,7 +306,11 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**string)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = p.allocStrPtr(int(d.ptrStrHint))
+				if len(s) > maxArenaStrLen {
+					dst = new(string)
+				} else {
+					dst = p.allocStrPtr(int(d.ptrStrHint))
+				}
 				*pp = dst
 			}
 			*dst = s

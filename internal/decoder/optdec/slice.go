@@ -297,6 +297,8 @@ func (d *sliceBoolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 }
 
 type sliceBytesDecoder struct {
+	typ      reflect.Type
+	elemType reflect.Type
 }
 
 func (d *sliceBytesDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
@@ -305,9 +307,7 @@ func (d *sliceBytesDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) 
 		return nil
 	}
 
-	s, err := node.AsSliceBytes(ctx)
-	*(*[]byte)(vp) = s
-	return err
+	return node.AsSliceBytesInto(ctx, vp, d.typ, d.elemType)
 }
 
 type sliceBytesUnmarshalerDecoder struct {

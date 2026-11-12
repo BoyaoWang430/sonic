@@ -215,8 +215,24 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 	}
 	elemSize := vt.Size()
 	var sliceType reflect.Type
+	var maxPtrBatch uint16
 	if elemSize > 0 && elemSize <= 4096 {
-		sliceType = reflect.SliceOf(vt)
+		if !typeHasPointers(vt) {
+			mb := int(8192 / elemSize)
+			if mb >= 2 {
+				sliceType = reflect.SliceOf(vt)
+				maxPtrBatch = uint16(mb)
+			}
+		} else if elemSize <= 256 && !typeHasUnboundedPtrGraph(vt) {
+			mb := int(1024 / elemSize)
+			if mb > 8 {
+				mb = 8
+			}
+			if mb >= 2 {
+				sliceType = reflect.SliceOf(vt)
+				maxPtrBatch = uint16(mb)
+			}
+		}
 	}
 	return &structDecoder{
 		fieldMap:      caching.NewFieldCache(fv),
@@ -228,8 +244,72 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 		goType:        vt,
 		sliceType:     sliceType,
 		elemSize:      elemSize,
+		maxPtrBatch:   maxPtrBatch,
 		fast:          len(wideOffsets) == 0,
 		ptrScalarHint: uint8(ptrScalarCount),
 		ptrStrHint:    uint8(ptrStrCount),
 	}
+}
+
+func typeHasPointers(vt reflect.Type) bool {
+	return typeHasPointersSeen(vt, nil)
+}
+
+func typeHasPointersSeen(vt reflect.Type, seen map[reflect.Type]bool) bool {
+	switch vt.Kind() {
+	case reflect.Ptr, reflect.UnsafePointer, reflect.String,
+		reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
+		return true
+	case reflect.Array:
+		return vt.Len() > 0 && typeHasPointersSeen(vt.Elem(), seen)
+	case reflect.Struct:
+		if seen == nil {
+			seen = make(map[reflect.Type]bool)
+		}
+		if seen[vt] {
+			return false
+		}
+		seen[vt] = true
+		for i := 0; i < vt.NumField(); i++ {
+			if typeHasPointersSeen(vt.Field(i).Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// typeHasUnboundedPtrGraph reports whether vt holds references that can pin arbitrary
+// external heap graphs (slices, maps, interfaces, nested pointer structs, funcs, chans,
+// or unsafe.Pointer). Structs with only scalars, strings, or *Scalar/*string are bounded.
+func typeHasUnboundedPtrGraph(vt reflect.Type) bool {
+	for i := 0; i < vt.NumField(); i++ {
+		ft := vt.Field(i).Type
+		switch ft.Kind() {
+		case reflect.String:
+			continue
+		case reflect.Bool,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+			reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+			continue
+		case reflect.Ptr:
+			ek := ft.Elem().Kind()
+			if ek == reflect.String || (ek >= reflect.Bool && ek <= reflect.Complex128) {
+				continue
+			}
+			return true
+		case reflect.Struct:
+			if typeHasPointers(ft) && typeHasUnboundedPtrGraph(ft) {
+				return true
+			}
+		case reflect.Array:
+			if ft.Len() > 0 && typeHasPointers(ft.Elem()) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }

@@ -780,7 +780,7 @@ func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 	}
 
 	*dst = s
-	return nil
+	return gerr
 }
 
 func (node *Node) AsSliceInt(ctx *Context, vp unsafe.Pointer) error {
@@ -1125,6 +1125,14 @@ func (node *Node) AsSliceBool(ctx *Context, vp unsafe.Pointer) error {
 }
 
 func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
+	var out []byte
+	if err := val.AsSliceBytesInto(ctx, unsafe.Pointer(&out), bytesType, byteType); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (val *Node) AsSliceBytesInto(ctx *Context, vp unsafe.Pointer, sliceType, elemType reflect.Type) error {
 	var origin []byte
 	switch val.Type() {
 	case KStringEscaped:
@@ -1136,27 +1144,40 @@ func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
 	case KArray:
 		arr := val.Array()
 		size := arr.Len()
-		a := make([]byte, size)
-		elem := NewNode(arr.Children())
+		dst := (*[]byte)(vp)
+		a := prepareSlice(dst, size)
+		next := arr.Children()
 		var gerr error
-		var ok bool
 		for i := 0; i < size; i++ {
-			a[i], ok = elem.AsByte(ctx)
-			if !ok && gerr == nil {
-				gerr = newUnmatched(val.Position(), bytesType)
+			elem := NewNode(next)
+			b, ok := elem.AsByte(ctx)
+			if !ok {
+				if elem.IsNull() {
+					next = PtrOffset(elem.ptr, 1)
+					continue
+				}
+				if gerr == nil {
+					gerr = newUnmatched(elem.Position(), elemType)
+				}
+				next = elem.Next()
+			} else {
+				a[i] = b
+				next = PtrOffset(elem.ptr, 1)
 			}
-			elem = NewNode(PtrOffset(elem.ptr, 1))
 		}
-		return a, gerr
+		*dst = a
+		return gerr
 	default:
-		return nil, newUnmatched(val.Position(), bytesType)
+		return newUnmatched(val.Position(), sliceType)
 	}
 
 	b64, err := rt.DecodeBase64(origin)
 	if err != nil {
-		return nil, newUnmatched(val.Position(), bytesType)
+		*(*[]byte)(vp) = nil
+		return newUnmatched(val.Position(), sliceType)
 	}
-	return b64, nil
+	*(*[]byte)(vp) = b64
+	return nil
 }
 
 const (
