@@ -319,6 +319,7 @@ func flatScanContainerPlanGroup(
 
 	grp := &plan.groups[groupIdx]
 	sd := grp.sd
+	fields := sd.fields
 	keyPrefixes := grp.keyPrefixes
 	slotBase := int(grp.slotStart)
 	ptrMask := plan.ptrMask
@@ -331,7 +332,15 @@ func flatScanContainerPlanGroup(
 	for {
 		var idx int
 		if uint(expectedIdx) < uint(len(keyPrefixes)) {
-			if nextPos, ok := flatMatchKeyFast(strPtr, pos, end, &keyPrefixes[expectedIdx]); ok {
+			kp := &keyPrefixes[expectedIdx]
+			var nextPos int
+			var matched bool
+			if kp.n2 != 0 {
+				nextPos, matched = flatMatchKeyFast(strPtr, pos, end, kp)
+			} else if uint(expectedIdx) < uint(len(fields)) {
+				nextPos, matched = flatMatchKeyByName(strPtr, pos, end, fields[expectedIdx].name)
+			}
+			if matched {
 				pos = nextPos
 				idx = expectedIdx
 				expectedIdx++
@@ -414,13 +423,7 @@ func flatScanContainerPlanGroup(
 					}
 					pos += 3
 					if ptrMask&bit != 0 {
-						if cs.nulledOnceMask&bit == 0 && cs.presentMask&bit != 0 {
-							if cs.preNullStaged == nil {
-								cs.preNullStaged = flatAllocPreNullStaged()
-							}
-							(*cs.preNullStaged)[leafIdx] = cs.staged[leafIdx]
-							cs.preNullMask |= bit
-						}
+						flatRecordPreNull(cs, leafIdx, bit)
 						cs.nullMask |= bit
 						cs.nulledOnceMask |= bit
 						cs.presentMask &^= bit
@@ -470,6 +473,7 @@ func flatScanContainerPlanGroup(
 						return 0, false
 					}
 					pos += 3
+					flatRecordPreNull(cs, leafIdx, bit)
 					cs.nullMask |= bit
 					cs.nulledOnceMask |= bit
 					cs.presentMask &^= bit
@@ -498,6 +502,7 @@ func flatScanContainerPlanGroup(
 						return 0, false
 					}
 					pos += 3
+					flatRecordPreNull(cs, leafIdx, bit)
 					cs.nullMask |= bit
 					cs.nulledOnceMask |= bit
 					cs.presentMask &^= bit
@@ -1082,7 +1087,15 @@ func flatStageStructSlice(
 				}
 				var fi int
 				if uint(expectedIdx) < uint(len(keyPrefixes)) {
-					if nextPos, matched := flatMatchKeyFast(strPtr, pos, end, &keyPrefixes[expectedIdx]); matched {
+					kp := &keyPrefixes[expectedIdx]
+					var nextPos int
+					var matched bool
+					if kp.n2 != 0 {
+						nextPos, matched = flatMatchKeyFast(strPtr, pos, end, kp)
+					} else if uint(expectedIdx) < uint(len(fields)) {
+						nextPos, matched = flatMatchKeyByName(strPtr, pos, end, fields[expectedIdx].name)
+					}
+					if matched {
 						pos = nextPos
 						fi = expectedIdx
 						expectedIdx++
@@ -1226,8 +1239,21 @@ func flatClearSliceNull(elem unsafe.Pointer, lf *flatLeaf, plan *flatStructPlan)
 	}
 }
 
+// flatRecordPreNull snapshots the last staged value before a leaf's first null so pre-null writes
+// into caller-aliased buffers/pointees match Tape and encoding/json (multiple overwrites before null
+// keep only the latest pre-null value).
+func flatRecordPreNull(cs *flatContainerScanState, leafIdx int, bit uint32) {
+	if cs.nulledOnceMask&bit == 0 && cs.presentMask&bit != 0 {
+		if cs.preNullStaged == nil {
+			cs.preNullStaged = flatAllocPreNullStaged()
+		}
+		(*cs.preNullStaged)[leafIdx] = cs.staged[leafIdx]
+		cs.preNullMask |= bit
+	}
+}
+
 func flatSliceElemNullBits(elemNullMask uint64, start, n int) uint64 {
-	if n <= 0 {
+	if elemNullMask == 0 || n <= 0 {
 		return 0
 	}
 	return (elemNullMask >> uint(start)) & (^uint64(0) >> uint(64-n))
@@ -1257,11 +1283,304 @@ func flatPrepareCommitSlice[T any](dst *[]T, n int, nulled bool) []T {
 	return s
 }
 
-func flatSliceNullBitsIfAny(elemNullMask uint64, start, n int) uint64 {
-	if elemNullMask == 0 || n <= 0 {
-		return 0
+func flatSliceCopyBytes(
+	lf *flatLeaf,
+	st *flatStagedField,
+	plan *flatStructPlan,
+	elemPool *[flatMaxElemPool]uint64,
+	structMasks *[flatMaxStructMasks]uint16,
+	elemNullMask uint64,
+) int {
+	total := 0
+	switch lf.kind {
+	case fieldKindArray:
+		if lf.elemKind != fieldKindString {
+			return 0
+		}
+		fallthrough
+	case fieldKindSliceString:
+		start := int(st.strOff)
+		count := int(st.strLen)
+		nullBits := flatSliceElemNullBits(elemNullMask, start, count)
+		for j := 0; j < count; j++ {
+			if nullBits&(uint64(1)<<uint(j)) == 0 {
+				total += int(uint32(elemPool[start+j]))
+			}
+		}
+	case fieldKindSlice:
+		meta := &plan.structSlices[lf.elemKind]
+		subFields := meta.sd.fields
+		nf := len(subFields)
+		elemStart := int(st.strOff)
+		maskStart := int(st.val)
+		count := int(st.strLen)
+		for j := 0; j < count; j++ {
+			for sm := uint32(structMasks[maskStart+j]); sm != 0; sm &= sm - 1 {
+				si := bits.TrailingZeros32(sm)
+				if subFields[si].kind == fieldKindString {
+					total += int(uint32(elemPool[elemStart+j*nf+si]))
+				}
+			}
+		}
 	}
-	return (elemNullMask >> uint(start)) & (^uint64(0) >> uint(64-n))
+	return total
+}
+
+func flatCommitSliceLeaf(
+	elem unsafe.Pointer,
+	lf *flatLeaf,
+	plan *flatStructPlan,
+	st *flatStagedField,
+	nulled bool,
+	elemPool *[flatMaxElemPool]uint64,
+	structMasks *[flatMaxStructMasks]uint16,
+	elemNullMask uint64,
+	s string,
+	copyStr bool,
+	copySlab []byte,
+	copyOff *int,
+) {
+	switch lf.kind {
+	case fieldKindSliceInt:
+		dst := (*[]int)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = int(int64(u))
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = int(int64(u))
+					}
+				}
+			}
+		}
+	case fieldKindSliceI64:
+		dst := (*[]int64)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = int64(u)
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = int64(u)
+					}
+				}
+			}
+		}
+	case fieldKindSliceI32:
+		dst := (*[]int32)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = int32(u)
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = int32(u)
+					}
+				}
+			}
+		}
+	case fieldKindSliceUint:
+		dst := (*[]uint)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = uint(u)
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = uint(u)
+					}
+				}
+			}
+		}
+	case fieldKindSliceU64:
+		dst := (*[]uint64)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				copy(out, vals)
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = u
+					}
+				}
+			}
+		}
+	case fieldKindSliceU32:
+		dst := (*[]uint32)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = uint32(u)
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = uint32(u)
+					}
+				}
+			}
+		}
+	case fieldKindSliceF64:
+		dst := (*[]float64)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = math.Float64frombits(u)
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = math.Float64frombits(u)
+					}
+				}
+			}
+		}
+	case fieldKindSliceF32:
+		dst := (*[]float32)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = math.Float32frombits(uint32(u))
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = math.Float32frombits(uint32(u))
+					}
+				}
+			}
+		}
+	case fieldKindSliceBool:
+		dst := (*[]bool)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			vals := elemPool[start : start+n]
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i, u := range vals {
+					out[i] = u != 0
+				}
+			} else {
+				for i, u := range vals {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						out[i] = u != 0
+					}
+				}
+			}
+		}
+	case fieldKindSliceString:
+		dst := (*[]string)(elem)
+		n := int(st.strLen)
+		start := int(st.strOff)
+		if out := flatPrepareCommitSlice(dst, n, nulled); out != nil {
+			if nullBits := flatSliceElemNullBits(elemNullMask, start, n); nullBits == 0 {
+				for i := 0; i < n; i++ {
+					est := flatUnpackElemField(elemPool[start+i], fieldKindString)
+					out[i] = flatResolveStr(&est, s, copyStr, copySlab, copyOff)
+				}
+			} else {
+				for i := 0; i < n; i++ {
+					if nullBits&(uint64(1)<<uint(i)) == 0 {
+						est := flatUnpackElemField(elemPool[start+i], fieldKindString)
+						out[i] = flatResolveStr(&est, s, copyStr, copySlab, copyOff)
+					}
+				}
+			}
+		}
+	case fieldKindSlice:
+		meta := &plan.structSlices[lf.elemKind]
+		n := int(st.strLen)
+		rv := reflect.NewAt(meta.sliceType, elem).Elem()
+		if nulled {
+			rv.SetZero()
+		}
+		if n == 0 {
+			rv.Set(meta.emptySlice)
+			return
+		}
+		if rv.Cap() < n {
+			rv.Grow(n - rv.Len())
+		}
+		rv.SetLen(n)
+		elemsPtr := rv.UnsafePointer()
+		subFields := meta.sd.fields
+		nf := len(subFields)
+		elemStart := int(st.strOff)
+		maskStart := int(st.val)
+		for j := 0; j < n; j++ {
+			ePtr := unsafe.Add(elemsPtr, uintptr(j)*meta.elemSize)
+			for sm := uint32(structMasks[maskStart+j]); sm != 0; sm &= sm - 1 {
+				si := bits.TrailingZeros32(sm)
+				sf := &subFields[si]
+				est := flatUnpackElemField(elemPool[elemStart+j*nf+si], sf.kind)
+				flatWriteValueScalarOrStr(unsafe.Add(ePtr, uintptr(sf.offset)), sf.kind, &est, s, copyStr, copySlab, copyOff)
+			}
+		}
+	}
+}
+
+//go:noinline
+func flatCommitPreNullContainerSlices(
+	vp unsafe.Pointer,
+	plan *flatStructPlan,
+	cs *flatContainerScanState,
+	slicePreNull uint32,
+	s string,
+	copyStr bool,
+) {
+	leaves := plan.leaves
+	preNullStaged := cs.preNullStaged
+	var copySlab []byte
+	copyOff := 0
+	if copyStr {
+		copySlabBytes := 0
+		for m := slicePreNull; m != 0; m &= m - 1 {
+			fi := bits.TrailingZeros32(m)
+			copySlabBytes += flatSliceCopyBytes(&leaves[fi], &preNullStaged[fi], plan, &cs.elemPool, &cs.structMasks, cs.elemNullMask)
+		}
+		if copySlabBytes > 0 {
+			copySlab = make([]byte, copySlabBytes)
+		}
+	}
+	for m := slicePreNull; m != 0; m &= m - 1 {
+		fi := bits.TrailingZeros32(m)
+		lf := &leaves[fi]
+		elem := unsafe.Add(vp, uintptr(lf.offset))
+		flatCommitSliceLeaf(elem, lf, plan, &preNullStaged[fi], false, &cs.elemPool, &cs.structMasks, cs.elemNullMask, s, copyStr, copySlab, &copyOff)
+	}
 }
 
 func flatCommitContainerPlanLeaves(
@@ -1284,8 +1603,13 @@ func flatCommitContainerPlanLeaves(
 	preNullMask := cs.preNullMask
 	elemNullMask := cs.elemNullMask
 
-	if ptrPreNull := preNullMask & ptrMask; ptrPreNull != 0 {
-		flatCommitPreNullLeaves(vp, leaves, preNullStaged, ptrPreNull, s, copyStr)
+	if preNullMask != 0 {
+		if ptrPreNull := preNullMask & ptrMask; ptrPreNull != 0 {
+			flatCommitPreNullLeaves(vp, leaves, preNullStaged, ptrPreNull, s, copyStr)
+		}
+		if slicePreNull := preNullMask &^ ptrMask; slicePreNull != 0 {
+			flatCommitPreNullContainerSlices(vp, plan, cs, slicePreNull, s, copyStr)
+		}
 	}
 	for m := nullMask; m != 0; m &= m - 1 {
 		fi := bits.TrailingZeros32(m)
@@ -1335,40 +1659,9 @@ func flatCommitContainerPlanLeaves(
 						nNewSmallStr++
 					}
 				}
-			case fieldKindArray:
-				if lf.elemKind == fieldKindString {
-					start := int(st.strOff)
-					count := int(st.strLen)
-					nullBits := flatSliceElemNullBits(elemNullMask, start, count)
-					for j := 0; j < count; j++ {
-						if nullBits&(uint64(1)<<uint(j)) == 0 {
-							copySlabBytes += int(uint32(elemPool[start+j]))
-						}
-					}
-				}
-			case fieldKindSliceString:
-				start := int(st.strOff)
-				count := int(st.strLen)
-				nullBits := flatSliceElemNullBits(elemNullMask, start, count)
-				for j := 0; j < count; j++ {
-					if nullBits&(uint64(1)<<uint(j)) == 0 {
-						copySlabBytes += int(uint32(elemPool[start+j]))
-					}
-				}
-			case fieldKindSlice:
-				meta := &plan.structSlices[lf.elemKind]
-				subFields := meta.sd.fields
-				nf := len(subFields)
-				elemStart := int(st.strOff)
-				maskStart := int(st.val)
-				count := int(st.strLen)
-				for j := 0; j < count; j++ {
-					for sm := uint32(structMasks[maskStart+j]); sm != 0; sm &= sm - 1 {
-						si := bits.TrailingZeros32(sm)
-						if subFields[si].kind == fieldKindString {
-							copySlabBytes += int(uint32(elemPool[elemStart+j*nf+si]))
-						}
-					}
+			case fieldKindArray, fieldKindSliceString, fieldKindSlice:
+				if copyStr {
+					copySlabBytes += flatSliceCopyBytes(lf, st, plan, elemPool, structMasks, elemNullMask)
 				}
 			default:
 				if lf.kind >= fieldKindPtrI64 && lf.kind <= fieldKindPtrF32 {
@@ -1420,214 +1713,8 @@ func flatCommitContainerPlanLeaves(
 				slot := unsafe.Add(elem, uintptr(i)*elemSize)
 				flatWriteZeroScalarOrStr(slot, elemKind)
 			}
-		case lf.kind == fieldKindSliceInt:
-			dst := (*[]int)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = int(int64(u))
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = int(int64(u))
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceI64:
-			dst := (*[]int64)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = int64(u)
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = int64(u)
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceI32:
-			dst := (*[]int32)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = int32(u)
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = int32(u)
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceUint:
-			dst := (*[]uint)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = uint(u)
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = uint(u)
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceU64:
-			dst := (*[]uint64)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					copy(out, vals)
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = u
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceU32:
-			dst := (*[]uint32)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = uint32(u)
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = uint32(u)
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceF64:
-			dst := (*[]float64)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = math.Float64frombits(u)
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = math.Float64frombits(u)
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceF32:
-			dst := (*[]float32)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = math.Float32frombits(uint32(u))
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = math.Float32frombits(uint32(u))
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceBool:
-			dst := (*[]bool)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				vals := elemPool[start : start+n]
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i, u := range vals {
-						out[i] = u != 0
-					}
-				} else {
-					for i, u := range vals {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							out[i] = u != 0
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSliceString:
-			dst := (*[]string)(elem)
-			n := int(st.strLen)
-			start := int(st.strOff)
-			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
-				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
-					for i := 0; i < n; i++ {
-						est := flatUnpackElemField(elemPool[start+i], fieldKindString)
-						out[i] = flatResolveStr(&est, s, copyStr, copySlab, &copyOff)
-					}
-				} else {
-					for i := 0; i < n; i++ {
-						if nullBits&(uint64(1)<<uint(i)) == 0 {
-							est := flatUnpackElemField(elemPool[start+i], fieldKindString)
-							out[i] = flatResolveStr(&est, s, copyStr, copySlab, &copyOff)
-						}
-					}
-				}
-			}
-		case lf.kind == fieldKindSlice:
-			meta := &plan.structSlices[lf.elemKind]
-			n := int(st.strLen)
-			rv := reflect.NewAt(meta.sliceType, elem).Elem()
-			if nulledOnceMask&bit != 0 {
-				rv.SetZero()
-			}
-			if n == 0 {
-				rv.Set(meta.emptySlice)
-				continue
-			}
-			if rv.Cap() < n {
-				rv.Grow(n - rv.Len())
-			}
-			rv.SetLen(n)
-			elemsPtr := rv.UnsafePointer()
-			subFields := meta.sd.fields
-			nf := len(subFields)
-			elemStart := int(st.strOff)
-			maskStart := int(st.val)
-			for j := 0; j < n; j++ {
-				ePtr := unsafe.Add(elemsPtr, uintptr(j)*meta.elemSize)
-				for sm := uint32(structMasks[maskStart+j]); sm != 0; sm &= sm - 1 {
-					si := bits.TrailingZeros32(sm)
-					sf := &subFields[si]
-					est := flatUnpackElemField(elemPool[elemStart+j*nf+si], sf.kind)
-					flatWriteValueScalarOrStr(unsafe.Add(ePtr, uintptr(sf.offset)), sf.kind, &est, s, copyStr, copySlab, &copyOff)
-				}
-			}
+		case isFlatScalarSliceKind(lf.kind) || lf.kind == fieldKindSlice:
+			flatCommitSliceLeaf(elem, lf, plan, st, nulledOnceMask&bit != 0, elemPool, structMasks, elemNullMask, s, copyStr, copySlab, &copyOff)
 		}
 	}
 }

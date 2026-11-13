@@ -1578,7 +1578,19 @@ func TestFlatContainersSliceAndNullParity(t *testing.T) {
 			name:    "dup_key_null_then_slice",
 			initLen: 2,
 			initCap: 4,
-			input:   `{"i":[1,2],"i":null,"i":[3],"s":["old"],"s":null,"s":[null,"k"],"authors":[{"name":"z"}],"authors":null,"authors":[{"age":7}]}`,
+			input:   `{"i":[1,2],"i":null,"i":[3],"i64":[1,null,9],"i64":null,"i64":[4],"s":["old"],"s":null,"s":[null,"k"],"authors":[{"name":"z"}],"authors":null,"authors":[{"age":7}]}`,
+		},
+		{
+			name:    "dup_key_value_then_null",
+			initLen: 2,
+			initCap: 4,
+			input:   `{"i64":[1,null],"i64":null,"s":["old",null],"s":null,"authors":[{"name":"z"}],"authors":null}`,
+		},
+		{
+			name:    "null_then_value_then_null_then_value",
+			initLen: 2,
+			initCap: 4,
+			input:   `{"i64":null,"i64":[1],"i64":null,"i64":[2],"s":null,"s":["a"],"s":null,"s":["b"],"authors":null,"authors":[{"name":"x"}],"authors":null,"authors":[{"age":9}]}`,
 		},
 		{
 			name:    "elem_null_and_arrays",
@@ -1596,61 +1608,171 @@ func TestFlatContainersSliceAndNullParity(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fast := makePrefilled(tc.initLen, tc.initCap)
-			fastDirectOnly := makePrefilled(tc.initLen, tc.initCap)
-			tape := makePrefilled(tc.initLen, tc.initCap)
-			stdlib := makePrefilled(tc.initLen, tc.initCap)
+			for _, opts := range []uint64{0, 1 << _F_copy_string} {
+				fast := makePrefilled(tc.initLen, tc.initCap)
+				fastDirectOnly := makePrefilled(tc.initLen, tc.initCap)
+				tape := makePrefilled(tc.initLen, tc.initCap)
+				stdlib := makePrefilled(tc.initLen, tc.initCap)
 
-			// 1. Direct tryDecodeFlatContainerPlanBody must succeed without fallback.
-			if endPos, ok := tryDecodeFlatContainerPlanBody(tc.input, 0, len(tc.input), 1<<_F_copy_string, unsafe.Pointer(&fastDirectOnly.base), fastSD.flatPlan, false, true); !ok || endPos != len(tc.input) {
-				t.Fatalf("tryDecodeFlatContainerPlanBody failed (ok=%v end=%d/%d)", ok, endPos, len(tc.input))
-			}
+				// 1. Direct tryDecodeFlatContainerPlanBody must succeed without fallback.
+				if endPos, ok := tryDecodeFlatContainerPlanBody(tc.input, 0, len(tc.input), opts, unsafe.Pointer(&fastDirectOnly.base), fastSD.flatPlan, false, true); !ok || endPos != len(tc.input) {
+					t.Fatalf("opts=%#x tryDecodeFlatContainerPlanBody failed (ok=%v end=%d/%d)", opts, ok, endPos, len(tc.input))
+				}
 
-			// 2. Full DecodeOne (fast path).
-			fastSD.flatFailStreak = 0
-			if _, _, err := DecodeOne(tc.input, 1<<_F_copy_string, &fast.base); err != nil {
-				t.Fatalf("DecodeOne fast: %v", err)
-			}
-			if fastSD.flatFailStreak != 0 {
-				t.Fatalf("expected 0 fallback streak, got %d", fastSD.flatFailStreak)
-			}
+				// 2. Full DecodeOne (fast path).
+				fastSD.flatFailStreak = 0
+				if _, _, err := DecodeOne(tc.input, opts, &fast.base); err != nil {
+					t.Fatalf("opts=%#x DecodeOne fast: %v", opts, err)
+				}
+				if fastSD.flatFailStreak != 0 {
+					t.Fatalf("opts=%#x expected 0 fallback streak, got %d", opts, fastSD.flatFailStreak)
+				}
 
-			// 3. optdec Tape FromDom path.
-			tapeDst := containerTapeOnly{containerBase: tape.base}
-			if _, _, err := DecodeOne(tc.input, 1<<_F_copy_string, &tapeDst); err != nil {
-				t.Fatalf("DecodeOne tape: %v", err)
-			}
-			tape.base = tapeDst.containerBase
+				// 3. optdec Tape FromDom path.
+				tapeDst := containerTapeOnly{containerBase: tape.base}
+				if _, _, err := DecodeOne(tc.input, opts, &tapeDst); err != nil {
+					t.Fatalf("opts=%#x DecodeOne tape: %v", opts, err)
+				}
+				tape.base = tapeDst.containerBase
 
-			// 4. encoding/json.
-			if err := json.Unmarshal([]byte(tc.input), &stdlib.base); err != nil {
-				t.Fatalf("encoding/json: %v", err)
-			}
+				// 4. encoding/json.
+				if err := json.Unmarshal([]byte(tc.input), &stdlib.base); err != nil {
+					t.Fatalf("encoding/json: %v", err)
+				}
 
-			if !reflect.DeepEqual(fastDirectOnly.base, stdlib.base) {
-				t.Fatalf("direct vs stdlib mismatch:\ndirect: %#v\nstdlib: %#v", fastDirectOnly.base, stdlib.base)
-			}
-			if !reflect.DeepEqual(fast.base, tape.base) || !reflect.DeepEqual(fast.base, stdlib.base) {
-				t.Fatalf("fast vs tape vs stdlib mismatch:\nfast:   %#v\ntape:   %#v\nstdlib: %#v", fast.base, tape.base, stdlib.base)
-			}
-			if tc.name != "dup_key_null_then_slice" {
+				if !reflect.DeepEqual(fastDirectOnly.base, stdlib.base) {
+					t.Fatalf("opts=%#x direct vs stdlib mismatch:\ndirect: %#v\nstdlib: %#v", opts, fastDirectOnly.base, stdlib.base)
+				}
+				if !reflect.DeepEqual(fast.base, tape.base) || !reflect.DeepEqual(fast.base, stdlib.base) {
+					t.Fatalf("opts=%#x fast vs tape vs stdlib mismatch:\nfast:   %#v\ntape:   %#v\nstdlib: %#v", opts, fast.base, tape.base, stdlib.base)
+				}
 				if !reflect.DeepEqual(fast.i64Back, tape.i64Back) {
-					t.Fatalf("i64 backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", fast.i64Back, tape.i64Back)
+					t.Fatalf("opts=%#x i64 backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", opts, fast.i64Back, tape.i64Back)
 				}
 				if !reflect.DeepEqual(fast.sBack, tape.sBack) {
-					t.Fatalf("s backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", fast.sBack, tape.sBack)
+					t.Fatalf("opts=%#x s backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", opts, fast.sBack, tape.sBack)
 				}
 				if !reflect.DeepEqual(fast.authBack, tape.authBack) {
-					t.Fatalf("auth backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", fast.authBack, tape.authBack)
+					t.Fatalf("opts=%#x auth backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", opts, fast.authBack, tape.authBack)
 				}
 				if tc.name != "grow" {
 					if !reflect.DeepEqual(fast.i64Back, stdlib.i64Back) || !reflect.DeepEqual(fast.sBack, stdlib.sBack) || !reflect.DeepEqual(fast.authBack, stdlib.authBack) {
-						t.Fatalf("backing alias vs stdlib mismatch:\nfast:   i64=%#v s=%#v auth=%#v\nstdlib: i64=%#v s=%#v auth=%#v",
-							fast.i64Back, fast.sBack, fast.authBack, stdlib.i64Back, stdlib.sBack, stdlib.authBack)
+						t.Fatalf("opts=%#x backing alias vs stdlib mismatch:\nfast:   i64=%#v s=%#v auth=%#v\nstdlib: i64=%#v s=%#v auth=%#v",
+							opts, fast.i64Back, fast.sBack, fast.authBack, stdlib.i64Back, stdlib.sBack, stdlib.authBack)
 					}
 				}
 			}
 		})
+	}
+}
+
+func TestFlatLongFieldKeyFastMatchParity(t *testing.T) {
+	type longRoot struct {
+		Short              int64  `json:"id"`
+		Exact14            string `json:"exact_14_bytes"`
+		Exact15            int64  `json:"exact_15_bytess"`
+		CreatedAtTimestamp int64  `json:"created_at_timestamp"`
+		UserDisplayName    string `json:"user_display_name"`
+	}
+	type longNested struct {
+		CreatedAtTimestamp int64    `json:"created_at_timestamp"`
+		Child              longRoot `json:"nested_long_child_struct"`
+	}
+	type longItem struct {
+		UserDisplayName    string `json:"user_display_name"`
+		CreatedAtTimestamp int64  `json:"created_at_timestamp"`
+	}
+	type longContainer struct {
+		CreatedAtTimestamp int64      `json:"created_at_timestamp"`
+		TagIDs             []int64    `json:"subscriber_account_ids"`
+		Items              []longItem `json:"detailed_audit_items"`
+	}
+	type longContainerTapeOnly struct {
+		longContainer
+		ForceTape map[string]int `json:"_force_tape"`
+	}
+
+	var r0 longRoot
+	_, _, _, _, rSD, err := unpackAndCompileRoot(&r0)
+	if err != nil || rSD == nil || !rSD.flatDirect || !rSD.flatPureASCIIKeys || len(rSD.flatKeyPrefixes) != 5 {
+		t.Fatalf("unexpected longRoot flat decoder: %+v err=%v", rSD, err)
+	}
+	if rSD.flatKeyPrefixes[1].n2 != 16 || rSD.flatKeyPrefixes[2].n2 != 0 || rSD.flatKeyPrefixes[3].n2 != 0 {
+		t.Fatalf("unexpected prefix lengths: %+v", rSD.flatKeyPrefixes)
+	}
+	var n0 longNested
+	_, _, _, _, nSD, err := unpackAndCompileRoot(&n0)
+	if err != nil || nSD == nil || !nSD.flatDirect || nSD.flatPlan == nil {
+		t.Fatalf("unexpected longNested flat decoder: %+v err=%v", nSD, err)
+	}
+	var c0 longContainer
+	_, _, _, _, cSD, err := unpackAndCompileRoot(&c0)
+	if err != nil || cSD == nil || !cSD.flatDirect || cSD.flatPlan == nil || !cSD.flatPlan.hasContainers {
+		t.Fatalf("unexpected longContainer flat decoder: %+v err=%v", cSD, err)
+	}
+
+	rootInputs := []string{
+		`{"id":7,"exact_14_bytes":"fourteen_chars","exact_15_bytess":15,"created_at_timestamp":1700000001,"user_display_name":"Alice"}`,
+		`{"id":8,"created_at_timestamz":999,"created_at_timestamp" : 1700000002,"user_display_name":"Bob","exact_15_bytess":16,"exact_14_bytes":"ok"}`,
+	}
+	for _, js := range rootInputs {
+		for _, opts := range []uint64{0, 1 << _F_copy_string, uint64(consts.OptionCaseSensitive)} {
+			var gotDirect, gotFull, want longRoot
+			if endPos, ok := tryDecodeFlatStruct(js, 0, opts, unsafe.Pointer(&gotDirect), rSD, false, true); !ok || endPos != len(js) {
+				t.Fatalf("tryDecodeFlatStruct(%s, %#x) failed ok=%v end=%d/%d", js, opts, ok, endPos, len(js))
+			}
+			rSD.flatFailStreak = 0
+			if _, _, err := DecodeOne(js, opts, &gotFull); err != nil {
+				t.Fatalf("DecodeOne root(%s, %#x): %v", js, opts, err)
+			}
+			if rSD.flatFailStreak != 0 {
+				t.Fatalf("expected 0 fallback streak, got %d", rSD.flatFailStreak)
+			}
+			if err := json.Unmarshal([]byte(js), &want); err != nil {
+				t.Fatalf("stdlib: %v", err)
+			}
+			if gotDirect != want || gotFull != want {
+				t.Fatalf("root mismatch opts=%#x:\ndirect: %+v\nfull:   %+v\nwant:   %+v", opts, gotDirect, gotFull, want)
+			}
+		}
+	}
+
+	nestedJS := `{"created_at_timestamp":123,"nested_long_child_struct":{"id":9,"exact_14_bytes":"14","exact_15_bytess":15,"created_at_timestamp":456,"user_display_name":"Nested"}}`
+	var nDirect, nWant longNested
+	if endPos, ok := tryDecodeFlatStruct(nestedJS, 0, 1<<_F_copy_string, unsafe.Pointer(&nDirect), nSD, false, true); !ok || endPos != len(nestedJS) {
+		t.Fatalf("tryDecodeFlatStruct nested failed ok=%v end=%d/%d", ok, endPos, len(nestedJS))
+	}
+	if err := json.Unmarshal([]byte(nestedJS), &nWant); err != nil {
+		t.Fatalf("stdlib nested: %v", err)
+	}
+	if nDirect != nWant {
+		t.Fatalf("nested mismatch:\ngot:  %+v\nwant: %+v", nDirect, nWant)
+	}
+
+	contJS := `{"created_at_timestamp":10,"subscriber_account_ids":[1,2,3],"detailed_audit_items":[{"user_display_name":"U1","created_at_timestamp":101},{"created_at_timestamp":102,"user_display_name":"U2"}]}`
+	for _, opts := range []uint64{0, 1 << _F_copy_string, uint64(consts.OptionCaseSensitive) | (1 << _F_copy_string)} {
+		var cDirect, cFull, cWant longContainer
+		var cTape longContainerTapeOnly
+		if endPos, ok := tryDecodeFlatStruct(contJS, 0, opts, unsafe.Pointer(&cDirect), cSD, false, true); !ok || endPos != len(contJS) {
+			t.Fatalf("tryDecodeFlatStruct container opts=%#x failed ok=%v end=%d/%d", opts, ok, endPos, len(contJS))
+		}
+		cSD.flatFailStreak = 0
+		if _, _, err := DecodeOne(contJS, opts, &cFull); err != nil {
+			t.Fatalf("DecodeOne container opts=%#x: %v", opts, err)
+		}
+		if cSD.flatFailStreak != 0 {
+			t.Fatalf("container expected 0 fallback streak, got %d", cSD.flatFailStreak)
+		}
+		if _, _, err := DecodeOne(contJS, opts, &cTape); err != nil {
+			t.Fatalf("DecodeOne tape opts=%#x: %v", opts, err)
+		}
+		if err := json.Unmarshal([]byte(contJS), &cWant); err != nil {
+			t.Fatalf("stdlib container: %v", err)
+		}
+		if !reflect.DeepEqual(cDirect, cWant) || !reflect.DeepEqual(cFull, cWant) || !reflect.DeepEqual(cTape.longContainer, cWant) {
+			t.Fatalf("container mismatch opts=%#x:\ndirect: %+v\nfull:   %+v\ntape:   %+v\nwant:   %+v",
+				opts, cDirect, cFull, cTape.longContainer, cWant)
+		}
 	}
 }
 

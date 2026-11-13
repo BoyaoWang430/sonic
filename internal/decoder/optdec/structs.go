@@ -215,8 +215,9 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 	return fe
 }
 
-// flatKeyPrefix holds a pre-encoded host-endian byte representation of `"name":`
-// (without the opening quote) for fast in-bounds ASCII key comparison up to 14 bytes.
+// flatKeyPrefix holds a pre-encoded host-endian byte representation of `name":`
+// (without the opening quote) for fast in-bounds ASCII key comparison up to 14 bytes;
+// longer field names leave n2 == 0 and fall back to exact length/name comparison.
 type flatKeyPrefix struct {
 	w0   uint64
 	w1   uint64

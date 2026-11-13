@@ -122,17 +122,29 @@ func buildFlatKeyPrefixes(fields []fieldEntry) []flatKeyPrefix {
 	return out
 }
 
+func flatMatchKeyByName(strPtr unsafe.Pointer, pos, end int, name string) (int, bool) {
+	n := len(name)
+	if end-pos >= n+2 &&
+		*(*byte)(unsafe.Add(strPtr, pos+n)) == '"' &&
+		*(*byte)(unsafe.Add(strPtr, pos+n+1)) == ':' &&
+		unsafe.String((*byte)(unsafe.Add(strPtr, pos)), n) == name {
+		return pos + n + 2, true
+	}
+	return 0, false
+}
+
+// flatMatchKeyFast matches `"name":` (post-opening-quote) when kp.n2 != 0 (len(name) in 1..14).
 func flatMatchKeyFast(strPtr unsafe.Pointer, pos, end int, kp *flatKeyPrefix) (int, bool) {
 	n2 := int(kp.n2)
-	if n2 != 0 {
-		if n2 <= 8 {
-			if pos+8 <= end && ((*(*uint64)(unsafe.Add(strPtr, pos))^kp.w0)&kp.mask) == 0 {
-				return pos + n2, true
-			}
-		} else if pos+16 <= end && *(*uint64)(unsafe.Add(strPtr, pos)) == kp.w0 &&
-			((*(*uint64)(unsafe.Add(strPtr, pos+8))^kp.w1)&kp.mask) == 0 {
+	if n2 <= 8 {
+		if pos+8 <= end && ((*(*uint64)(unsafe.Add(strPtr, pos))^kp.w0)&kp.mask) == 0 {
 			return pos + n2, true
 		}
+		return 0, false
+	}
+	if pos+16 <= end && *(*uint64)(unsafe.Add(strPtr, pos)) == kp.w0 &&
+		((*(*uint64)(unsafe.Add(strPtr, pos+8))^kp.w1)&kp.mask) == 0 {
+		return pos + n2, true
 	}
 	return 0, false
 }
@@ -400,10 +412,11 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 
 func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Pointer, sd *structDecoder, utf8Prechecked, checkTrailing bool) (int, bool) {
 	strPtr := unsafe.Pointer(unsafe.StringData(s))
-	validateStr := f&(1<<_F_validate_string) != 0
+	opts := flatScanOpts(f)
+	validateStr := opts&flatOptValidateStr != 0
 	copyStr := f&(1<<_F_copy_string) != 0
-	caseSensitive := f&uint64(consts.OptionCaseSensitive) != 0
-	disUnknown := Options(f)&OptionDisableUnknown != 0
+	caseSensitive := opts&flatOptCaseSensitive != 0
+	disUnknown := opts&flatOptDisUnknown != 0
 	ptrMask := sd.flatPtrMask
 
 	pos, c, ok := flatSkipWS(strPtr, startPos, end)
@@ -476,7 +489,15 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 	for {
 		var idx int
 		if uint(expectedIdx) < uint(len(keyPrefixes)) {
-			if nextPos, ok := flatMatchKeyFast(strPtr, pos, end, &keyPrefixes[expectedIdx]); ok {
+			kp := &keyPrefixes[expectedIdx]
+			var nextPos int
+			var matched bool
+			if kp.n2 != 0 {
+				nextPos, matched = flatMatchKeyFast(strPtr, pos, end, kp)
+			} else if uint(expectedIdx) < uint(len(fields)) {
+				nextPos, matched = flatMatchKeyByName(strPtr, pos, end, fields[expectedIdx].name)
+			}
+			if matched {
 				pos = nextPos
 				idx = expectedIdx
 				expectedIdx++
@@ -535,7 +556,7 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 				} else {
 					return 0, false
 				}
-				pos, ok = flatSkipValue(strPtr, vc, pos, end, flatScanOpts(f), &nonASCII)
+				pos, ok = flatSkipValue(strPtr, vc, pos, end, opts, &nonASCII)
 				if !ok {
 					return 0, false
 				}
@@ -775,7 +796,15 @@ func flatScanPlanGroup(
 	for {
 		var idx int
 		if uint(expectedIdx) < uint(len(keyPrefixes)) {
-			if nextPos, ok := flatMatchKeyFast(strPtr, pos, end, &keyPrefixes[expectedIdx]); ok {
+			kp := &keyPrefixes[expectedIdx]
+			var nextPos int
+			var matched bool
+			if kp.n2 != 0 {
+				nextPos, matched = flatMatchKeyFast(strPtr, pos, end, kp)
+			} else if uint(expectedIdx) < uint(len(fields)) {
+				nextPos, matched = flatMatchKeyByName(strPtr, pos, end, fields[expectedIdx].name)
+			}
+			if matched {
 				pos = nextPos
 				idx = expectedIdx
 				expectedIdx++
