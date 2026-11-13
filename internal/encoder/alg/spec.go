@@ -129,7 +129,6 @@ func QuoteWithPaddedKey(buf []byte, keyPtr *byte, nk int, val string) []byte {
 	if (nk <= 32 && rem >= 34+nb) || (nk <= 64 && nk > 32 && rem >= nk+2+nb) {
 		basePtr := unsafe.Pointer(unsafe.SliceData(buf))
 		bLen := len(buf)
-		bCap := cap(buf)
 		dp := unsafe.Add(basePtr, bLen)
 		if nk <= 32 {
 			dk := (*[4]uint64)(dp)
@@ -139,8 +138,12 @@ func QuoteWithPaddedKey(buf []byte, keyPtr *byte, nk int, val string) []byte {
 				dk[2], dk[3] = sk[2], sk[3]
 			}
 		} else {
-			*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
-			*(*[4]uint64)(unsafe.Add(dp, nk-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), nk-32))
+			dk0 := (*[4]uint64)(dp)
+			sk0 := (*[4]uint64)(unsafe.Pointer(keyPtr))
+			dk0[0], dk0[1], dk0[2], dk0[3] = sk0[0], sk0[1], sk0[2], sk0[3]
+			dk1 := (*[4]uint64)(unsafe.Add(dp, nk-32))
+			sk1 := (*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), nk-32))
+			dk1[0], dk1[1], dk1[2], dk1[3] = sk1[0], sk1[1], sk1[2], sk1[3]
 		}
 		dp = unsafe.Add(dp, nk)
 		if nb == 0 {
@@ -200,36 +203,16 @@ func QuoteWithPaddedKey(buf []byte, keyPtr *byte, nk int, val string) []byte {
 				}
 			}
 		}
-		bLen += nk + 1
-		ret, dn := kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
-		bLen += dn
-		buf = buf[:bLen]
-		if ret >= 0 {
-			if bLen < bCap {
-				*(*byte)(unsafe.Add(basePtr, bLen)) = '"'
-				return buf[:bLen+1]
-			}
-			return append(buf, '"')
-		}
-		for {
-			buf = rt.GuardSlice2(buf, cap(buf))
-			basePtr = unsafe.Pointer(unsafe.SliceData(buf))
-			bLen = len(buf)
-			bCap = cap(buf)
-			ret = ^ret
-			nb -= ret
-			sp = unsafe.Add(sp, ret)
-			dp = unsafe.Add(basePtr, bLen)
-			ret, dn = kernels.QuoteBuffer((*byte)(sp), nb, (*byte)(dp), bCap-bLen, 0)
-			bLen += dn
-			buf = buf[:bLen]
-			if ret >= 0 {
-				break
-			}
-		}
-		runtime.KeepAlive(val)
-		return append(buf, '"')
+		return quotePlainTail(buf[:bLen+nk+1], val, 0)
 	}
+	return quoteWithPaddedKeySlow(buf, keyPtr, nk, val)
+}
+
+// quoteWithPaddedKeySlow handles overflow capacity or keys > 64B out-of-line
+// so the fast path avoids extra spills.
+//
+//go:noinline
+func quoteWithPaddedKeySlow(buf []byte, keyPtr *byte, nk int, val string) []byte {
 	if nk > 0 {
 		buf = append(buf, unsafe.Slice(keyPtr, nk)...)
 	}
