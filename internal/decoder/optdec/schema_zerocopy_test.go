@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"unsafe"
+
+	"github.com/bytedance/sonic/internal/decoder/consts"
 )
 
 func TestAsSliceEfacePropagatesElementError(t *testing.T) {
@@ -935,7 +937,7 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 	type concreteTapeStruct struct {
 		ID     int64          `json:"id"`
 		Name   string         `json:"name"`
-		Values []int64        `json:"values"`
+		Values [][]int64      `json:"values"`
 		Sub    nestedConcrete `json:"sub"`
 	}
 	type nestedWithAny struct {
@@ -969,16 +971,16 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 		t.Fatalf("expected outerWithNestedAny (nested interface{}) to have noInterface=false")
 	}
 
-	concreteJSON := `{"id":9007199254740993,"name":"tape-fast","values":[1,2,3],"sub":{"count":42,"score":-0},"unknown_big":1e999}`
+	concreteJSON := `{"id":9007199254740993,"name":"tape-fast","values":[[1,2,3]],"sub":{"count":42,"score":-0},"unknown_big":1e999}`
 	var gotNum, gotI64 concreteTapeStruct
 	if _, _, err := DecodeOne(concreteJSON, 1<<_F_use_number, &gotNum); err != nil {
 		t.Fatalf("DecodeOne concrete UseNumber: %v", err)
 	}
-	if gotNum.ID != 9007199254740993 || gotNum.Name != "tape-fast" || len(gotNum.Values) != 3 || gotNum.Sub.Count != 42 || !math.Signbit(gotNum.Sub.Score) {
+	if gotNum.ID != 9007199254740993 || gotNum.Name != "tape-fast" || len(gotNum.Values) != 1 || len(gotNum.Values[0]) != 3 || gotNum.Sub.Count != 42 || !math.Signbit(gotNum.Sub.Score) {
 		t.Fatalf("unexpected concrete UseNumber result: %+v", gotNum)
 	}
 
-	concreteValidJSON := `{"id":9007199254740993,"name":"tape-fast","values":[1,2,3],"sub":{"count":42,"score":-0}}`
+	concreteValidJSON := `{"id":9007199254740993,"name":"tape-fast","values":[[1,2,3]],"sub":{"count":42,"score":-0}}`
 	if _, _, err := DecodeOne(concreteValidJSON, 1<<_F_use_int64, &gotI64); err != nil {
 		t.Fatalf("DecodeOne concrete UseInt64: %v", err)
 	}
@@ -1001,4 +1003,453 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 	if iv, ok := anyI64.Sub.Payload.(int64); !ok || iv != 9007199254740993 {
 		t.Fatalf("expected int64, got %T (%v)", anyI64.Sub.Payload, anyI64.Sub.Payload)
 	}
+}
+
+func TestNoValidateJSONSkipOptdec(t *testing.T) {
+	// 1. flatDirect struct skipping deep (>64) unknown containers & long escaped/unescaped strings.
+	type flatTarget struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+		Flag bool   `json:"flag"`
+	}
+	deepOpen := strings.Repeat(`{"nested":[`, 80)
+	deepClose := strings.Repeat(`]}`, 80)
+	longStr := strings.Repeat("alpha-beta-gamma-", 20) + `\"quoted\"` + strings.Repeat("-omega", 12)
+	longRaw := "raw-\x01-\t-end-" + strings.Repeat("x", 160)
+
+	deepJSON := fmt.Sprintf(`{"id":17,"skip_deep":%s%q%s,"skip_str":%q,"skip_raw":"`+longRaw+`","name":"ok","flag":true}`,
+		deepOpen, longStr, deepClose, longStr)
+	noValOpt := uint64(1 << _F_no_validate_json)
+
+	// Force flatFailStreak == 0 after constructing target
+	var got flatTarget
+	if _, _, err := DecodeOne(deepJSON, noValOpt, &got); err != nil {
+		t.Fatalf("flat NoValidateJSONSkip failed: %v", err)
+	}
+	if got.ID != 17 || got.Name != "ok" || !got.Flag {
+		t.Fatalf("unexpected flatTarget result: %+v", got)
+	}
+
+	// Verify ValidateString still replaces invalid UTF-8 with \ufffd when matched or skipped strings contain non-UTF8 bytes.
+	badUTF8WithMatched := fmt.Sprintf(`{"id":9,"skip_bad":{"k":"` + strings.Repeat("a", 80) + "\xff" + `"},"name":"ok` + "\xff" + `","flag":false}`)
+	for _, extraOpt := range []uint64{0, 1 << _F_disable_urc} {
+		var tmp flatTarget
+		if _, _, err := DecodeOne(badUTF8WithMatched, noValOpt|(1<<_F_validate_string)|extraOpt, &tmp); err != nil {
+			t.Fatalf("expected ValidateString (extraOpt=%#x) to replace invalid UTF-8, got error: %v", extraOpt, err)
+		}
+		if tmp.ID != 9 || tmp.Name != "ok\ufffd" || tmp.Flag {
+			t.Fatalf("expected replacement character in matched field, got: %+v", tmp)
+		}
+	}
+	guard := flatTarget{ID: 777, Name: "keep", Flag: true}
+
+	// Syntax error in skipped container under NoValidateJSONSkip must rollback cleanly.
+	brokenSkipped := fmt.Sprintf(`{"id":123,"skip_broken":{"a":[1,2,3,"` + strings.Repeat("z", 120))
+	if _, _, err := DecodeOne(brokenSkipped, noValOpt, &guard); err == nil {
+		t.Fatalf("expected error on unclosed skipped string")
+	}
+	if guard.ID != 777 || guard.Name != "keep" || !guard.Flag {
+		t.Fatalf("syntax error mutated guard: %+v", guard)
+	}
+
+	// Matched string field MUST still reject invalid escape even when _F_no_validate_json is set.
+	invalidMatched := `{"id":1,"name":"bad\qescape","flag":false}`
+	if _, _, err := DecodeOne(invalidMatched, noValOpt, &guard); err == nil {
+		t.Fatalf("expected invalid escape in matched string field to fail")
+	}
+	if guard.ID != 777 || guard.Name != "keep" || !guard.Flag {
+		t.Fatalf("matched invalid escape mutated guard: %+v", guard)
+	}
+
+	// 2. schemaScanner struct (with []string slice -> proj != nil, flatSD == nil), zero fallback under NoValidateJSONSkip.
+	type projTarget struct {
+		ID      int64    `json:"id"`
+		Tags    []string `json:"tags"`
+		Name    string   `json:"name"`
+		Payload []byte   `json:"payload"`
+	}
+	var probe projTarget
+	_, _, _, proj, flatSD, err := unpackAndCompileRoot(&probe)
+	if err != nil {
+		t.Fatalf("unpackAndCompileRoot failed: %v", err)
+	}
+	if flatSD != nil || proj == nil {
+		t.Fatalf("expected proj != nil and flatSD == nil, got flatSD=%v proj=%v", flatSD, proj)
+	}
+	schemaJSON := fmt.Sprintf(`{"id":55,"tags":["t1","t2"],"audit":%s%q%s,"long_note":%q,"name":"schema-ok"}`,
+		deepOpen, longStr, deepClose, longStr)
+	if !proj.shouldUse(len(schemaJSON)) {
+		t.Fatalf("expected proj.shouldUse(%d) == true", len(schemaJSON))
+	}
+	beforeFallback := atomic.LoadUint64(&schemaFallbackCount)
+	var gotProj projTarget
+	if _, _, err := DecodeOne(schemaJSON, noValOpt|(1<<_F_copy_string), &gotProj); err != nil {
+		t.Fatalf("schemaScanner NoValidateJSONSkip failed: %v", err)
+	}
+	if after := atomic.LoadUint64(&schemaFallbackCount); after != beforeFallback {
+		t.Fatalf("schemaScanner triggered %d fallback(s) (expected 0)", after-beforeFallback)
+	}
+	if gotProj.ID != 55 || gotProj.Name != "schema-ok" || !reflect.DeepEqual(gotProj.Tags, []string{"t1", "t2"}) {
+		t.Fatalf("unexpected projTarget result: %+v", gotProj)
+	}
+
+	// Same schemaScanner struct with ValidateString + NoValidateJSONSkip + invalid UTF-8 replaces invalid bytes in matched fields.
+	badProjUTF8 := fmt.Sprintf(`{"id":55,"tags":["t1"],"audit":{"big":%q,"bad":"`+"\xff"+`"},"name":"x`+"\xff"+`"}`, longStr)
+	var gotProjUTF8 projTarget
+	if _, _, err := DecodeOne(badProjUTF8, noValOpt|(1<<_F_validate_string), &gotProjUTF8); err != nil {
+		t.Fatalf("unexpected error in schemaScanner invalid UTF-8 replacement: %v", err)
+	}
+	if gotProjUTF8.Name != "x\ufffd" {
+		t.Fatalf("expected replaced Name in schemaScanner, got %q", gotProjUTF8.Name)
+	}
+	var guardProj projTarget
+
+	// 3. Semantic matrix for skipped strings without _F_no_validate_json:
+	// - ConfigDefault (opts=0): allows raw < 0x20, rejects invalid escape \q
+	// - ConfigStd (opts=_F_validate_string): rejects raw < 0x20, allows lone surrogate \uD800
+	// - UseUnicodeErrors (_F_validate_string | _F_disable_urc): rejects lone surrogate \uD800
+	rawCtrlLong := "lead-" + strings.Repeat("a", 80) + "\x01-tail"
+	schemaRawCtrl := fmt.Sprintf(`{"id":1,"tags":["a"],"skip":"%s","name":"ok","pad":%q}`, rawCtrlLong, longStr)
+	if _, _, err := DecodeOne(schemaRawCtrl, 0, &gotProj); err != nil {
+		t.Fatalf("ConfigDefault should allow raw control byte in skipped string: %v", err)
+	}
+	if _, _, err := DecodeOne(schemaRawCtrl, 1<<_F_validate_string, &guardProj); err == nil {
+		t.Fatalf("ConfigStd must reject raw control byte in skipped string")
+	}
+
+	invalidEscSkipped := fmt.Sprintf(`{"id":1,"tags":["a"],"skip":"`+strings.Repeat("b", 80)+`\q","name":"ok","pad":%q}`, longStr)
+	if _, _, err := DecodeOne(invalidEscSkipped, 0, &guardProj); err == nil {
+		t.Fatalf("ConfigDefault must reject invalid escape in skipped string")
+	}
+
+	loneSurrogateSkipped := fmt.Sprintf(`{"id":1,"tags":["a"],"skip":"`+strings.Repeat("c", 80)+`\uD800","name":"ok","pad":%q}`, longStr)
+	if _, _, err := DecodeOne(loneSurrogateSkipped, 1<<_F_validate_string, &gotProj); err != nil {
+		t.Fatalf("ConfigStd without UseUnicodeErrors should allow lone surrogate in skipped string: %v", err)
+	}
+	if _, _, err := DecodeOne(loneSurrogateSkipped, (1<<_F_validate_string)|(1<<_F_disable_urc), &guardProj); err == nil {
+		t.Fatalf("OptionUseUnicodeErrors must reject lone surrogate in skipped string")
+	}
+}
+
+func TestFlatContainersComprehensive(t *testing.T) {
+	type author struct {
+		Name string `json:"name"`
+		Age  int64  `json:"age"`
+		Male bool   `json:"male"`
+	}
+	type containerAll struct {
+		I    []int     `json:"i"`
+		I64  []int64   `json:"i64"`
+		I32  []int32   `json:"i32"`
+		U    []uint    `json:"u"`
+		U64  []uint64  `json:"u64"`
+		U32  []uint32  `json:"u32"`
+		F64  []float64 `json:"f64"`
+		F32  []float32 `json:"f32"`
+		B    []bool    `json:"b"`
+		S    []string  `json:"s"`
+		ArrI [4]int32  `json:"arri"`
+		ArrS [3]string `json:"arrs"`
+		Auth []author  `json:"authors"`
+	}
+	var c0 containerAll
+	_, _, _, _, flatSD, err := unpackAndCompileRoot(&c0)
+	if err != nil {
+		t.Fatalf("unpackAndCompileRoot containerAll: %v", err)
+	}
+	if flatSD == nil || flatSD.flatPlan == nil || !flatSD.flatPlan.hasContainers {
+		t.Fatalf("expected containerAll to use flatPlan with hasContainers=true, got flatSD=%v", flatSD)
+	}
+
+	// 1. Decode all scalar slices, strings (CopyString + zero-copy), fixed arrays, and flat []Struct.
+	src1 := `{"i":[-1,2],"i64":[-99,100],"i32":[7,-8],"u":[1,2],"u64":[3,4],"u32":[5,6],"f64":[1.5,-0],"f32":[2.5,3.25],"b":[true,false],"s":["alpha","beta","gamma"],"arri":[10,20],"arrs":["x","y","z","dropme"],"authors":[{"name":"alice","age":30,"male":false},{"age":41,"unknown":{"k":[1,2]},"name":"bob","name":"bob2"}]}`
+	buf := []byte(src1)
+	sBuf := string(buf)
+	var gotCopy, gotZC containerAll
+	if _, _, err := DecodeOne(sBuf, (1<<_F_validate_string)|(1<<_F_copy_string), &gotCopy); err != nil {
+		t.Fatalf("DecodeOne CopyString: %v", err)
+	}
+	if _, _, err := DecodeOne(sBuf, 0, &gotZC); err != nil {
+		t.Fatalf("DecodeOne zero-copy: %v", err)
+	}
+	if !reflect.DeepEqual(gotCopy, gotZC) {
+		t.Fatalf("CopyString vs zero-copy mismatch: %+v vs %+v", gotCopy, gotZC)
+	}
+	want1 := containerAll{
+		I:    []int{-1, 2},
+		I64:  []int64{-99, 100},
+		I32:  []int32{7, -8},
+		U:    []uint{1, 2},
+		U64:  []uint64{3, 4},
+		U32:  []uint32{5, 6},
+		F64:  []float64{1.5, math.Copysign(0, -1)},
+		F32:  []float32{2.5, 3.25},
+		B:    []bool{true, false},
+		S:    []string{"alpha", "beta", "gamma"},
+		ArrI: [4]int32{10, 20, 0, 0},
+		ArrS: [3]string{"x", "y", "z"},
+		Auth: []author{{Name: "alice", Age: 30, Male: false}, {Name: "bob2", Age: 41}},
+	}
+	if !reflect.DeepEqual(gotCopy, want1) || !math.Signbit(gotCopy.F64[1]) {
+		t.Fatalf("unexpected containerAll decode:\ngot:  %+v\nwant: %+v", gotCopy, want1)
+	}
+	if flatSD.flatFailStreak != 0 {
+		t.Fatalf("expected flatFailStreak=0, got %d", flatSD.flatFailStreak)
+	}
+
+	// CopyString must detach backing memory from bMut, whereas zero-copy borrows.
+	bMut := []byte(`{"s":["alpha","beta"]}`)
+	sView := unsafe.String(&bMut[0], len(bMut))
+	var detached, borrowed containerAll
+	if _, _, err := DecodeOne(sView, 1<<_F_copy_string, &detached); err != nil {
+		t.Fatalf("DecodeOne CopyString mutable: %v", err)
+	}
+	if _, _, err := DecodeOne(sView, 0, &borrowed); err != nil {
+		t.Fatalf("DecodeOne zero-copy mutable: %v", err)
+	}
+	copy(bMut[7:12], "ZZZZZ")
+	if detached.S[0] != "alpha" {
+		t.Fatalf("expected CopyString slice element to stay detached, got %q", detached.S[0])
+	}
+	if borrowed.S[0] != "ZZZZZ" {
+		t.Fatalf("expected zero-copy slice element to alias source, got %q", borrowed.S[0])
+	}
+
+	// 2. Fixed array partial overwrite + null no-op + empty/null struct slice.
+	reuseArr := containerAll{
+		ArrI: [4]int32{91, 92, 93, 94},
+		ArrS: [3]string{"old0", "old1", "old2"},
+	}
+	if _, _, err := DecodeOne(`{"arri":[5],"arrs":null,"authors":[]}`, 0, &reuseArr); err != nil {
+		t.Fatalf("DecodeOne array/slice edge: %v", err)
+	}
+	if reuseArr.ArrI != [4]int32{5, 0, 0, 0} || reuseArr.ArrS != [3]string{"old0", "old1", "old2"} {
+		t.Fatalf("unexpected fixed array reuse/null result: arri=%v arrs=%v", reuseArr.ArrI, reuseArr.ArrS)
+	}
+	if reuseArr.Auth == nil || len(reuseArr.Auth) != 0 {
+		t.Fatalf("expected non-nil empty authors slice, got %#v", reuseArr.Auth)
+	}
+	if _, _, err := DecodeOne(`{"authors":null}`, 0, &reuseArr); err != nil {
+		t.Fatalf("DecodeOne authors null: %v", err)
+	}
+	if reuseArr.Auth != nil {
+		t.Fatalf("expected authors=nil after null, got %#v", reuseArr.Auth)
+	}
+
+	// DisallowUnknownFields on []Author falls back cleanly and rejects unknown key.
+	var guardDis containerAll
+	if _, _, err := DecodeOne(`{"authors":[{"name":"x","extra":1}]}`, uint64(OptionDisableUnknown), &guardDis); err == nil {
+		t.Fatalf("expected DisallowUnknownFields error inside []Author")
+	}
+
+	// 3. Slice reuse: shrink clears tail strings and []Author tail; [] preserves cap; null sets nil.
+	reused := containerAll{
+		S:    make([]string, 3, 5),
+		Auth: make([]author, 3, 4),
+	}
+	reused.S[0], reused.S[1], reused.S[2] = "s0", "s1", "s2"
+	reused.Auth[0] = author{Name: "a0", Age: 1, Male: true}
+	reused.Auth[1] = author{Name: "a1", Age: 2, Male: true}
+	reused.Auth[2] = author{Name: "a2", Age: 3, Male: false}
+	sBack := reused.S[:5]
+	authBack := reused.Auth[:4]
+
+	if _, _, err := DecodeOne(`{"s":["only"],"authors":[{"age":99}]}`, 0, &reused); err != nil {
+		t.Fatalf("DecodeOne shrink reuse: %v", err)
+	}
+	if !reflect.DeepEqual(reused.S, []string{"only"}) || cap(reused.S) != 5 {
+		t.Fatalf("unexpected reused.S after shrink: %#v (cap=%d)", reused.S, cap(reused.S))
+	}
+	if sBack[1] != "" || sBack[2] != "" {
+		t.Fatalf("expected cleared tail strings, got %#v", sBack)
+	}
+	if len(reused.Auth) != 1 || cap(reused.Auth) != 4 || reused.Auth[0].Name != "a0" || reused.Auth[0].Age != 99 {
+		t.Fatalf("unexpected reused.Auth merge/shrink: %+v (cap=%d)", reused.Auth, cap(reused.Auth))
+	}
+	if authBack[1] != (author{}) || authBack[2] != (author{}) {
+		t.Fatalf("expected cleared []Author tail, got %+v", authBack)
+	}
+	if _, _, err := DecodeOne(`{"s":[]}`, 0, &reused); err != nil {
+		t.Fatalf("DecodeOne empty slice reuse: %v", err)
+	}
+	if reused.S == nil || len(reused.S) != 0 || cap(reused.S) != 5 || sBack[0] != "" {
+		t.Fatalf("expected preserved cap=5 and cleared elem on []: len=%d cap=%d s0=%q", len(reused.S), cap(reused.S), sBack[0])
+	}
+	if _, _, err := DecodeOne(`{"s":null}`, 0, &reused); err != nil {
+		t.Fatalf("DecodeOne null slice reuse: %v", err)
+	}
+	if reused.S != nil {
+		t.Fatalf("expected s=nil after null, got %#v", reused.S)
+	}
+
+	// 4. Atomic bailout without mutating caller vp on threshold exceed, [1,null,3], escaped string, overflow, trailing error.
+	sentinel := containerAll{
+		I64:  []int64{999},
+		S:    []string{"keep"},
+		ArrI: [4]int32{1, 2, 3, 4},
+		Auth: []author{{Name: "keep", Age: 7}},
+	}
+	// Element count > flatMaxElemPool (65 ints) falls back cleanly to standard decoder (succeeds, accurate result).
+	elems65 := strings.Repeat("1,", 64) + "2"
+	var gotBig containerAll
+	if _, _, err := DecodeOne(`{"i64":[`+elems65+`]}`, 0, &gotBig); err != nil || len(gotBig.I64) != 65 || gotBig.I64[64] != 2 {
+		t.Fatalf("expected fallback success on 65 ints, got err=%v len=%d", err, len(gotBig.I64))
+	}
+	// []Author count > flatMaxStructMasks (17 objects) falls back cleanly.
+	auth17 := strings.Repeat(`{"name":"a"},`, 16) + `{"name":"last"}`
+	gotBig = containerAll{}
+	if _, _, err := DecodeOne(`{"authors":[`+auth17+`]}`, 0, &gotBig); err != nil || len(gotBig.Auth) != 17 || gotBig.Auth[16].Name != "last" {
+		t.Fatalf("expected fallback success on 17 authors, got err=%v len=%d", err, len(gotBig.Auth))
+	}
+	// Element contains null: [1,null,3] falls back to standard decoder cleanly.
+	var gotNullElem containerAll
+	if _, _, err := DecodeOne(`{"i64":[1,null,3]}`, 0, &gotNullElem); err != nil || !reflect.DeepEqual(gotNullElem.I64, []int64{1, 0, 3}) {
+		t.Fatalf("expected [1,0,3] on element null fallback, got err=%v vals=%v", err, gotNullElem.I64)
+	}
+	// Escaped string in slice falls back cleanly.
+	var gotEsc containerAll
+	if _, _, err := DecodeOne(`{"s":["a\nb"]}`, 0, &gotEsc); err != nil || !reflect.DeepEqual(gotEsc.S, []string{"a\nb"}) {
+		t.Fatalf("expected escaped slice string fallback, got err=%v vals=%#v", err, gotEsc.S)
+	}
+	// Overflow and syntax errors must return error cleanly and must NOT mutate caller struct during direct bailout.
+	badInputs := []string{
+		`{"s":["mutated"],"i32":[2147483648]}`,
+		`{"s":["mutated"],"i64":[1,2],"arri":[9],}`,
+		`{"s":["mutated"],"authors":[{"name":"x"}],"i64":[1,2] bad}`,
+	}
+	for _, bad := range badInputs {
+		cp := containerAll{
+			I64:  append([]int64(nil), sentinel.I64...),
+			S:    append([]string(nil), sentinel.S...),
+			ArrI: sentinel.ArrI,
+			Auth: append([]author(nil), sentinel.Auth...),
+		}
+		if _, _, err := DecodeOne(bad, 0, &cp); err == nil {
+			t.Fatalf("expected error on %s", bad)
+		}
+	}
+	// Verify tryDecodeFlatContainerPlanBody itself leaves vp untouched on overflow, syntax errors, and trailing invalid UTF-8.
+	badWithTrailingUTF8 := []string{
+		`{"s":["mutated"],"i32":[2147483648]}`,
+		`{"s":["mutated"],"i64":[1,2],"arri":[9],}`,
+		`{"s":["mutated"],"authors":[{"name":"x"}],"i64":[1,2] bad}`,
+		"{\"s\":[\"mutated\"]} \xff",
+	}
+	for _, bad := range badWithTrailingUTF8 {
+		cp := containerAll{
+			I64:  append([]int64(nil), sentinel.I64...),
+			S:    append([]string(nil), sentinel.S...),
+			ArrI: sentinel.ArrI,
+			Auth: append([]author(nil), sentinel.Auth...),
+		}
+		if _, ok := tryDecodeFlatContainerPlanBody(bad, 0, len(bad), 1<<_F_validate_string, unsafe.Pointer(&cp), flatSD.flatPlan, false, true); ok {
+			t.Fatalf("expected direct bailout on %q", bad)
+		}
+		if !reflect.DeepEqual(cp, sentinel) {
+			t.Fatalf("direct bailout mutated caller struct on %q:\ngot:  %+v\nwant: %+v", bad, cp, sentinel)
+		}
+	}
+
+	// 5. Verify benchBook layout hits flatDirect + hasContainers with 0 fallback.
+	type benchAuthor struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+		Male bool   `json:"male"`
+	}
+	type benchBook struct {
+		BookId  int64         `json:"book_id"`
+		BookIds []int64       `json:"book_ids"`
+		Title   string        `json:"title"`
+		Titles  []string      `json:"titles"`
+		Price   float64       `json:"price"`
+		Prices  []float64     `json:"prices"`
+		Hot     bool          `json:"hot"`
+		Hots    []bool        `json:"hots"`
+		Author  benchAuthor   `json:"author"`
+		Authors []benchAuthor `json:"authors"`
+		Weights []int64       `json:"weights"`
+	}
+	var b0 benchBook
+	_, _, _, _, bookSD, err := unpackAndCompileRoot(&b0)
+	if err != nil {
+		t.Fatalf("unpackAndCompileRoot benchBook: %v", err)
+	}
+	if bookSD == nil || bookSD.flatPlan == nil || !bookSD.flatPlan.hasContainers {
+		t.Fatalf("expected benchBook to use flatPlan with hasContainers=true, got bookSD=%v", bookSD)
+	}
+	bookJSON := `{"book_id":123,"book_ids":[1,2,3],"title":"Go Programming","titles":["a","b"],"price":49.5,"prices":[1.1,2.2],"hot":true,"hots":[true,false],"author":{"name":"Alice","age":30,"male":false},"authors":[{"name":"Bob","age":25,"male":true}],"weights":[10,20,30]}`
+	bookSD.flatFailStreak = 0
+	var gotBook benchBook
+	if _, _, err := DecodeOne(bookJSON, 1<<_F_copy_string, &gotBook); err != nil {
+		t.Fatalf("DecodeOne benchBook: %v", err)
+	}
+	if bookSD.flatFailStreak != 0 || gotBook.BookId != 123 || len(gotBook.Authors) != 1 || gotBook.Authors[0].Name != "Bob" {
+		t.Fatalf("unexpected benchBook result (streak=%d): %+v", bookSD.flatFailStreak, gotBook)
+	}
+}
+
+func BenchmarkSmallBookFlatDirect(b *testing.B) {
+	type benchAuthor struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+		Male bool   `json:"male"`
+	}
+	type benchBook struct {
+		BookId  int64         `json:"book_id"`
+		BookIds []int64       `json:"book_ids"`
+		Title   string        `json:"title"`
+		Titles  []string      `json:"titles"`
+		Price   float64       `json:"price"`
+		Prices  []float64     `json:"prices"`
+		Hot     bool          `json:"hot"`
+		Hots    []bool        `json:"hots"`
+		Author  benchAuthor   `json:"author"`
+		Authors []benchAuthor `json:"authors"`
+		Weights []int64       `json:"weights"`
+	}
+	bookJSON := `{"book_id":12125925,"book_ids":[1,2,3,4,5],"title":"Twitter API documentation","titles":["v1","v2","v3"],"price":99.95,"prices":[10.5,20.25,30.75],"hot":true,"hots":[true,false,true],"author":{"name":"Daniel","age":28,"male":true},"authors":[{"name":"Alice","age":24,"male":false},{"name":"Bob","age":31,"male":true}],"weights":[100,200,300]}`
+	b.Run("New_CopyStr", func(b *testing.B) {
+		b.SetBytes(int64(len(bookJSON)))
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var v benchBook
+			if _, _, err := DecodeOne(bookJSON, 1<<_F_copy_string, &v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Reuse_CopyStr", func(b *testing.B) {
+		var v benchBook
+		_, _, _ = DecodeOne(bookJSON, 1<<_F_copy_string, &v)
+		b.SetBytes(int64(len(bookJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, _, err := DecodeOne(bookJSON, 1<<_F_copy_string, &v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("New_ZeroCopy_CaseSens", func(b *testing.B) {
+		b.SetBytes(int64(len(bookJSON)))
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var v benchBook
+			if _, _, err := DecodeOne(bookJSON, uint64(consts.OptionCaseSensitive), &v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("Reuse_ZeroCopy_CaseSens", func(b *testing.B) {
+		var v benchBook
+		_, _, _ = DecodeOne(bookJSON, uint64(consts.OptionCaseSensitive), &v)
+		b.SetBytes(int64(len(bookJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, _, err := DecodeOne(bookJSON, uint64(consts.OptionCaseSensitive), &v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

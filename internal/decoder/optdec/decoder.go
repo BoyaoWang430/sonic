@@ -18,13 +18,14 @@ type (
 )
 
 const (
-	_F_allow_control   = consts.F_allow_control
-	_F_copy_string     = consts.F_copy_string
-	_F_disable_unknown = consts.F_disable_unknown
-	_F_disable_urc     = consts.F_disable_urc
-	_F_use_int64       = consts.F_use_int64
-	_F_use_number      = consts.F_use_number
-	_F_validate_string = consts.F_validate_string
+	_F_allow_control    = consts.F_allow_control
+	_F_copy_string      = consts.F_copy_string
+	_F_disable_unknown  = consts.F_disable_unknown
+	_F_disable_urc      = consts.F_disable_urc
+	_F_use_int64        = consts.F_use_int64
+	_F_use_number       = consts.F_use_number
+	_F_validate_string  = consts.F_validate_string
+	_F_no_validate_json = consts.F_no_validate_json
 )
 
 type Options = consts.Options
@@ -36,6 +37,7 @@ const (
 	OptionDisableUnknown   = consts.OptionDisableUnknown
 	OptionCopyString       = consts.OptionCopyString
 	OptionValidateString   = consts.OptionValidateString
+	OptionNoValidateJSON   = consts.OptionNoValidateJSON
 )
 
 type rootPtrInfo struct {

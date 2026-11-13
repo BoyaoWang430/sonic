@@ -5,10 +5,12 @@ package optdec
 import (
 	"math"
 	"math/bits"
+	"reflect"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
+	"github.com/bytedance/sonic/internal/native/kernels"
 	"github.com/bytedance/sonic/utf8"
 )
 
@@ -19,8 +21,17 @@ type flatStagedField struct {
 }
 
 type flatLeaf struct {
-	offset uint32
-	kind   uint8
+	offset   uint32
+	kind     uint8
+	elemKind uint8
+	arrLen   uint8
+}
+
+type flatStructSliceMeta struct {
+	sd         *structDecoder
+	sliceType  reflect.Type
+	elemSize   uintptr
+	emptySlice reflect.Value
 }
 
 type flatGroup struct {
@@ -30,10 +41,12 @@ type flatGroup struct {
 }
 
 type flatStructPlan struct {
-	leaves  []flatLeaf
-	groups  []flatGroup
-	slots   []int16 // >= 0: leaf index (0..31); < 0: -childGroupIdx into groups
-	ptrMask uint32
+	leaves        []flatLeaf
+	groups        []flatGroup
+	slots         []int16 // >= 0: leaf index (0..31); < 0: -childGroupIdx into groups
+	structSlices  []flatStructSliceMeta
+	ptrMask       uint32
+	hasContainers bool
 }
 
 const (
@@ -78,7 +91,7 @@ func (sd *structDecoder) initFlatDirect() {
 		return
 	}
 
-	hasNested := false
+	hasNestedOrContainer := false
 	if len(entries) <= 32 {
 		allLeaves := true
 		pureASCII := true
@@ -87,8 +100,8 @@ func (sd *structDecoder) initFlatDirect() {
 			ok, isPtr := isFlatLeafKind(entries[i].kind)
 			if !ok {
 				allLeaves = false
-				if entries[i].kind == fieldKindStruct {
-					hasNested = true
+				if entries[i].kind == fieldKindStruct || isFlatContainerField(&entries[i]) {
+					hasNestedOrContainer = true
 				}
 				break
 			}
@@ -107,14 +120,14 @@ func (sd *structDecoder) initFlatDirect() {
 		}
 	} else {
 		for i := range entries {
-			if entries[i].kind == fieldKindStruct {
-				hasNested = true
+			if entries[i].kind == fieldKindStruct || isFlatContainerField(&entries[i]) {
+				hasNestedOrContainer = true
 				break
 			}
 		}
 	}
 
-	if !hasNested {
+	if !hasNestedOrContainer {
 		return
 	}
 
@@ -166,6 +179,69 @@ func buildFlatPlanGroup(plan *flatStructPlan, sd *structDecoder, baseOffset uint
 			plan.slots[slotStart+i] = int16(leafIdx)
 			continue
 		}
+		if fe.kind == fieldKindArray {
+			d := (*arrayDecoder)(fe.subDec)
+			if d != nil && d.len > 0 && d.len <= flatMaxArrayLen {
+				if elemKind, ok := flatScalarElementKind(d.elemDec); ok && d.size == flatScalarKindSize(elemKind) {
+					leafIdx := len(plan.leaves)
+					if leafIdx >= 32 {
+						return false
+					}
+					plan.leaves = append(plan.leaves, flatLeaf{
+						offset:   uint32(totalOff),
+						kind:     fieldKindArray,
+						elemKind: elemKind,
+						arrLen:   uint8(d.len),
+					})
+					plan.hasContainers = true
+					plan.slots[slotStart+i] = int16(leafIdx)
+					continue
+				}
+			}
+			return false
+		}
+		if isFlatScalarSliceKind(fe.kind) {
+			leafIdx := len(plan.leaves)
+			if leafIdx >= 32 {
+				return false
+			}
+			plan.leaves = append(plan.leaves, flatLeaf{
+				offset: uint32(totalOff),
+				kind:   fe.kind,
+			})
+			plan.hasContainers = true
+			plan.slots[slotStart+i] = int16(leafIdx)
+			continue
+		}
+		if fe.kind == fieldKindSlice {
+			d := (*sliceDecoder)(fe.subDec)
+			if d != nil && d.structDec != nil &&
+				d.structDec.flatDirect && d.structDec.flatPlan == nil &&
+				d.structDec.flatPtrMask == 0 && len(d.structDec.fields) > 0 &&
+				len(d.structDec.fields) <= flatMaxArrayLen && len(plan.structSlices) < 256 {
+				leafIdx := len(plan.leaves)
+				if leafIdx >= 32 {
+					return false
+				}
+				metaIdx := len(plan.structSlices)
+				plan.structSlices = append(plan.structSlices, flatStructSliceMeta{
+					sd:         d.structDec,
+					sliceType:  d.typ,
+					elemSize:   d.size,
+					emptySlice: d.emptySlice,
+				})
+				plan.leaves = append(plan.leaves, flatLeaf{
+					offset:   uint32(totalOff),
+					kind:     fieldKindSlice,
+					elemKind: uint8(metaIdx),
+					arrLen:   uint8(len(d.structDec.fields)),
+				})
+				plan.hasContainers = true
+				plan.slots[slotStart+i] = int16(leafIdx)
+				continue
+			}
+			return false
+		}
 		if fe.kind == fieldKindStruct && depth < flatMaxNestedDepth {
 			subSD := (*structDecoder)(fe.subDec)
 			if subSD == nil || subSD == sd {
@@ -195,7 +271,7 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 	if checkTrailing {
 		maxLen = flatSingleDocMaxLen
 	}
-	if startPos < 0 || startPos >= end || end-startPos > maxLen || f&flatUnsupportedOpts != 0 {
+	if startPos < 0 || startPos >= end || end-startPos > maxLen || end > math.MaxUint32 || f&flatUnsupportedOpts != 0 {
 		return 0, false
 	}
 	streak := atomic.LoadUint32(&sd.flatFailStreak)
@@ -207,7 +283,11 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 	var nextPos int
 	var ok bool
 	if sd.flatPlan != nil {
-		nextPos, ok = tryDecodeFlatPlanBody(s, startPos, end, f, vp, sd.flatPlan, utf8Prechecked, checkTrailing)
+		if sd.flatPlan.hasContainers {
+			nextPos, ok = tryDecodeFlatContainerPlanBody(s, startPos, end, f, vp, sd.flatPlan, utf8Prechecked, checkTrailing)
+		} else {
+			nextPos, ok = tryDecodeFlatPlanBody(s, startPos, end, f, vp, sd.flatPlan, utf8Prechecked, checkTrailing)
+		}
 	} else {
 		nextPos, ok = tryDecodeFlatStructBody(s, startPos, end, f, vp, sd, utf8Prechecked, checkTrailing)
 	}
@@ -230,6 +310,7 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 	caseSensitive := f&uint64(consts.OptionCaseSensitive) != 0
 	disUnknown := Options(f)&OptionDisableUnknown != 0
 	strictURC := f&(1<<_F_disable_urc) != 0
+	noValidateJSON := f&(1<<_F_no_validate_json) != 0
 	pureASCIIKeys := sd.flatPureASCIIKeys
 	ptrMask := sd.flatPtrMask
 
@@ -364,7 +445,7 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 				} else {
 					return 0, false
 				}
-				pos, ok = flatSkipValue(strPtr, vc, pos, end, validateStr, strictURC, &nonASCII)
+				pos, ok = flatSkipValue(s, strPtr, vc, pos, end, validateStr, strictURC, noValidateJSON, &nonASCII)
 				if !ok {
 					return 0, false
 				}
@@ -512,6 +593,7 @@ func tryDecodeFlatPlanBody(s string, startPos, end int, f uint64, vp unsafe.Poin
 	caseSensitive := f&uint64(consts.OptionCaseSensitive) != 0
 	disUnknown := Options(f)&OptionDisableUnknown != 0
 	strictURC := f&(1<<_F_disable_urc) != 0
+	noValidateJSON := f&(1<<_F_no_validate_json) != 0
 
 	pos, c, ok := flatSkipWS(strPtr, startPos, end)
 	if !ok {
@@ -542,7 +624,7 @@ func tryDecodeFlatPlanBody(s string, startPos, end int, f uint64, vp unsafe.Poin
 	var preNullMask uint32
 	var nonASCII uint64
 
-	pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, 0, validateStr, caseSensitive, disUnknown, strictURC, &nonASCII, &staged, &preNullStaged, &presentMask, &strMask, &nullMask, &nulledOnceMask, &preNullMask)
+	pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, 0, validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON, &nonASCII, &staged, &preNullStaged, &presentMask, &strMask, &nullMask, &nulledOnceMask, &preNullMask)
 	if !ok {
 		return 0, false
 	}
@@ -572,7 +654,7 @@ func flatScanPlanGroup(
 	pos, end int,
 	plan *flatStructPlan,
 	groupIdx int,
-	validateStr, caseSensitive, disUnknown, strictURC bool,
+	validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON bool,
 	nonASCII *uint64,
 	staged *[32]flatStagedField,
 	preNullStaged **[32]flatStagedField,
@@ -675,7 +757,7 @@ func flatScanPlanGroup(
 				} else {
 					return 0, false
 				}
-				pos, ok = flatSkipValue(strPtr, vc, pos, end, validateStr, strictURC, nonASCII)
+				pos, ok = flatSkipValue(s, strPtr, vc, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
 				if !ok {
 					return 0, false
 				}
@@ -713,7 +795,7 @@ func flatScanPlanGroup(
 				if vc != '{' {
 					return 0, false
 				}
-				pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, int(-slot), validateStr, caseSensitive, disUnknown, strictURC, nonASCII, staged, preNullStaged, presentMask, strMask, nullMask, nulledOnceMask, preNullMask)
+				pos, ok = flatScanPlanGroup(strPtr, s, pos, end, plan, int(-slot), validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON, nonASCII, staged, preNullStaged, presentMask, strMask, nullMask, nulledOnceMask, preNullMask)
 				if !ok {
 					return 0, false
 				}
@@ -1580,16 +1662,28 @@ func flatParseFloat(strPtr unsafe.Pointer, c byte, pos, end int) (float64, int, 
 	return fv, pos, true
 }
 
-func flatSkipString(strPtr unsafe.Pointer, pos, end int, validateStr, strictURC bool, nonASCII *uint64) (int, bool) {
+func flatSkipString(s string, strPtr unsafe.Pointer, pos, end int, validateStr, strictURC, noValidateJSON bool, nonASCII *uint64) (int, bool) {
+	swarSteps := 0
 	for {
 		for pos+8 <= end {
+			if noValidateJSON && swarSteps >= 4 && end-pos >= 32 {
+				relEnd, err := kernels.SkipStringRelaxed(s[pos:end])
+				if err != 0 {
+					return 0, false
+				}
+				if validateStr {
+					*nonASCII = 1
+				}
+				return pos + relEnd, true
+			}
+			swarSteps++
 			w := *(*uint64)(unsafe.Add(strPtr, pos))
 			*nonASCII |= w & swarHigh
 			q := w ^ swarQuote
 			qm := (q - swarOnes) &^ q & swarHigh
 			b := w ^ swarBS
 			em := (b - swarOnes) &^ b & swarHigh
-			if validateStr {
+			if validateStr && !noValidateJSON {
 				em |= (w - swarCtrl) &^ w & swarHigh
 			}
 			if qm != 0 {
@@ -1613,7 +1707,7 @@ func flatSkipString(strPtr unsafe.Pointer, pos, end int, validateStr, strictURC 
 		if c == '"' {
 			return pos + 1, true
 		}
-		if validateStr && c < 0x20 {
+		if validateStr && !noValidateJSON && c < 0x20 {
 			return 0, false
 		}
 		if c != '\\' {
@@ -1622,6 +1716,10 @@ func flatSkipString(strPtr unsafe.Pointer, pos, end int, validateStr, strictURC 
 		}
 		if pos+2 > end {
 			return 0, false
+		}
+		if noValidateJSON {
+			pos += 2
+			continue
 		}
 		esc := *(*byte)(unsafe.Add(strPtr, pos+1))
 		if esc != 'u' {
@@ -1652,7 +1750,7 @@ func flatSkipString(strPtr unsafe.Pointer, pos, end int, validateStr, strictURC 
 	}
 }
 
-func flatSkipValue(strPtr unsafe.Pointer, c byte, pos, end int, validateStr, strictURC bool, nonASCII *uint64) (int, bool) {
+func flatSkipValue(s string, strPtr unsafe.Pointer, c byte, pos, end int, validateStr, strictURC, noValidateJSON bool, nonASCII *uint64) (int, bool) {
 	var frameBits uint64
 	sp := 0
 	var ok bool
@@ -1661,11 +1759,22 @@ func flatSkipValue(strPtr unsafe.Pointer, c byte, pos, end int, validateStr, str
 valueEntry:
 	switch c {
 	case '"':
-		pos, ok = flatSkipString(strPtr, pos, end, validateStr, strictURC, nonASCII)
+		pos, ok = flatSkipString(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
 		if !ok {
 			return 0, false
 		}
 	case '{':
+		if noValidateJSON {
+			nextEnd, err := kernels.SkipContainer(s[:end], pos-1)
+			if err != 0 {
+				return 0, false
+			}
+			if validateStr {
+				*nonASCII = 1
+			}
+			pos = nextEnd
+			goto afterValue
+		}
 		if sp >= 64 {
 			return 0, false
 		}
@@ -1682,6 +1791,17 @@ valueEntry:
 		}
 		goto objKey
 	case '[':
+		if noValidateJSON {
+			nextEnd, err := kernels.SkipContainer(s[:end], pos-1)
+			if err != 0 {
+				return 0, false
+			}
+			if validateStr {
+				*nonASCII = 1
+			}
+			pos = nextEnd
+			goto afterValue
+		}
 		if sp >= 64 {
 			return 0, false
 		}
@@ -1766,7 +1886,7 @@ objKey:
 	if nc != '"' {
 		return 0, false
 	}
-	pos, ok = flatSkipString(strPtr, pos, end, validateStr, strictURC, nonASCII)
+	pos, ok = flatSkipString(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
 	if !ok {
 		return 0, false
 	}

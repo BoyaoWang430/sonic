@@ -35,6 +35,7 @@ const (
 	fieldKindStruct
 	fieldKindPtrStruct
 	fieldKindSlice
+	fieldKindArray
 	fieldKindEface
 	fieldKindSliceEface
 	fieldKindSliceInt
@@ -207,6 +208,9 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 		fe.kind = fieldKindSliceBool
 	case *sliceStringDecoder:
 		fe.kind = fieldKindSliceString
+	case *arrayDecoder:
+		fe.kind = fieldKindArray
+		fe.subDec = unsafe.Pointer(d)
 	}
 	return fe
 }

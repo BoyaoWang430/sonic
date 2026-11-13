@@ -43,9 +43,10 @@ type schemaScanner struct {
 	opts          uint64
 	nbkOffPlus64  uint64
 	nbkBits       uint64
-	validateStr   bool
-	caseSensitive bool
-	disUnknown    bool
+	validateStr    bool
+	noValidateJSON bool
+	caseSensitive  bool
+	disUnknown     bool
 	mutatedPadded bool
 	denseBailout  bool
 	skippedKeys   int
@@ -187,10 +188,11 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		tailStart:     tailStart,
 		nIdx:          0,
 		depth:         0,
-		opts:          p.options,
-		validateStr:   p.options&(1<<_F_validate_string) != 0,
-		caseSensitive: p.options&uint64(consts.OptionCaseSensitive) != 0,
-		disUnknown:    Options(p.options)&OptionDisableUnknown != 0,
+		opts:           p.options,
+		validateStr:    p.options&(1<<_F_validate_string) != 0,
+		noValidateJSON: p.options&(1<<_F_no_validate_json) != 0,
+		caseSensitive:  p.options&uint64(consts.OptionCaseSensitive) != 0,
+		disUnknown:     Options(p.options)&OptionDisableUnknown != 0,
 	}
 	c, ok := sc.skipSpace()
 	if !ok {
@@ -1148,7 +1150,7 @@ func (sc *schemaScanner) scanStringSlow(contentStart int) (uint64, uint64, bool,
 	}
 
 	firstEsc := pos
-	afterQuote, ok := skipStringBodyAt(strPtr, tailPtr, firstEsc, end, safe64, tailStart, opts)
+	afterQuote, ok := skipStringBodyAt(sc.jsonStr, strPtr, tailPtr, firstEsc, end, safe64, tailStart, opts&^(1<<_F_no_validate_json))
 	if !ok {
 		return 0, 0, false, false
 	}
@@ -1425,7 +1427,7 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 	tailStart := sc.tailStart
 	switch c {
 	case '"':
-		if nextPos, done, valid := swarSkipString64(strPtr, tailPtr, pos, end, safe64, tailStart, sc.validateStr); done {
+		if nextPos, done, valid := swarSkipString64(strPtr, tailPtr, pos, end, safe64, tailStart, sc.validateStr && !sc.noValidateJSON); done {
 			if !valid {
 				return false
 			}
@@ -1433,7 +1435,7 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 			return true
 		} else {
 			var ok bool
-			pos, ok = skipStringBodyAt(strPtr, tailPtr, nextPos, end, safe64, tailStart, sc.opts)
+			pos, ok = skipStringBodyAt(sc.jsonStr, strPtr, tailPtr, nextPos, end, safe64, tailStart, sc.opts)
 			if !ok {
 				return false
 			}
@@ -1459,6 +1461,14 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 		sc.pos = pos + 3
 		return true
 	case '{', '[':
+		if sc.noValidateJSON {
+			endPos, err := kernels.SkipContainer(sc.jsonStr[:end], pos-1)
+			if err != 0 {
+				return false
+			}
+			sc.pos = endPos
+			return true
+		}
 		return sc.skipValidateContainer(c)
 	default:
 		if c >= '1' && c <= '9' {
@@ -1598,7 +1608,7 @@ valueEntry:
 			pos = nextPos
 			goto afterValue
 		}
-		pos, ok = skipStringBodyAt(rawPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
+		pos, ok = skipStringBodyAt(sc.jsonStr, rawPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
 		if !ok {
 			return false
 		}
@@ -1799,7 +1809,7 @@ objKeyBody:
 		pos = nextPos
 		goto objAfterKey
 	}
-	pos, ok = skipStringBodyAt(rawPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
+	pos, ok = skipStringBodyAt(sc.jsonStr, rawPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
 	if !ok {
 		return false
 	}
@@ -1951,7 +1961,7 @@ valueEntry:
 			pos = nextPos
 			goto afterValue
 		}
-		pos, ok = skipStringBodyAt(strPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
+		pos, ok = skipStringBodyAt(sc.jsonStr, strPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
 		if !ok {
 			return false
 		}
@@ -2167,7 +2177,7 @@ objKeyBody:
 		pos = nextPos
 		goto objAfterKey
 	}
-	pos, ok = skipStringBodyAt(strPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
+	pos, ok = skipStringBodyAt(sc.jsonStr, strPtr, tailPtr, nextPos, end, safe64, tailStart, opts)
 	if !ok {
 		return false
 	}
@@ -2331,7 +2341,24 @@ func skipSpaceReg(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart in
 	}
 }
 
-func skipStringBodyAt(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart int, opts uint64) (int, bool) {
+func skipStringBodyAt(jsonStr string, strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStart int, opts uint64) (int, bool) {
+	if pos >= end {
+		return pos, false
+	}
+	if opts&(1<<_F_no_validate_json) != 0 {
+		relEnd, err := kernels.SkipStringRelaxed(jsonStr[pos:end])
+		if err != 0 {
+			return pos, false
+		}
+		return pos + relEnd, true
+	}
+	if opts&(1<<_F_validate_string) != 0 && opts&(1<<_F_disable_urc) == 0 {
+		relEnd, err := kernels.SkipStringStrict(jsonStr[pos:end])
+		if err != 0 {
+			return pos, false
+		}
+		return pos + relEnd, true
+	}
 	for {
 		if pos > end {
 			return pos, false
@@ -2398,7 +2425,7 @@ func skipStringBodyAt(strPtr, tailPtr unsafe.Pointer, pos, end, safe64, tailStar
 				pos += bits.TrailingZeros32(quote) + 1
 				return pos, pos <= end
 			}
-			if opts&(1<<5) != 0 && cParityAtFirst(control, bs|quote) {
+			if opts&(1<<_F_validate_string) != 0 && cParityAtFirst(control, bs|quote) {
 				return pos, false
 			}
 			if cParityAtFirst(bs, quote) {
