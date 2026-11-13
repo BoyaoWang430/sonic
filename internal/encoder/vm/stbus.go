@@ -56,12 +56,12 @@ const (
 )
 
 type rootEncPlan struct {
-	prog          *ir.Program
-	boxPool       *sync.Pool
-	pureSpecs     []ir.StructFieldSpec
-	denseSpecs    []ir.StructFieldSpec
-	elemSize      uintptr
-	sizeHint      atomic.Uint32
+	prog           *ir.Program
+	boxPool        *sync.Pool
+	pureSpecs      []ir.StructFieldSpec
+	denseSpecs     []ir.StructFieldSpec
+	elemSize       uintptr
+	sizeHint       atomic.Uint32
 	isDirectPtr    bool
 	hasPureSpecs   bool
 	hasDenseSpecs  bool
@@ -776,16 +776,42 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 		}
 	}
 
-	buf := vars.NewBytes()
 	if plan.allowSizeHint {
 		hint := int(plan.sizeHint.Load())
 		if hint >= minDirectRootHint && hint <= maxDirectRootHint {
 			capHint := hint + (hint >> 5) + 96
-			if cap(*buf) < capHint {
-				*buf = make([]byte, 0, capHint)
+			out := make([]byte, 0, capHint)
+			var stk *vars.Stack
+			if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {
+				stk = vars.NewStack()
 			}
+			err = encodeWithRootPlan(&out, rv, plan, stk, fv)
+			if err != nil {
+				if stk != nil {
+					vars.ResetStack(stk)
+					vars.FreeStack(stk)
+				}
+				runtime.KeepAlive(val)
+				return nil, true, err
+			}
+			if stk != nil {
+				vars.FreeStack(stk)
+			}
+			runtime.KeepAlive(val)
+
+			if len(out) > capHint || len(out)*2 < hint {
+				plan.sizeHint.Store(clampRootSizeHint(len(out)))
+			}
+			if cap(out) > len(out)*2 && cap(out) > 1024 {
+				shrunk := make([]byte, len(out))
+				copy(shrunk, out)
+				return shrunk, true, nil
+			}
+			return out, true, nil
 		}
 	}
+
+	buf := vars.NewBytes()
 	origBuf := (*buf)[:0]
 	var stk *vars.Stack
 	if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {

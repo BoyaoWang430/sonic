@@ -222,7 +222,9 @@ func (p *Parser) resetSlabs() {
 	p.strPtrSlab = nil
 	p.strPtrSlabOff = 0
 	p.strPtrSlabNext = 0
-	p.ptrStructSlabs = [4]ptrStructSlabSlot{}
+	if p.ptrStructSlabs[0].sd != nil {
+		p.ptrStructSlabs = [4]ptrStructSlabSlot{}
+	}
 }
 
 func (p *Parser) allocScalarPtr(hint int) unsafe.Pointer {
@@ -347,33 +349,33 @@ func (p *Parser) copyArenaBytesSlow(b []byte) string {
 }
 
 func (p *Parser) allocStrSlab(n int) []byte {
+	jsonLen := len(p.Json)
+	slabMax := maxStrSlabCap
+	// Cap slabs at 4 KiB for <=32 KiB payloads so ~13 KiB docs don't jump from 6.5 KiB to 13 KiB.
+	if jsonLen <= 32768 {
+		slabMax = 4096
+	}
 	nextCap := p.strSlabNext
 	if nextCap == 0 {
-		jsonLen := len(p.Json)
 		if p.options&(1<<_F_copy_string) == 0 {
-			nextCap = jsonLen / 2
-			if nextCap < 128 {
-				nextCap = 128
-			} else if nextCap > 1024 {
-				nextCap = 1024
-			}
+			nextCap = 128
 		} else if p.isEface {
 			nextCap = jsonLen / 2
 			if nextCap < minStrSlabCap {
 				nextCap = minStrSlabCap
-			} else if nextCap > maxStrSlabCap {
-				nextCap = maxStrSlabCap
+			} else if nextCap > slabMax {
+				nextCap = slabMax
 			}
 		} else if jsonLen <= 128 {
 			nextCap = minStrSlabCap
 		} else if jsonLen <= 1024 {
 			nextCap = 256
 		} else {
-			nextCap = jsonLen / 3
+			nextCap = jsonLen / 4
 			if nextCap < initStrSlabCap {
 				nextCap = initStrSlabCap
-			} else if nextCap > 8192 {
-				nextCap = 8192
+			} else if nextCap > slabMax {
+				nextCap = slabMax
 			}
 		}
 	}
@@ -381,8 +383,8 @@ func (p *Parser) allocStrSlab(n int) []byte {
 		nextCap = n * 2
 	}
 	growCap := nextCap * 2
-	if growCap > maxStrSlabCap {
-		growCap = maxStrSlabCap
+	if growCap > slabMax {
+		growCap = slabMax
 	}
 	p.strSlabNext = growCap
 	slab := make([]byte, nextCap)
