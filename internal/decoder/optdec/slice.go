@@ -55,7 +55,7 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 	if sd := d.structDec; sd != nil {
 		p := ctx.Parser
 		opts := p.options
-		if sd.fast && opts&fastStructExcludeMask == 0 {
+		if sd.canFastObj(opts) {
 			jsonStr := p.Json
 			copyStr := opts&(1<<_F_copy_string) != 0
 			for i := 0; i < size; i++ {
@@ -94,7 +94,7 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 		p := ctx.Parser
 		opts := p.options
 		ptrs := unsafe.Slice((*unsafe.Pointer)(elems), size)
-		if psd.fast && opts&fastStructExcludeMask == 0 {
+		if psd.canFastObj(opts) {
 			jsonStr := p.Json
 			copyStr := opts&(1<<_F_copy_string) != 0
 			for i := 0; i < size; i++ {

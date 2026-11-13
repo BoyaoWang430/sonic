@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/bytedance/sonic/internal/decoder/consts"
 	"github.com/bytedance/sonic/utf8"
 )
 
@@ -17,6 +16,15 @@ const (
 	flatMaxElemPool    = 64
 	flatMaxStructMasks = 16
 )
+
+type flatContainerScanState struct {
+	flatScanState
+	elemNullMask  uint64
+	elemPool      [flatMaxElemPool]uint64
+	structMasks   [flatMaxStructMasks]uint16
+	elemPoolPos   int
+	structMaskPos int
+}
 
 func isFlatScalarOrPtrKind(kind uint8) bool {
 	return (kind >= fieldKindString && kind <= fieldKindF32) ||
@@ -230,10 +238,6 @@ func tryDecodeFlatContainerPlanBody(s string, startPos, end int, f uint64, vp un
 	strPtr := unsafe.Pointer(unsafe.StringData(s))
 	validateStr := f&(1<<_F_validate_string) != 0
 	copyStr := f&(1<<_F_copy_string) != 0
-	caseSensitive := f&uint64(consts.OptionCaseSensitive) != 0
-	disUnknown := Options(f)&OptionDisableUnknown != 0
-	strictURC := f&(1<<_F_disable_urc) != 0
-	noValidateJSON := f&(1<<_F_no_validate_json) != 0
 
 	pos, c, ok := flatSkipWS(strPtr, startPos, end)
 	if !ok {
@@ -255,31 +259,15 @@ func tryDecodeFlatContainerPlanBody(s string, startPos, end int, f uint64, vp un
 		return 0, false
 	}
 
-	var staged [32]flatStagedField
-	var preNullStaged *[32]flatStagedField
-	var elemPool [flatMaxElemPool]uint64
-	var structMasks [flatMaxStructMasks]uint16
-	var presentMask uint32
-	var strMask uint32
-	var nullMask uint32
-	var nulledOnceMask uint32
-	var preNullMask uint32
-	var nonASCII uint64
-	elemPoolPos := 0
-	structMaskPos := 0
+	var cs flatContainerScanState
+	cs.opts = flatScanOpts(f)
 
-	pos, ok = flatScanContainerPlanGroup(
-		strPtr, s, pos, end, plan, 0,
-		validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON,
-		&nonASCII, &staged, &preNullStaged,
-		&elemPool, &elemPoolPos, &structMasks, &structMaskPos,
-		&presentMask, &strMask, &nullMask, &nulledOnceMask, &preNullMask,
-	)
+	pos, ok = flatScanContainerPlanGroup(strPtr, s, pos, end, plan, 0, &cs)
 	if !ok {
 		return 0, false
 	}
 
-	if validateStr && !utf8Prechecked && nonASCII != 0 {
+	if validateStr && !utf8Prechecked && cs.nonASCII != 0 {
 		if !utf8.ValidateString(s[startPos:pos]) {
 			return 0, false
 		}
@@ -290,14 +278,11 @@ func tryDecodeFlatContainerPlanBody(s string, startPos, end int, f uint64, vp un
 		}
 	}
 
-	if presentMask == 0 && nullMask == 0 {
+	if cs.presentMask == 0 && cs.nullMask == 0 {
 		return pos, true
 	}
 
-	flatCommitContainerPlanLeaves(
-		vp, plan, &staged, preNullStaged, &elemPool, &structMasks,
-		presentMask, strMask, nullMask, nulledOnceMask, preNullMask, s, copyStr,
-	)
+	flatCommitContainerPlanLeaves(vp, plan, &cs, s, copyStr)
 	return pos, true
 }
 
@@ -307,15 +292,7 @@ func flatScanContainerPlanGroup(
 	pos, end int,
 	plan *flatStructPlan,
 	groupIdx int,
-	validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	staged *[32]flatStagedField,
-	preNullStaged **[32]flatStagedField,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
-	structMasks *[flatMaxStructMasks]uint16,
-	structMaskPos *int,
-	presentMask, strMask, nullMask, nulledOnceMask, preNullMask *uint32,
+	cs *flatContainerScanState,
 ) (int, bool) {
 	if pos >= end {
 		return 0, false
@@ -342,27 +319,26 @@ func flatScanContainerPlanGroup(
 
 	grp := &plan.groups[groupIdx]
 	sd := grp.sd
-	fields := sd.fields
-	nfields := len(fields)
+	keyPrefixes := grp.keyPrefixes
 	slotBase := int(grp.slotStart)
-	pureASCIIKeys := grp.pureASCIIKeys
 	ptrMask := plan.ptrMask
+	opts := cs.opts
+	validateStr := opts&flatOptValidateStr != 0
+	caseSensitive := opts&flatOptCaseSensitive != 0
+	disUnknown := opts&flatOptDisUnknown != 0
 	expectedIdx := 0
 
 	for {
 		var idx int
-		if pureASCIIKeys && uint(expectedIdx) < uint(nfields) {
-			fe := &fields[expectedIdx]
-			n := len(fe.name)
-			if pos+n+2 <= end && *(*uint16)(unsafe.Add(strPtr, pos+n)) == 0x3a22 &&
-				unsafe.String((*byte)(unsafe.Add(strPtr, pos)), n) == fe.name {
-				pos += n + 2
+		if uint(expectedIdx) < uint(len(keyPrefixes)) {
+			if nextPos, ok := flatMatchKeyFast(strPtr, pos, end, &keyPrefixes[expectedIdx]); ok {
+				pos = nextPos
 				idx = expectedIdx
 				expectedIdx++
 				goto keyMatched
 			}
 		}
-		idx, pos, ok = flatScanGroupKeySlow(strPtr, pos, end, sd, &expectedIdx, caseSensitive, validateStr, nonASCII)
+		idx, pos, ok = flatScanGroupKeySlow(strPtr, pos, end, sd, &expectedIdx, caseSensitive, validateStr, &cs.nonASCII)
 		if !ok {
 			return 0, false
 		}
@@ -385,7 +361,7 @@ func flatScanContainerPlanGroup(
 					return 0, false
 				}
 			}
-			pos, ok = flatSkipValue(s, strPtr, vc, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+			pos, ok = flatSkipValue(strPtr, vc, pos, end, cs.opts, &cs.nonASCII)
 			if !ok {
 				return 0, false
 			}
@@ -419,13 +395,7 @@ func flatScanContainerPlanGroup(
 				if vc != '{' {
 					return 0, false
 				}
-				pos, ok = flatScanContainerPlanGroup(
-					strPtr, s, pos, end, plan, int(-slot),
-					validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON,
-					nonASCII, staged, preNullStaged,
-					elemPool, elemPoolPos, structMasks, structMaskPos,
-					presentMask, strMask, nullMask, nulledOnceMask, preNullMask,
-				)
+				pos, ok = flatScanContainerPlanGroup(strPtr, s, pos, end, plan, int(-slot), cs)
 				if !ok {
 					return 0, false
 				}
@@ -444,31 +414,31 @@ func flatScanContainerPlanGroup(
 					}
 					pos += 3
 					if ptrMask&bit != 0 {
-						if *nulledOnceMask&bit == 0 && *presentMask&bit != 0 {
-							if *preNullStaged == nil {
-								*preNullStaged = flatAllocPreNullStaged()
+						if cs.nulledOnceMask&bit == 0 && cs.presentMask&bit != 0 {
+							if cs.preNullStaged == nil {
+								cs.preNullStaged = flatAllocPreNullStaged()
 							}
-							(*preNullStaged)[leafIdx] = staged[leafIdx]
-							*preNullMask |= bit
+							(*cs.preNullStaged)[leafIdx] = cs.staged[leafIdx]
+							cs.preNullMask |= bit
 						}
-						*nullMask |= bit
-						*nulledOnceMask |= bit
-						*presentMask &^= bit
-						*strMask &^= bit
+						cs.nullMask |= bit
+						cs.nulledOnceMask |= bit
+						cs.presentMask &^= bit
+						cs.strMask &^= bit
 					}
 					goto afterVal
 				}
-				nextPos, isStr, ok := flatStageLeafValue(strPtr, s, vc, pos, end, lf.kind, validateStr, nonASCII, &staged[leafIdx])
+				nextPos, isStr, ok := flatStageLeafValue(strPtr, s, vc, pos, end, lf.kind, validateStr, &cs.nonASCII, &cs.staged[leafIdx])
 				if !ok {
 					return 0, false
 				}
 				pos = nextPos
-				*presentMask |= bit
+				cs.presentMask |= bit
 				if ptrMask&bit != 0 {
-					*nullMask &^= bit
+					cs.nullMask &^= bit
 				}
 				if isStr {
-					*strMask |= bit
+					cs.strMask |= bit
 				}
 
 			case lf.kind == fieldKindArray:
@@ -483,19 +453,15 @@ func flatScanContainerPlanGroup(
 					return 0, false
 				}
 				var startOff, count int
-				pos, startOff, count, ok = flatStageScalarArray(
-					strPtr, s, pos, end, lf.elemKind, int(lf.arrLen),
-					validateStr, strictURC, noValidateJSON, nonASCII,
-					elemPool, elemPoolPos,
-				)
+				pos, startOff, count, ok = flatStageScalarArray(strPtr, s, pos, end, lf.elemKind, int(lf.arrLen), cs)
 				if !ok {
 					return 0, false
 				}
-				staged[leafIdx].strOff = uint32(startOff)
-				staged[leafIdx].strLen = uint32(count)
-				*presentMask |= bit
+				cs.staged[leafIdx].strOff = uint32(startOff)
+				cs.staged[leafIdx].strLen = uint32(count)
+				cs.presentMask |= bit
 				if lf.elemKind == fieldKindString {
-					*strMask |= bit
+					cs.strMask |= bit
 				}
 
 			case isFlatScalarSliceKind(lf.kind):
@@ -504,29 +470,26 @@ func flatScanContainerPlanGroup(
 						return 0, false
 					}
 					pos += 3
-					*nullMask |= bit
-					*presentMask &^= bit
-					*strMask &^= bit
+					cs.nullMask |= bit
+					cs.nulledOnceMask |= bit
+					cs.presentMask &^= bit
+					cs.strMask &^= bit
 					goto afterVal
 				}
 				if vc != '[' {
 					return 0, false
 				}
 				var startOff, count int
-				pos, startOff, count, ok = flatStageScalarArray(
-					strPtr, s, pos, end, flatSliceElemKind(lf.kind), -1,
-					validateStr, strictURC, noValidateJSON, nonASCII,
-					elemPool, elemPoolPos,
-				)
+				pos, startOff, count, ok = flatStageScalarArray(strPtr, s, pos, end, flatSliceElemKind(lf.kind), -1, cs)
 				if !ok {
 					return 0, false
 				}
-				staged[leafIdx].strOff = uint32(startOff)
-				staged[leafIdx].strLen = uint32(count)
-				*presentMask |= bit
-				*nullMask &^= bit
+				cs.staged[leafIdx].strOff = uint32(startOff)
+				cs.staged[leafIdx].strLen = uint32(count)
+				cs.presentMask |= bit
+				cs.nullMask &^= bit
 				if lf.kind == fieldKindSliceString {
-					*strMask |= bit
+					cs.strMask |= bit
 				}
 
 			case lf.kind == fieldKindSlice:
@@ -535,29 +498,26 @@ func flatScanContainerPlanGroup(
 						return 0, false
 					}
 					pos += 3
-					*nullMask |= bit
-					*presentMask &^= bit
-					*strMask &^= bit
+					cs.nullMask |= bit
+					cs.nulledOnceMask |= bit
+					cs.presentMask &^= bit
+					cs.strMask &^= bit
 					goto afterVal
 				}
 				if vc != '[' {
 					return 0, false
 				}
 				var elemStart, maskStart, count int
-				pos, elemStart, maskStart, count, ok = flatStageStructSlice(
-					strPtr, s, pos, end, &plan.structSlices[lf.elemKind],
-					validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON, nonASCII,
-					elemPool, elemPoolPos, structMasks, structMaskPos,
-				)
+				pos, elemStart, maskStart, count, ok = flatStageStructSlice(strPtr, s, pos, end, &plan.structSlices[lf.elemKind], cs)
 				if !ok {
 					return 0, false
 				}
-				staged[leafIdx].strOff = uint32(elemStart)
-				staged[leafIdx].strLen = uint32(count)
-				staged[leafIdx].val = uint64(maskStart)
-				*presentMask |= bit
-				*nullMask &^= bit
-				*strMask |= bit
+				cs.staged[leafIdx].strOff = uint32(elemStart)
+				cs.staged[leafIdx].strLen = uint32(count)
+				cs.staged[leafIdx].val = uint64(maskStart)
+				cs.presentMask |= bit
+				cs.nullMask &^= bit
+				cs.strMask |= bit
 
 			default:
 				return 0, false
@@ -622,13 +582,7 @@ func flatArrayNextElemSlow(strPtr unsafe.Pointer, pos, end int) (int, byte, bool
 	return pos, ec, false, true
 }
 
-func flatSkipArrayRest(
-	s string,
-	strPtr unsafe.Pointer,
-	pos, end int,
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-) (int, bool) {
+func flatSkipArrayRest(strPtr unsafe.Pointer, s string, pos, end int, cs *flatContainerScanState) (int, bool) {
 	var ec byte
 	var ok bool
 	for {
@@ -657,45 +611,60 @@ func flatSkipArrayRest(
 		if !ok {
 			return 0, false
 		}
-		pos, ok = flatSkipValue(s, strPtr, ec, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+		pos, ok = flatSkipValue(strPtr, ec, pos, end, cs.opts, &cs.nonASCII)
 		if !ok {
 			return 0, false
 		}
 	}
 }
 
+func flatStageNullElem(s string, pos, end, pIdx int, cs *flatContainerScanState) (int, bool) {
+	if pos+3 > end || s[pos:pos+3] != "ull" {
+		return 0, false
+	}
+	cs.elemPool[pIdx] = 0
+	cs.elemNullMask |= uint64(1) << uint(pIdx)
+	return pos + 3, true
+}
+
 func flatStageSignedArray(
-	s string,
 	strPtr unsafe.Pointer,
+	s string,
 	ec byte,
 	pos, end int,
 	maxPos uint64,
-	maxNeg uint64,
 	arrCap int,
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, bool) {
-	poolStart := *elemPoolPos
+	maxNeg := maxPos + 1
+	poolStart := cs.elemPoolPos
 	pIdx := poolStart
 	for {
 		if pIdx >= flatMaxElemPool {
 			return 0, 0, 0, false
 		}
-		val, nextPos, ok := flatParseSigned(strPtr, ec, pos, end, maxPos, maxNeg)
-		if !ok {
-			return 0, 0, 0, false
-		}
-		elemPool[pIdx] = val
-		pIdx++
-		pos = nextPos
-		if arrCap >= 0 && pIdx-poolStart == arrCap {
-			pos, ok = flatSkipArrayRest(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+		if ec != 'n' {
+			val, nextPos, ok := flatParseSigned(strPtr, ec, pos, end, maxPos, maxNeg)
 			if !ok {
 				return 0, 0, 0, false
 			}
-			*elemPoolPos = pIdx
+			cs.elemPool[pIdx] = val
+			pos = nextPos
+		} else {
+			var ok bool
+			pos, ok = flatStageNullElem(s, pos, end, pIdx, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+		}
+		pIdx++
+		if arrCap >= 0 && pIdx-poolStart == arrCap {
+			var ok bool
+			pos, ok = flatSkipArrayRest(strPtr, s, pos, end, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, arrCap, true
 		}
 		if pos >= end {
@@ -709,52 +678,58 @@ func flatStageSignedArray(
 				continue
 			}
 		} else if d == ']' {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos + 1, poolStart, pIdx - poolStart, true
 		}
-		var done bool
+		var done, ok bool
 		pos, ec, done, ok = flatArrayNextElemSlow(strPtr, pos, end)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		if done {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, pIdx - poolStart, true
 		}
 	}
 }
 
 func flatStageUnsignedArray(
-	s string,
 	strPtr unsafe.Pointer,
+	s string,
 	ec byte,
 	pos, end int,
 	maxU uint64,
 	arrCap int,
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, bool) {
-	poolStart := *elemPoolPos
+	poolStart := cs.elemPoolPos
 	pIdx := poolStart
 	for {
 		if pIdx >= flatMaxElemPool {
 			return 0, 0, 0, false
 		}
-		val, nextPos, ok := flatParseUnsigned(strPtr, ec, pos, end, maxU)
-		if !ok {
-			return 0, 0, 0, false
-		}
-		elemPool[pIdx] = val
-		pIdx++
-		pos = nextPos
-		if arrCap >= 0 && pIdx-poolStart == arrCap {
-			pos, ok = flatSkipArrayRest(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+		if ec != 'n' {
+			val, nextPos, ok := flatParseUnsigned(strPtr, ec, pos, end, maxU)
 			if !ok {
 				return 0, 0, 0, false
 			}
-			*elemPoolPos = pIdx
+			cs.elemPool[pIdx] = val
+			pos = nextPos
+		} else {
+			var ok bool
+			pos, ok = flatStageNullElem(s, pos, end, pIdx, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+		}
+		pIdx++
+		if arrCap >= 0 && pIdx-poolStart == arrCap {
+			var ok bool
+			pos, ok = flatSkipArrayRest(strPtr, s, pos, end, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, arrCap, true
 		}
 		if pos >= end {
@@ -768,60 +743,66 @@ func flatStageUnsignedArray(
 				continue
 			}
 		} else if d == ']' {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos + 1, poolStart, pIdx - poolStart, true
 		}
-		var done bool
+		var done, ok bool
 		pos, ec, done, ok = flatArrayNextElemSlow(strPtr, pos, end)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		if done {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, pIdx - poolStart, true
 		}
 	}
 }
 
 func flatStageFloatArray(
-	s string,
 	strPtr unsafe.Pointer,
+	s string,
 	ec byte,
 	pos, end int,
 	is32 bool,
 	arrCap int,
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, bool) {
-	poolStart := *elemPoolPos
+	poolStart := cs.elemPoolPos
 	pIdx := poolStart
 	for {
 		if pIdx >= flatMaxElemPool {
 			return 0, 0, 0, false
 		}
-		fv, nextPos, ok := flatParseFloat(strPtr, ec, pos, end)
-		if !ok {
-			return 0, 0, 0, false
-		}
-		if is32 {
-			fv32 := float32(fv)
-			if math.IsInf(float64(fv32), 0) && !math.IsInf(fv, 0) {
-				return 0, 0, 0, false
-			}
-			elemPool[pIdx] = uint64(math.Float32bits(fv32))
-		} else {
-			elemPool[pIdx] = math.Float64bits(fv)
-		}
-		pIdx++
-		pos = nextPos
-		if arrCap >= 0 && pIdx-poolStart == arrCap {
-			pos, ok = flatSkipArrayRest(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+		if ec != 'n' {
+			fv, nextPos, ok := flatParseFloat(strPtr, ec, pos, end)
 			if !ok {
 				return 0, 0, 0, false
 			}
-			*elemPoolPos = pIdx
+			if is32 {
+				fv32 := float32(fv)
+				if math.IsInf(float64(fv32), 0) && !math.IsInf(fv, 0) {
+					return 0, 0, 0, false
+				}
+				cs.elemPool[pIdx] = uint64(math.Float32bits(fv32))
+			} else {
+				cs.elemPool[pIdx] = math.Float64bits(fv)
+			}
+			pos = nextPos
+		} else {
+			var ok bool
+			pos, ok = flatStageNullElem(s, pos, end, pIdx, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+		}
+		pIdx++
+		if arrCap >= 0 && pIdx-poolStart == arrCap {
+			var ok bool
+			pos, ok = flatSkipArrayRest(strPtr, s, pos, end, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, arrCap, true
 		}
 		if pos >= end {
@@ -835,33 +816,30 @@ func flatStageFloatArray(
 				continue
 			}
 		} else if d == ']' {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos + 1, poolStart, pIdx - poolStart, true
 		}
-		var done bool
+		var done, ok bool
 		pos, ec, done, ok = flatArrayNextElemSlow(strPtr, pos, end)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		if done {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, pIdx - poolStart, true
 		}
 	}
 }
 
 func flatStageBoolArray(
-	s string,
 	strPtr unsafe.Pointer,
+	s string,
 	ec byte,
 	pos, end int,
 	arrCap int,
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, bool) {
-	poolStart := *elemPoolPos
+	poolStart := cs.elemPoolPos
 	pIdx := poolStart
 	for {
 		if pIdx >= flatMaxElemPool {
@@ -871,25 +849,31 @@ func flatStageBoolArray(
 			if pos+3 > end || s[pos:pos+3] != "rue" {
 				return 0, 0, 0, false
 			}
-			elemPool[pIdx] = 1
+			cs.elemPool[pIdx] = 1
 			pos += 3
 		} else if ec == 'f' {
 			if pos+4 > end || s[pos:pos+4] != "alse" {
 				return 0, 0, 0, false
 			}
-			elemPool[pIdx] = 0
+			cs.elemPool[pIdx] = 0
 			pos += 4
+		} else if ec == 'n' {
+			var ok bool
+			pos, ok = flatStageNullElem(s, pos, end, pIdx, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
 		} else {
 			return 0, 0, 0, false
 		}
 		pIdx++
 		if arrCap >= 0 && pIdx-poolStart == arrCap {
 			var ok bool
-			pos, ok = flatSkipArrayRest(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+			pos, ok = flatSkipArrayRest(strPtr, s, pos, end, cs)
 			if !ok {
 				return 0, 0, 0, false
 			}
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, arrCap, true
 		}
 		if pos >= end {
@@ -903,7 +887,7 @@ func flatStageBoolArray(
 				continue
 			}
 		} else if d == ']' {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos + 1, poolStart, pIdx - poolStart, true
 		}
 		var done, ok bool
@@ -912,43 +896,52 @@ func flatStageBoolArray(
 			return 0, 0, 0, false
 		}
 		if done {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, pIdx - poolStart, true
 		}
 	}
 }
 
 func flatStageStringArray(
-	s string,
 	strPtr unsafe.Pointer,
+	s string,
 	ec byte,
 	pos, end int,
 	arrCap int,
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, bool) {
-	poolStart := *elemPoolPos
+	validateStr := cs.opts&flatOptValidateStr != 0
+	poolStart := cs.elemPoolPos
 	pIdx := poolStart
 	for {
-		if pIdx >= flatMaxElemPool || ec != '"' {
+		if pIdx >= flatMaxElemPool {
 			return 0, 0, 0, false
 		}
-		strStart := pos
-		strEnd, ok := flatScanSimpleString(strPtr, pos, end, validateStr, nonASCII)
-		if !ok {
-			return 0, 0, 0, false
-		}
-		elemPool[pIdx] = (uint64(strStart) << 32) | uint64(strEnd-strStart)
-		pIdx++
-		pos = strEnd + 1
-		if arrCap >= 0 && pIdx-poolStart == arrCap {
-			pos, ok = flatSkipArrayRest(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+		if ec == '"' {
+			strStart := pos
+			strEnd, ok := flatScanSimpleString(strPtr, pos, end, validateStr, &cs.nonASCII)
 			if !ok {
 				return 0, 0, 0, false
 			}
-			*elemPoolPos = pIdx
+			cs.elemPool[pIdx] = (uint64(strStart) << 32) | uint64(strEnd-strStart)
+			pos = strEnd + 1
+		} else if ec == 'n' {
+			var ok bool
+			pos, ok = flatStageNullElem(s, pos, end, pIdx, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+		} else {
+			return 0, 0, 0, false
+		}
+		pIdx++
+		if arrCap >= 0 && pIdx-poolStart == arrCap {
+			var ok bool
+			pos, ok = flatSkipArrayRest(strPtr, s, pos, end, cs)
+			if !ok {
+				return 0, 0, 0, false
+			}
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, arrCap, true
 		}
 		if pos >= end {
@@ -962,16 +955,16 @@ func flatStageStringArray(
 				continue
 			}
 		} else if d == ']' {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos + 1, poolStart, pIdx - poolStart, true
 		}
-		var done bool
+		var done, ok bool
 		pos, ec, done, ok = flatArrayNextElemSlow(strPtr, pos, end)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		if done {
-			*elemPoolPos = pIdx
+			cs.elemPoolPos = pIdx
 			return pos, poolStart, pIdx - poolStart, true
 		}
 	}
@@ -983,10 +976,7 @@ func flatStageScalarArray(
 	pos, end int,
 	elemKind uint8,
 	arrCap int, // >= 0 for fixed arrays [N]T; -1 for slices []T
-	validateStr, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, bool) {
 	if pos >= end {
 		return 0, 0, 0, false
@@ -1002,38 +992,37 @@ func flatStageScalarArray(
 		}
 	}
 	if ec == ']' {
-		return pos, *elemPoolPos, 0, true
+		return pos, cs.elemPoolPos, 0, true
 	}
 	if arrCap == 0 {
-		pos, ok := flatSkipArrayRest(s, strPtr, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
-		return pos, *elemPoolPos, 0, ok
+		return 0, 0, 0, false
 	}
 
 	switch elemKind {
 	case fieldKindI64:
-		return flatStageSignedArray(s, strPtr, ec, pos, end, math.MaxInt64, uint64(math.MaxInt64)+1, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageSignedArray(strPtr, s, ec, pos, end, math.MaxInt64, arrCap, cs)
 	case fieldKindI32:
-		return flatStageSignedArray(s, strPtr, ec, pos, end, math.MaxInt32, uint64(math.MaxInt32)+1, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageSignedArray(strPtr, s, ec, pos, end, math.MaxInt32, arrCap, cs)
 	case fieldKindI16:
-		return flatStageSignedArray(s, strPtr, ec, pos, end, math.MaxInt16, uint64(math.MaxInt16)+1, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageSignedArray(strPtr, s, ec, pos, end, math.MaxInt16, arrCap, cs)
 	case fieldKindI8:
-		return flatStageSignedArray(s, strPtr, ec, pos, end, math.MaxInt8, uint64(math.MaxInt8)+1, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageSignedArray(strPtr, s, ec, pos, end, math.MaxInt8, arrCap, cs)
 	case fieldKindU64:
-		return flatStageUnsignedArray(s, strPtr, ec, pos, end, math.MaxUint64, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageUnsignedArray(strPtr, s, ec, pos, end, math.MaxUint64, arrCap, cs)
 	case fieldKindU32:
-		return flatStageUnsignedArray(s, strPtr, ec, pos, end, math.MaxUint32, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageUnsignedArray(strPtr, s, ec, pos, end, math.MaxUint32, arrCap, cs)
 	case fieldKindU16:
-		return flatStageUnsignedArray(s, strPtr, ec, pos, end, math.MaxUint16, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageUnsignedArray(strPtr, s, ec, pos, end, math.MaxUint16, arrCap, cs)
 	case fieldKindU8:
-		return flatStageUnsignedArray(s, strPtr, ec, pos, end, math.MaxUint8, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageUnsignedArray(strPtr, s, ec, pos, end, math.MaxUint8, arrCap, cs)
 	case fieldKindF64:
-		return flatStageFloatArray(s, strPtr, ec, pos, end, false, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageFloatArray(strPtr, s, ec, pos, end, false, arrCap, cs)
 	case fieldKindF32:
-		return flatStageFloatArray(s, strPtr, ec, pos, end, true, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageFloatArray(strPtr, s, ec, pos, end, true, arrCap, cs)
 	case fieldKindBool:
-		return flatStageBoolArray(s, strPtr, ec, pos, end, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageBoolArray(strPtr, s, ec, pos, end, arrCap, cs)
 	case fieldKindString:
-		return flatStageStringArray(s, strPtr, ec, pos, end, arrCap, validateStr, strictURC, noValidateJSON, nonASCII, elemPool, elemPoolPos)
+		return flatStageStringArray(strPtr, s, ec, pos, end, arrCap, cs)
 	default:
 		return 0, 0, 0, false
 	}
@@ -1044,27 +1033,26 @@ func flatStageStructSlice(
 	s string,
 	pos, end int,
 	meta *flatStructSliceMeta,
-	validateStr, caseSensitive, disUnknown, strictURC, noValidateJSON bool,
-	nonASCII *uint64,
-	elemPool *[flatMaxElemPool]uint64,
-	elemPoolPos *int,
-	structMasks *[flatMaxStructMasks]uint16,
-	structMaskPos *int,
+	cs *flatContainerScanState,
 ) (int, int, int, int, bool) {
 	pos, ec, ok := flatNextNonWSByte(strPtr, pos, end)
 	if !ok {
 		return 0, 0, 0, 0, false
 	}
-	elemStart := *elemPoolPos
-	maskStart := *structMaskPos
+	elemStart := cs.elemPoolPos
+	maskStart := cs.structMaskPos
 	if ec == ']' {
 		return pos, elemStart, maskStart, 0, true
 	}
 
 	sd := meta.sd
 	fields := sd.fields
+	keyPrefixes := meta.keyPrefixes
 	nf := len(fields)
-	pureASCIIKeys := sd.flatPureASCIIKeys
+	opts := cs.opts
+	validateStr := opts&flatOptValidateStr != 0
+	caseSensitive := opts&flatOptCaseSensitive != 0
+	disUnknown := opts&flatOptDisUnknown != 0
 	count := 0
 	var st flatStagedField
 
@@ -1072,13 +1060,13 @@ func flatStageStructSlice(
 		if ec != '{' {
 			return 0, 0, 0, 0, false
 		}
-		mIdx := *structMaskPos
-		base := *elemPoolPos
+		mIdx := cs.structMaskPos
+		base := cs.elemPoolPos
 		if mIdx >= flatMaxStructMasks || base+nf > flatMaxElemPool {
 			return 0, 0, 0, 0, false
 		}
-		*structMaskPos = mIdx + 1
-		*elemPoolPos = base + nf
+		cs.structMaskPos = mIdx + 1
+		cs.elemPoolPos = base + nf
 
 		var subMask uint16
 		var nc byte
@@ -1093,18 +1081,15 @@ func flatStageStructSlice(
 					return 0, 0, 0, 0, false
 				}
 				var fi int
-				if pureASCIIKeys && uint(expectedIdx) < uint(nf) {
-					fe := &fields[expectedIdx]
-					n := len(fe.name)
-					if pos+n+2 <= end && *(*uint16)(unsafe.Add(strPtr, pos+n)) == 0x3a22 &&
-						unsafe.String((*byte)(unsafe.Add(strPtr, pos)), n) == fe.name {
-						pos += n + 2
+				if uint(expectedIdx) < uint(len(keyPrefixes)) {
+					if nextPos, matched := flatMatchKeyFast(strPtr, pos, end, &keyPrefixes[expectedIdx]); matched {
+						pos = nextPos
 						fi = expectedIdx
 						expectedIdx++
 						goto subKeyMatched
 					}
 				}
-				fi, pos, ok = flatScanGroupKeySlow(strPtr, pos, end, sd, &expectedIdx, caseSensitive, validateStr, nonASCII)
+				fi, pos, ok = flatScanGroupKeySlow(strPtr, pos, end, sd, &expectedIdx, caseSensitive, validateStr, &cs.nonASCII)
 				if !ok {
 					return 0, 0, 0, 0, false
 				}
@@ -1126,7 +1111,7 @@ func flatStageStructSlice(
 					if disUnknown {
 						return 0, 0, 0, 0, false
 					}
-					pos, ok = flatSkipValue(s, strPtr, vc, pos, end, validateStr, strictURC, noValidateJSON, nonASCII)
+					pos, ok = flatSkipValue(strPtr, vc, pos, end, cs.opts, &cs.nonASCII)
 					if !ok {
 						return 0, 0, 0, 0, false
 					}
@@ -1137,12 +1122,12 @@ func flatStageStructSlice(
 					pos += 3
 				} else {
 					ek := fields[fi].kind
-					nextPos, _, ok := flatStageLeafValue(strPtr, s, vc, pos, end, ek, validateStr, nonASCII, &st)
+					nextPos, _, ok := flatStageLeafValue(strPtr, s, vc, pos, end, ek, validateStr, &cs.nonASCII, &st)
 					if !ok {
 						return 0, 0, 0, 0, false
 					}
 					pos = nextPos
-					elemPool[base+fi] = flatPackElemField(&st, ek)
+					cs.elemPool[base+fi] = flatPackElemField(&st, ek)
 					subMask |= uint16(1) << uint(fi)
 				}
 
@@ -1152,6 +1137,11 @@ func flatStageStructSlice(
 				delim := *(*byte)(unsafe.Add(strPtr, pos))
 				if delim == ',' {
 					pos++
+					if pos < end && *(*byte)(unsafe.Add(strPtr, pos)) == '"' {
+						pos++
+						nc = '"'
+						continue
+					}
 					pos, nc, ok = flatNextNonWSByte(strPtr, pos, end)
 					if !ok {
 						return 0, 0, 0, 0, false
@@ -1179,7 +1169,7 @@ func flatStageStructSlice(
 			}
 		}
 
-		structMasks[mIdx] = subMask
+		cs.structMasks[mIdx] = subMask
 		count++
 
 		if pos >= end {
@@ -1236,34 +1226,63 @@ func flatClearSliceNull(elem unsafe.Pointer, lf *flatLeaf, plan *flatStructPlan)
 	}
 }
 
-func flatPrepareScalarSlice[T any](dst *[]T, n int) ([]T, bool) {
-	if n == 0 {
-		if cap(*dst) > 0 {
-			*dst = (*dst)[:0]
-		} else {
-			*dst = []T{}
+func flatSliceElemNullBits(elemNullMask uint64, start, n int) uint64 {
+	if n <= 0 {
+		return 0
+	}
+	return (elemNullMask >> uint(start)) & (^uint64(0) >> uint(64-n))
+}
+
+func flatPrepareCommitSlice[T any](dst *[]T, n int, nulled bool) []T {
+	if !nulled && n > 0 {
+		if old := *dst; cap(old) >= n {
+			out := old[:n]
+			*dst = out
+			return out
 		}
-		return nil, false
 	}
-	if cap(*dst) >= n {
-		return (*dst)[:n], true
+	if nulled {
+		*dst = nil
 	}
-	return make([]T, n), true
+	if n == 0 {
+		*dst = []T{}
+		return nil
+	}
+	old := *dst
+	s := make([]T, n)
+	if len(old) > 0 {
+		copy(s, old)
+	}
+	*dst = s
+	return s
+}
+
+func flatSliceNullBitsIfAny(elemNullMask uint64, start, n int) uint64 {
+	if elemNullMask == 0 || n <= 0 {
+		return 0
+	}
+	return (elemNullMask >> uint(start)) & (^uint64(0) >> uint(64-n))
 }
 
 func flatCommitContainerPlanLeaves(
 	vp unsafe.Pointer,
 	plan *flatStructPlan,
-	staged *[32]flatStagedField,
-	preNullStaged *[32]flatStagedField,
-	elemPool *[flatMaxElemPool]uint64,
-	structMasks *[flatMaxStructMasks]uint16,
-	presentMask, strMask, nullMask, nulledOnceMask, preNullMask uint32,
+	cs *flatContainerScanState,
 	s string,
 	copyStr bool,
 ) {
 	leaves := plan.leaves
 	ptrMask := plan.ptrMask
+	staged := &cs.staged
+	preNullStaged := cs.preNullStaged
+	elemPool := &cs.elemPool
+	structMasks := &cs.structMasks
+	presentMask := cs.presentMask
+	strMask := cs.strMask
+	nullMask := cs.nullMask
+	nulledOnceMask := cs.nulledOnceMask
+	preNullMask := cs.preNullMask
+	elemNullMask := cs.elemNullMask
 
 	if ptrPreNull := preNullMask & ptrMask; ptrPreNull != 0 {
 		flatCommitPreNullLeaves(vp, leaves, preNullStaged, ptrPreNull, s, copyStr)
@@ -1317,16 +1336,24 @@ func flatCommitContainerPlanLeaves(
 					}
 				}
 			case fieldKindArray:
-				start := int(st.strOff)
-				count := int(st.strLen)
-				for j := 0; j < count; j++ {
-					copySlabBytes += int(uint32(elemPool[start+j]))
+				if lf.elemKind == fieldKindString {
+					start := int(st.strOff)
+					count := int(st.strLen)
+					nullBits := flatSliceElemNullBits(elemNullMask, start, count)
+					for j := 0; j < count; j++ {
+						if nullBits&(uint64(1)<<uint(j)) == 0 {
+							copySlabBytes += int(uint32(elemPool[start+j]))
+						}
+					}
 				}
 			case fieldKindSliceString:
 				start := int(st.strOff)
 				count := int(st.strLen)
+				nullBits := flatSliceElemNullBits(elemNullMask, start, count)
 				for j := 0; j < count; j++ {
-					copySlabBytes += int(uint32(elemPool[start+j]))
+					if nullBits&(uint64(1)<<uint(j)) == 0 {
+						copySlabBytes += int(uint32(elemPool[start+j]))
+					}
 				}
 			case fieldKindSlice:
 				meta := &plan.structSlices[lf.elemKind]
@@ -1380,7 +1407,11 @@ func flatCommitContainerPlanLeaves(
 			arrLen := int(lf.arrLen)
 			start := int(st.strOff)
 			count := int(st.strLen)
+			nullBits := flatSliceElemNullBits(elemNullMask, start, count)
 			for i := 0; i < count; i++ {
+				if nullBits&(uint64(1)<<uint(i)) != 0 {
+					continue
+				}
 				slot := unsafe.Add(elem, uintptr(i)*elemSize)
 				est := flatUnpackElemField(elemPool[start+i], elemKind)
 				flatWriteValueScalarOrStr(slot, elemKind, &est, s, copyStr, copySlab, &copyOff)
@@ -1392,175 +1423,197 @@ func flatCommitContainerPlanLeaves(
 		case lf.kind == fieldKindSliceInt:
 			dst := (*[]int)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = int(int64(u))
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = int(int64(u))
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = int(int64(u))
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceI64:
 			dst := (*[]int64)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = int64(u)
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = int64(u)
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = int64(u)
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceI32:
 			dst := (*[]int32)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = int32(u)
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = int32(u)
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = int32(u)
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceUint:
 			dst := (*[]uint)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = uint(u)
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = uint(u)
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = uint(u)
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceU64:
 			dst := (*[]uint64)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					copy(out, vals)
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = u
+						}
+					}
+				}
 			}
-			copy(out, elemPool[int(st.strOff):int(st.strOff)+n])
-			*dst = out
 		case lf.kind == fieldKindSliceU32:
 			dst := (*[]uint32)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = uint32(u)
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = uint32(u)
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = uint32(u)
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceF64:
 			dst := (*[]float64)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = math.Float64frombits(u)
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = math.Float64frombits(u)
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = math.Float64frombits(u)
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceF32:
 			dst := (*[]float32)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = math.Float32frombits(uint32(u))
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = math.Float32frombits(uint32(u))
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = math.Float32frombits(uint32(u))
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceBool:
 			dst := (*[]bool)(elem)
 			n := int(st.strLen)
-			out, ok := flatPrepareScalarSlice(dst, n)
-			if !ok {
-				continue
+			start := int(st.strOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				vals := elemPool[start : start+n]
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i, u := range vals {
+						out[i] = u != 0
+					}
+				} else {
+					for i, u := range vals {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							out[i] = u != 0
+						}
+					}
+				}
 			}
-			vals := elemPool[int(st.strOff) : int(st.strOff)+n]
-			for i, u := range vals {
-				out[i] = u != 0
-			}
-			*dst = out
 		case lf.kind == fieldKindSliceString:
 			dst := (*[]string)(elem)
 			n := int(st.strLen)
-			if n == 0 {
-				if cap(*dst) > 0 {
-					clear((*dst)[:cap(*dst)])
-					*dst = (*dst)[:0]
-				} else {
-					*dst = []string{}
-				}
-				continue
-			}
-			var out []string
-			if cap(*dst) >= n {
-				oldLen := len(*dst)
-				if oldLen > n {
-					clear((*dst)[n:oldLen])
-				}
-				out = (*dst)[:n]
-			} else {
-				out = make([]string, n)
-			}
 			start := int(st.strOff)
-			for i := 0; i < n; i++ {
-				est := flatUnpackElemField(elemPool[start+i], fieldKindString)
-				out[i] = flatResolveStr(&est, s, copyStr, copySlab, &copyOff)
+			if out := flatPrepareCommitSlice(dst, n, nulledOnceMask&bit != 0); out != nil {
+				if nullBits := flatSliceNullBitsIfAny(elemNullMask, start, n); nullBits == 0 {
+					for i := 0; i < n; i++ {
+						est := flatUnpackElemField(elemPool[start+i], fieldKindString)
+						out[i] = flatResolveStr(&est, s, copyStr, copySlab, &copyOff)
+					}
+				} else {
+					for i := 0; i < n; i++ {
+						if nullBits&(uint64(1)<<uint(i)) == 0 {
+							est := flatUnpackElemField(elemPool[start+i], fieldKindString)
+							out[i] = flatResolveStr(&est, s, copyStr, copySlab, &copyOff)
+						}
+					}
+				}
 			}
-			*dst = out
 		case lf.kind == fieldKindSlice:
 			meta := &plan.structSlices[lf.elemKind]
 			n := int(st.strLen)
 			rv := reflect.NewAt(meta.sliceType, elem).Elem()
+			if nulledOnceMask&bit != 0 {
+				rv.SetZero()
+			}
 			if n == 0 {
-				if rv.Cap() > 0 {
-					oldLen := rv.Len()
-					for j := 0; j < oldLen; j++ {
-						rv.Index(j).SetZero()
-					}
-					rv.SetLen(0)
-				} else {
-					rv.Set(meta.emptySlice)
-				}
+				rv.Set(meta.emptySlice)
 				continue
 			}
-			oldLen := rv.Len()
 			if rv.Cap() < n {
-				if oldLen > 0 {
-					for j := 0; j < oldLen; j++ {
-						rv.Index(j).SetZero()
-					}
-					rv.SetLen(0)
-				}
-				rv.Grow(n)
-				rv.SetLen(n)
-			} else {
-				if oldLen > n {
-					for j := n; j < oldLen; j++ {
-						rv.Index(j).SetZero()
-					}
-				}
-				rv.SetLen(n)
-				if n > oldLen {
-					for j := oldLen; j < n; j++ {
-						rv.Index(j).SetZero()
-					}
-				}
+				rv.Grow(n - rv.Len())
 			}
+			rv.SetLen(n)
 			elemsPtr := rv.UnsafePointer()
 			subFields := meta.sd.fields
 			nf := len(subFields)

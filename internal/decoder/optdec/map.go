@@ -584,7 +584,7 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	var gerr error
 	next := obj.Children()
 	p := ctx.Parser
-	if psd := d.ptrStructDec; psd != nil && !d.freshElem && psd.fast && p.options&fastStructExcludeMask == 0 {
+	if psd := d.ptrStructDec; psd != nil && !d.freshElem && psd.canFastObj(p.options) {
 		jsonStr := p.Json
 		copyStr := p.options&(1<<_F_copy_string) != 0
 		for i := 0; i < obj.Len(); i++ {
@@ -619,7 +619,7 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 			}
 			next = valn.Next()
 		}
-	} else if sd := d.structDec; sd != nil && !d.freshElem && sd.fast && p.options&fastStructExcludeMask == 0 {
+	} else if sd := d.structDec; sd != nil && !d.freshElem && sd.canFastObj(p.options) {
 		jsonStr := p.Json
 		copyStr := p.options&(1<<_F_copy_string) != 0
 		for i := 0; i < obj.Len(); i++ {

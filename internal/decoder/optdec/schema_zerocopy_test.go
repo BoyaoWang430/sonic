@@ -988,7 +988,53 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 		t.Fatalf("UseInt64 vs UseNumber mismatch: %+v vs %+v", gotI64, gotNum)
 	}
 
-	// Verify nested interface{} still honors UseNumber and UseInt64!
+	if !sdConcrete.canFastObj(1<<_F_use_number) || !sdConcrete.canFastObj(1<<_F_use_int64) {
+		t.Fatalf("expected sdConcrete.canFastObj=true under UseNumber/UseInt64")
+	}
+	if sdAny.canFastObj(1<<_F_use_number) || sdAny.canFastObj(1<<_F_use_int64) {
+		t.Fatalf("expected sdAny.canFastObj=false under UseNumber/UseInt64")
+	}
+
+	// Verify sliceDecoder.FromDom and mapStrKeyDecoder.FromDom also use fast struct path
+	// when element type has no interface{} (P3-1), and honor UseNumber/UseInt64 otherwise.
+	sliceJSON := `[` + concreteJSON + `,` + concreteValidJSON + `]`
+	mapJSON := `{"k1":` + concreteJSON + `,"k2":` + concreteValidJSON + `}`
+	for _, opt := range []uint64{1 << _F_use_number, 1 << _F_use_int64} {
+		if opt == 1<<_F_use_int64 {
+			sliceJSON = `[` + concreteValidJSON + `,` + concreteValidJSON + `]`
+			mapJSON = `{"k1":` + concreteValidJSON + `,"k2":` + concreteValidJSON + `}`
+		}
+		var sVal []concreteTapeStruct
+		if _, _, err := DecodeOne(sliceJSON, opt, &sVal); err != nil {
+			t.Fatalf("DecodeOne []concreteTapeStruct opt=%d: %v", opt, err)
+		}
+		if len(sVal) != 2 || !reflect.DeepEqual(sVal[0], gotNum) || !reflect.DeepEqual(sVal[1], gotNum) {
+			t.Fatalf("unexpected []concreteTapeStruct opt=%d: %+v", opt, sVal)
+		}
+		var sPtr []*concreteTapeStruct
+		if _, _, err := DecodeOne(sliceJSON, opt, &sPtr); err != nil {
+			t.Fatalf("DecodeOne []*concreteTapeStruct opt=%d: %v", opt, err)
+		}
+		if len(sPtr) != 2 || !reflect.DeepEqual(*sPtr[0], gotNum) || !reflect.DeepEqual(*sPtr[1], gotNum) {
+			t.Fatalf("unexpected []*concreteTapeStruct opt=%d: %+v", opt, sPtr)
+		}
+		var mVal map[string]concreteTapeStruct
+		if _, _, err := DecodeOne(mapJSON, opt, &mVal); err != nil {
+			t.Fatalf("DecodeOne map[string]concreteTapeStruct opt=%d: %v", opt, err)
+		}
+		if len(mVal) != 2 || !reflect.DeepEqual(mVal["k1"], gotNum) || !reflect.DeepEqual(mVal["k2"], gotNum) {
+			t.Fatalf("unexpected map[string]concreteTapeStruct opt=%d: %+v", opt, mVal)
+		}
+		var mPtr map[string]*concreteTapeStruct
+		if _, _, err := DecodeOne(mapJSON, opt, &mPtr); err != nil {
+			t.Fatalf("DecodeOne map[string]*concreteTapeStruct opt=%d: %v", opt, err)
+		}
+		if len(mPtr) != 2 || !reflect.DeepEqual(*mPtr["k1"], gotNum) || !reflect.DeepEqual(*mPtr["k2"], gotNum) {
+			t.Fatalf("unexpected map[string]*concreteTapeStruct opt=%d: %+v", opt, mPtr)
+		}
+	}
+
+	// Verify nested interface{} inside slice/map of structs STILL honors UseNumber and UseInt64!
 	anyJSON := `{"id":7,"sub":{"payload":9007199254740993}}`
 	var anyNum, anyI64 outerWithNestedAny
 	if _, _, err := DecodeOne(anyJSON, 1<<_F_use_number, &anyNum); err != nil {
@@ -1002,6 +1048,20 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 	}
 	if iv, ok := anyI64.Sub.Payload.(int64); !ok || iv != 9007199254740993 {
 		t.Fatalf("expected int64, got %T (%v)", anyI64.Sub.Payload, anyI64.Sub.Payload)
+	}
+	var anySliceNum []outerWithNestedAny
+	if _, _, err := DecodeOne(`[`+anyJSON+`]`, 1<<_F_use_number, &anySliceNum); err != nil {
+		t.Fatalf("DecodeOne []outerWithNestedAny UseNumber: %v", err)
+	}
+	if jn, ok := anySliceNum[0].Sub.Payload.(json.Number); !ok || string(jn) != "9007199254740993" {
+		t.Fatalf("expected []struct json.Number, got %T (%v)", anySliceNum[0].Sub.Payload, anySliceNum[0].Sub.Payload)
+	}
+	var anyMapI64 map[string]outerWithNestedAny
+	if _, _, err := DecodeOne(`{"x":`+anyJSON+`}`, 1<<_F_use_int64, &anyMapI64); err != nil {
+		t.Fatalf("DecodeOne map[string]outerWithNestedAny UseInt64: %v", err)
+	}
+	if iv, ok := anyMapI64["x"].Sub.Payload.(int64); !ok || iv != 9007199254740993 {
+		t.Fatalf("expected map struct int64, got %T (%v)", anyMapI64["x"].Sub.Payload, anyMapI64["x"].Sub.Payload)
 	}
 }
 
@@ -1242,7 +1302,8 @@ func TestFlatContainersComprehensive(t *testing.T) {
 		t.Fatalf("expected DisallowUnknownFields error inside []Author")
 	}
 
-	// 3. Slice reuse: shrink clears tail strings and []Author tail; [] preserves cap; null sets nil.
+	// 3. Slice reuse: shrink leaves tail elements untouched; [] allocates a new empty slice
+	// without mutating existing backing aliases; null sets nil without mutating existing backing aliases.
 	reused := containerAll{
 		S:    make([]string, 3, 5),
 		Auth: make([]author, 3, 4),
@@ -1260,20 +1321,26 @@ func TestFlatContainersComprehensive(t *testing.T) {
 	if !reflect.DeepEqual(reused.S, []string{"only"}) || cap(reused.S) != 5 {
 		t.Fatalf("unexpected reused.S after shrink: %#v (cap=%d)", reused.S, cap(reused.S))
 	}
-	if sBack[1] != "" || sBack[2] != "" {
-		t.Fatalf("expected cleared tail strings, got %#v", sBack)
+	if sBack[1] != "s1" || sBack[2] != "s2" {
+		t.Fatalf("expected backing tail strings preserved, got %#v", sBack)
 	}
-	if len(reused.Auth) != 1 || cap(reused.Auth) != 4 || reused.Auth[0].Name != "a0" || reused.Auth[0].Age != 99 {
+	if len(reused.Auth) != 1 || cap(reused.Auth) != 4 || reused.Auth[0].Name != "a0" || reused.Auth[0].Age != 99 || !reused.Auth[0].Male {
 		t.Fatalf("unexpected reused.Auth merge/shrink: %+v (cap=%d)", reused.Auth, cap(reused.Auth))
 	}
-	if authBack[1] != (author{}) || authBack[2] != (author{}) {
-		t.Fatalf("expected cleared []Author tail, got %+v", authBack)
+	if authBack[1] != (author{Name: "a1", Age: 2, Male: true}) || authBack[2] != (author{Name: "a2", Age: 3, Male: false}) {
+		t.Fatalf("expected backing []Author tail preserved, got %+v", authBack)
 	}
 	if _, _, err := DecodeOne(`{"s":[]}`, 0, &reused); err != nil {
 		t.Fatalf("DecodeOne empty slice reuse: %v", err)
 	}
-	if reused.S == nil || len(reused.S) != 0 || cap(reused.S) != 5 || sBack[0] != "" {
-		t.Fatalf("expected preserved cap=5 and cleared elem on []: len=%d cap=%d s0=%q", len(reused.S), cap(reused.S), sBack[0])
+	if reused.S == nil || len(reused.S) != 0 || cap(reused.S) != 0 || sBack[0] != "only" {
+		t.Fatalf("expected fresh empty slice without touching backing alias on []: len=%d cap=%d s0=%q", len(reused.S), cap(reused.S), sBack[0])
+	}
+	if _, _, err := DecodeOne(`{"authors":[]}`, 0, &reused); err != nil {
+		t.Fatalf("DecodeOne empty authors reuse: %v", err)
+	}
+	if reused.Auth == nil || len(reused.Auth) != 0 || cap(reused.Auth) != 0 || authBack[0].Age != 99 {
+		t.Fatalf("expected fresh empty authors without touching backing alias on []: len=%d cap=%d a0=%+v", len(reused.Auth), cap(reused.Auth), authBack[0])
 	}
 	if _, _, err := DecodeOne(`{"s":null}`, 0, &reused); err != nil {
 		t.Fatalf("DecodeOne null slice reuse: %v", err)
@@ -1282,7 +1349,7 @@ func TestFlatContainersComprehensive(t *testing.T) {
 		t.Fatalf("expected s=nil after null, got %#v", reused.S)
 	}
 
-	// 4. Atomic bailout without mutating caller vp on threshold exceed, [1,null,3], escaped string, overflow, trailing error.
+	// 4. Scalar null elements stay on direct fast path; atomic bailout on threshold exceed / escaped string / overflow / trailing error.
 	sentinel := containerAll{
 		I64:  []int64{999},
 		S:    []string{"keep"},
@@ -1301,10 +1368,19 @@ func TestFlatContainersComprehensive(t *testing.T) {
 	if _, _, err := DecodeOne(`{"authors":[`+auth17+`]}`, 0, &gotBig); err != nil || len(gotBig.Auth) != 17 || gotBig.Auth[16].Name != "last" {
 		t.Fatalf("expected fallback success on 17 authors, got err=%v len=%d", err, len(gotBig.Auth))
 	}
-	// Element contains null: [1,null,3] falls back to standard decoder cleanly.
+	// Scalar slices & arrays containing null elements stay on flatContainer direct fast path without fallback.
+	flatSD.flatFailStreak = 0
 	var gotNullElem containerAll
-	if _, _, err := DecodeOne(`{"i64":[1,null,3]}`, 0, &gotNullElem); err != nil || !reflect.DeepEqual(gotNullElem.I64, []int64{1, 0, 3}) {
-		t.Fatalf("expected [1,0,3] on element null fallback, got err=%v vals=%v", err, gotNullElem.I64)
+	nullElemJSON := `{"i64":[1,null,3],"s":["a",null,"c"],"b":[true,null],"f64":[1.5,null],"arri":[10,null,30],"arrs":[null,"mid"]}`
+	if _, _, err := DecodeOne(nullElemJSON, 1<<_F_copy_string, &gotNullElem); err != nil ||
+		flatSD.flatFailStreak != 0 ||
+		!reflect.DeepEqual(gotNullElem.I64, []int64{1, 0, 3}) ||
+		!reflect.DeepEqual(gotNullElem.S, []string{"a", "", "c"}) ||
+		!reflect.DeepEqual(gotNullElem.B, []bool{true, false}) ||
+		!reflect.DeepEqual(gotNullElem.F64, []float64{1.5, 0}) ||
+		gotNullElem.ArrI != [4]int32{10, 0, 30, 0} ||
+		gotNullElem.ArrS != [3]string{"", "mid", ""} {
+		t.Fatalf("unexpected direct null-element decode (streak=%d): %+v", flatSD.flatFailStreak, gotNullElem)
 	}
 	// Escaped string in slice falls back cleanly.
 	var gotEsc containerAll
@@ -1385,6 +1461,196 @@ func TestFlatContainersComprehensive(t *testing.T) {
 	}
 	if bookSD.flatFailStreak != 0 || gotBook.BookId != 123 || len(gotBook.Authors) != 1 || gotBook.Authors[0].Name != "Bob" {
 		t.Fatalf("unexpected benchBook result (streak=%d): %+v", bookSD.flatFailStreak, gotBook)
+	}
+}
+
+func TestFlatContainersSliceAndNullParity(t *testing.T) {
+	type item struct {
+		Name string `json:"name"`
+		Age  int64  `json:"age"`
+		Male bool   `json:"male"`
+	}
+	type containerBase struct {
+		I    []int     `json:"i"`
+		I64  []int64   `json:"i64"`
+		U64  []uint64  `json:"u64"`
+		F64  []float64 `json:"f64"`
+		B    []bool    `json:"b"`
+		S    []string  `json:"s"`
+		ArrI [4]int32  `json:"arri"`
+		ArrS [3]string `json:"arrs"`
+		Auth []item    `json:"authors"`
+	}
+	type containerTapeOnly struct {
+		containerBase
+		ForceTape map[string]int `json:"_force_tape"`
+	}
+
+	var b0 containerBase
+	_, _, _, _, fastSD, err := unpackAndCompileRoot(&b0)
+	if err != nil || fastSD == nil || fastSD.flatPlan == nil || !fastSD.flatPlan.hasContainers {
+		t.Fatalf("expected containerBase to use flatContainerPlan, err=%v sd=%v", err, fastSD)
+	}
+	var t0 containerTapeOnly
+	_, _, _, _, tapeFlatSD, err := unpackAndCompileRoot(&t0)
+	if err != nil || tapeFlatSD != nil {
+		t.Fatalf("expected containerTapeOnly not to use flatDirect, err=%v sd=%v", err, tapeFlatSD)
+	}
+
+	type prefillAliases struct {
+		base     containerBase
+		i64Back  []int64
+		sBack    []string
+		authBack []item
+	}
+	makePrefilled := func(initLen, initCap int) prefillAliases {
+		i64Buf := make([]int64, initCap)
+		sBuf := make([]string, initCap)
+		authBuf := make([]item, initCap)
+		iBuf := make([]int, initCap)
+		u64Buf := make([]uint64, initCap)
+		f64Buf := make([]float64, initCap)
+		bBuf := make([]bool, initCap)
+		for k := 0; k < initCap; k++ {
+			iBuf[k] = 100 + k
+			i64Buf[k] = int64(200 + k)
+			u64Buf[k] = uint64(300 + k)
+			f64Buf[k] = float64(400 + k)
+			bBuf[k] = k%2 == 0
+			sBuf[k] = fmt.Sprintf("init-%d", k)
+			authBuf[k] = item{Name: fmt.Sprintf("n%d", k), Age: int64(10 + k), Male: k%2 == 0}
+		}
+		return prefillAliases{
+			base: containerBase{
+				I:    iBuf[:initLen:initCap],
+				I64:  i64Buf[:initLen:initCap],
+				U64:  u64Buf[:initLen:initCap],
+				F64:  f64Buf[:initLen:initCap],
+				B:    bBuf[:initLen:initCap],
+				S:    sBuf[:initLen:initCap],
+				ArrI: [4]int32{10, 20, 30, 40},
+				ArrS: [3]string{"a0", "a1", "a2"},
+				Auth: authBuf[:initLen:initCap],
+			},
+			i64Back:  i64Buf,
+			sBack:    sBuf,
+			authBack: authBuf,
+		}
+	}
+
+	cases := []struct {
+		name    string
+		initLen int
+		initCap int
+		input   string
+	}{
+		{
+			name:    "empty_slices",
+			initLen: 2,
+			initCap: 4,
+			input:   `{"i":[],"i64":[],"u64":[],"f64":[],"b":[],"s":[],"authors":[]}`,
+		},
+		{
+			name:    "shrink",
+			initLen: 3,
+			initCap: 5,
+			input:   `{"i64":[7],"s":["only"],"authors":[{"age":99}]}`,
+		},
+		{
+			name:    "incap_extend",
+			initLen: 1,
+			initCap: 4,
+			input:   `{"i64":[1,null,3],"s":["p",null,"q"],"authors":[{"age":88},{"male":true}]}`,
+		},
+		{
+			name:    "grow",
+			initLen: 2,
+			initCap: 2,
+			input:   `{"i64":[1,null,3,4],"s":["x",null,"z"],"authors":[{"age":11},{"male":true},{"name":"new"}]}`,
+		},
+		{
+			name:    "null_then_slice",
+			initLen: 2,
+			initCap: 4,
+			input:   `{"i":null,"i":[3],"i64":null,"i64":[],"s":null,"s":[null,"k"],"authors":null,"authors":[{"age":7}]}`,
+		},
+		{
+			name:    "dup_key_null_then_slice",
+			initLen: 2,
+			initCap: 4,
+			input:   `{"i":[1,2],"i":null,"i":[3],"s":["old"],"s":null,"s":[null,"k"],"authors":[{"name":"z"}],"authors":null,"authors":[{"age":7}]}`,
+		},
+		{
+			name:    "elem_null_and_arrays",
+			initLen: 3,
+			initCap: 3,
+			input:   `{"i":[null,5],"i64":[null,6,null],"u64":[11,null],"f64":[1.5,null],"b":[null,false],"s":[null,"kept"],"arri":[1,null],"arrs":[null,"mid","x","drop"]}`,
+		},
+		{
+			name:    "array_excess_and_null_noop",
+			initLen: 1,
+			initCap: 1,
+			input:   `{"arri":null,"arrs":[null,"b"]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fast := makePrefilled(tc.initLen, tc.initCap)
+			fastDirectOnly := makePrefilled(tc.initLen, tc.initCap)
+			tape := makePrefilled(tc.initLen, tc.initCap)
+			stdlib := makePrefilled(tc.initLen, tc.initCap)
+
+			// 1. Direct tryDecodeFlatContainerPlanBody must succeed without fallback.
+			if endPos, ok := tryDecodeFlatContainerPlanBody(tc.input, 0, len(tc.input), 1<<_F_copy_string, unsafe.Pointer(&fastDirectOnly.base), fastSD.flatPlan, false, true); !ok || endPos != len(tc.input) {
+				t.Fatalf("tryDecodeFlatContainerPlanBody failed (ok=%v end=%d/%d)", ok, endPos, len(tc.input))
+			}
+
+			// 2. Full DecodeOne (fast path).
+			fastSD.flatFailStreak = 0
+			if _, _, err := DecodeOne(tc.input, 1<<_F_copy_string, &fast.base); err != nil {
+				t.Fatalf("DecodeOne fast: %v", err)
+			}
+			if fastSD.flatFailStreak != 0 {
+				t.Fatalf("expected 0 fallback streak, got %d", fastSD.flatFailStreak)
+			}
+
+			// 3. optdec Tape FromDom path.
+			tapeDst := containerTapeOnly{containerBase: tape.base}
+			if _, _, err := DecodeOne(tc.input, 1<<_F_copy_string, &tapeDst); err != nil {
+				t.Fatalf("DecodeOne tape: %v", err)
+			}
+			tape.base = tapeDst.containerBase
+
+			// 4. encoding/json.
+			if err := json.Unmarshal([]byte(tc.input), &stdlib.base); err != nil {
+				t.Fatalf("encoding/json: %v", err)
+			}
+
+			if !reflect.DeepEqual(fastDirectOnly.base, stdlib.base) {
+				t.Fatalf("direct vs stdlib mismatch:\ndirect: %#v\nstdlib: %#v", fastDirectOnly.base, stdlib.base)
+			}
+			if !reflect.DeepEqual(fast.base, tape.base) || !reflect.DeepEqual(fast.base, stdlib.base) {
+				t.Fatalf("fast vs tape vs stdlib mismatch:\nfast:   %#v\ntape:   %#v\nstdlib: %#v", fast.base, tape.base, stdlib.base)
+			}
+			if tc.name != "dup_key_null_then_slice" {
+				if !reflect.DeepEqual(fast.i64Back, tape.i64Back) {
+					t.Fatalf("i64 backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", fast.i64Back, tape.i64Back)
+				}
+				if !reflect.DeepEqual(fast.sBack, tape.sBack) {
+					t.Fatalf("s backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", fast.sBack, tape.sBack)
+				}
+				if !reflect.DeepEqual(fast.authBack, tape.authBack) {
+					t.Fatalf("auth backing alias fast vs tape mismatch:\nfast: %#v\ntape: %#v", fast.authBack, tape.authBack)
+				}
+				if tc.name != "grow" {
+					if !reflect.DeepEqual(fast.i64Back, stdlib.i64Back) || !reflect.DeepEqual(fast.sBack, stdlib.sBack) || !reflect.DeepEqual(fast.authBack, stdlib.authBack) {
+						t.Fatalf("backing alias vs stdlib mismatch:\nfast:   i64=%#v s=%#v auth=%#v\nstdlib: i64=%#v s=%#v auth=%#v",
+							fast.i64Back, fast.sBack, fast.authBack, stdlib.i64Back, stdlib.sBack, stdlib.authBack)
+					}
+				}
+			}
+		})
 	}
 }
 

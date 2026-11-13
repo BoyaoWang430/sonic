@@ -30,29 +30,29 @@ func isNumberContByte(b byte) bool {
 }
 
 type schemaScanner struct {
-	p             *Parser
-	jsonStr       string
-	strPtr        unsafe.Pointer
-	tailPtr       unsafe.Pointer
-	pos           int
-	end           int
-	safe64        int
-	tailStart     int
-	nIdx          int
-	depth         uint64
-	opts          uint64
-	nbkOffPlus64  uint64
-	nbkBits       uint64
+	p              *Parser
+	jsonStr        string
+	strPtr         unsafe.Pointer
+	tailPtr        unsafe.Pointer
+	pos            int
+	end            int
+	safe64         int
+	tailStart      int
+	nIdx           int
+	depth          uint64
+	opts           uint64
+	nbkOffPlus64   uint64
+	nbkBits        uint64
 	validateStr    bool
 	noValidateJSON bool
 	caseSensitive  bool
 	disUnknown     bool
-	mutatedPadded bool
-	denseBailout  bool
-	skippedKeys   int
-	skippedBytes  int
-	matchedKeys   int
-	num           cParityNum
+	mutatedPadded  bool
+	denseBailout   bool
+	skippedKeys    int
+	skippedBytes   int
+	matchedKeys    int
+	num            cParityNum
 }
 
 func schemaPtrAt64(strPtr, tailPtr unsafe.Pointer, pos, safe64, tailStart int) unsafe.Pointer {
@@ -178,16 +178,16 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 		p.options &^= 1 << _F_use_number
 	}
 	sc := schemaScanner{
-		p:             p,
-		jsonStr:       p.Json,
-		strPtr:        strPtr,
-		tailPtr:       tailPtr,
-		pos:           0,
-		end:           p.end,
-		safe64:        safe64,
-		tailStart:     tailStart,
-		nIdx:          0,
-		depth:         0,
+		p:              p,
+		jsonStr:        p.Json,
+		strPtr:         strPtr,
+		tailPtr:        tailPtr,
+		pos:            0,
+		end:            p.end,
+		safe64:         safe64,
+		tailStart:      tailStart,
+		nIdx:           0,
+		depth:          0,
 		opts:           p.options,
 		validateStr:    p.options&(1<<_F_validate_string) != 0,
 		noValidateJSON: p.options&(1<<_F_no_validate_json) != 0,
@@ -2352,17 +2352,21 @@ func skipStringBodyAt(jsonStr string, strPtr, tailPtr unsafe.Pointer, pos, end, 
 		}
 		return pos + relEnd, true
 	}
-	if opts&(1<<_F_validate_string) != 0 && opts&(1<<_F_disable_urc) == 0 {
-		relEnd, err := kernels.SkipStringStrict(jsonStr[pos:end])
-		if err != 0 {
-			return pos, false
-		}
-		return pos + relEnd, true
-	}
+	steps := 0
 	for {
-		if pos > end {
+		if pos >= end {
 			return pos, false
 		}
+		// Avoid ABI0 slice/tail dispatch overhead on short/medium strings (<40B after opening quote);
+		// switch to SkipStringStrict once the first 32B chunk finishes without quote/escape/control.
+		if steps > 0 && end-pos >= 32 && opts&(1<<_F_validate_string) != 0 && opts&(1<<_F_disable_urc) == 0 {
+			relEnd, err := kernels.SkipStringStrict(jsonStr[pos:end])
+			if err != 0 {
+				return pos, false
+			}
+			return pos + relEnd, true
+		}
+		steps++
 		bs, quote, control := cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
 		if cParityAtFirst(quote, bs|control) {
 			pos += bits.TrailingZeros32(quote) + 1

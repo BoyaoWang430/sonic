@@ -215,6 +215,15 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 	return fe
 }
 
+// flatKeyPrefix holds a pre-encoded host-endian byte representation of `"name":`
+// (without the opening quote) for fast in-bounds ASCII key comparison up to 14 bytes.
+type flatKeyPrefix struct {
+	w0   uint64
+	w1   uint64
+	mask uint64
+	n2   uint8
+}
+
 type structDecoder struct {
 	fieldMap          *caching.FieldCache
 	fields            []fieldEntry
@@ -234,6 +243,7 @@ type structDecoder struct {
 	ptrStrHint        uint8
 	flatPtrMask       uint32
 	flatPlan          *flatStructPlan
+	flatKeyPrefixes   []flatKeyPrefix
 	flatFailStreak    uint32
 	flatProbeTick     uint32
 }
@@ -299,6 +309,18 @@ func (d *structDecoder) allocPtrBatchSlow(slot *ptrStructSlabSlot) unsafe.Pointe
 	return base
 }
 
+// canFastObj reports whether this struct decoder can run fromObjFast under opts.
+func (d *structDecoder) canFastObj(opts uint64) bool {
+	if d == nil || !d.fast {
+		return false
+	}
+	exclude := fastStructExcludeMask
+	if d.noInterface {
+		exclude = fastStructStrictExcludeMask
+	}
+	return opts&exclude == 0
+}
+
 func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	vtyp := uint8(node.ptr.typ)
 	if vtyp == KNull {
@@ -313,14 +335,8 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 
 	p := ctx.Parser
 	opts := p.options
-	if d.fast {
-		exclude := fastStructExcludeMask
-		if d.noInterface {
-			exclude = fastStructStrictExcludeMask
-		}
-		if opts&exclude == 0 {
-			return d.fromObjFast(vp, node.ptr, p, p.Json, opts&(1<<_F_copy_string) != 0, ctx)
-		}
+	if d.canFastObj(opts) {
+		return d.fromObjFast(vp, node.ptr, p, p.Json, opts&(1<<_F_copy_string) != 0, ctx)
 	}
 	return d.fromObjSlow(vp, node.ptr, p, opts, ctx)
 }
