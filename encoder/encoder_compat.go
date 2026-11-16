@@ -25,6 +25,7 @@ import (
 	"reflect"
 
 	"github.com/bytedance/sonic/internal/compat"
+	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -35,59 +36,49 @@ func init() {
 // EnableFallback indicates if encoder use fallback
 const EnableFallback = true
 
-// Options is a set of encoding options.
+// Options is a set of encoding options shared with internal/encoder/alg.
 type Options uint64
-
-const (
-	bitSortMapKeys = iota
-	bitEscapeHTML
-	bitCompactMarshaler
-	bitNoQuoteTextMarshaler
-	bitNoNullSliceOrMap
-	bitValidateString
-	bitNoValidateJSONMarshaler
-	bitNoEncoderNewline
-
-	// used for recursive compile
-	bitPointerValue = 63
-)
 
 const (
 	// SortMapKeys indicates that the keys of a map needs to be sorted
 	// before serializing into JSON.
 	// WARNING: This hurts performance A LOT, USE WITH CARE.
-	SortMapKeys Options = 1 << bitSortMapKeys
+	SortMapKeys Options = 1 << alg.BitSortMapKeys
 
 	// EscapeHTML indicates encoder to escape all HTML characters
 	// after serializing into JSON (see https://pkg.go.dev/encoding/json#HTMLEscape).
 	// WARNING: This hurts performance A LOT, USE WITH CARE.
-	EscapeHTML Options = 1 << bitEscapeHTML
+	EscapeHTML Options = 1 << alg.BitEscapeHTML
 
 	// CompactMarshaler indicates that the output JSON from json.Marshaler
 	// is always compact and needs no validation
-	CompactMarshaler Options = 1 << bitCompactMarshaler
+	CompactMarshaler Options = 1 << alg.BitCompactMarshaler
 
 	// NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler
 	// is always escaped string and needs no quoting
-	NoQuoteTextMarshaler Options = 1 << bitNoQuoteTextMarshaler
+	NoQuoteTextMarshaler Options = 1 << alg.BitNoQuoteTextMarshaler
 
 	// NoNullSliceOrMap indicates all empty Array or Object are encoded as '[]' or '{}',
 	// instead of 'null'
-	NoNullSliceOrMap Options = 1 << bitNoNullSliceOrMap
+	NoNullSliceOrMap Options = 1 << alg.BitNoNullSliceOrMap
 
 	// ValidateString indicates that encoder should validate the input string
 	// before encoding it into JSON.
-	ValidateString Options = 1 << bitValidateString
+	ValidateString Options = 1 << alg.BitValidateString
 
 	// NoValidateJSONMarshaler indicates that the encoder should not validate the output string
 	// after encoding the JSONMarshaler to JSON.
-	NoValidateJSONMarshaler Options = 1 << bitNoValidateJSONMarshaler
+	NoValidateJSONMarshaler Options = 1 << alg.BitNoValidateJSONMarshaler
 
 	// NoEncoderNewline indicates that the encoder should not add a newline after every message
-	NoEncoderNewline Options = 1 << bitNoEncoderNewline
+	NoEncoderNewline Options = 1 << alg.BitNoEncoderNewline
 
 	// CompatibleWithStd is used to be compatible with std encoder.
 	CompatibleWithStd Options = SortMapKeys | EscapeHTML | CompactMarshaler
+
+	// EncodeNullForInfOrNan encodes Infinity or NaN float values as 'null'
+	// instead of returning an error (native Sonic extension; distinct bit on compat).
+	EncodeNullForInfOrNan Options = 1 << alg.BitEncodeNullForInfOrNan
 )
 
 // Encoder represents a specific set of encoder configurations.

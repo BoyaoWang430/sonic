@@ -409,3 +409,49 @@ func TestCheckTrailingsAndBoundedSyntaxError(t *testing.T) {
 	require.Less(t, totalAllocDelta, uint64(256<<10),
 		"trailing error construction copied large buffer: allocated %d bytes across 10 runs", totalAllocDelta)
 }
+
+func TestOptionBitsDistinctAndIndependentAcrossBackends(t *testing.T) {
+	decOpts := []decoder.Options{
+		decoder.OptionUseInt64,
+		decoder.OptionUseNumber,
+		decoder.OptionUseUnicodeErrors,
+		decoder.OptionDisableUnknown,
+		decoder.OptionCopyString,
+		decoder.OptionValidateString,
+		decoder.OptionNoValidateJSON,
+		decoder.OptionCaseSensitive,
+	}
+	var seenDec decoder.Options
+	for i, opt := range decOpts {
+		require.NotZero(t, opt, "decoder option %d is zero", i)
+		require.Zero(t, seenDec&opt, "decoder option %d (%#x) collides with %#x", i, opt, seenDec)
+		seenDec |= opt
+	}
+
+	encOpts := []encoder.Options{
+		encoder.SortMapKeys,
+		encoder.EscapeHTML,
+		encoder.CompactMarshaler,
+		encoder.NoQuoteTextMarshaler,
+		encoder.NoNullSliceOrMap,
+		encoder.ValidateString,
+		encoder.NoValidateJSONMarshaler,
+		encoder.NoEncoderNewline,
+		encoder.EncodeNullForInfOrNan,
+	}
+	var seenEnc encoder.Options
+	for i, opt := range encOpts {
+		require.NotZero(t, opt, "encoder option %d is zero", i)
+		require.Zero(t, seenEnc&opt, "encoder option %d (%#x) collides with %#x", i, opt, seenEnc)
+		seenEnc |= opt
+	}
+
+	type target struct {
+		A int `json:"a"`
+	}
+	dec := decoder.NewDecoder(`{"a":7,"extra":"ignored"}`)
+	dec.UseUnicodeErrors()
+	var out target
+	require.NoError(t, dec.Decode(&out))
+	require.Equal(t, 7, out.A)
+}

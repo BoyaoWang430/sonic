@@ -34,11 +34,10 @@ func init() {
 }
 
 const (
-	_F_use_int64       = consts.F_use_int64
-	_F_disable_urc     = consts.F_disable_unknown
-	_F_disable_unknown = consts.F_disable_unknown
-	_F_copy_string     = consts.F_copy_string
-
+	_F_use_int64        = consts.F_use_int64
+	_F_disable_urc      = consts.F_disable_urc
+	_F_disable_unknown  = consts.F_disable_unknown
+	_F_copy_string      = consts.F_copy_string
 	_F_use_number       = consts.F_use_number
 	_F_validate_string  = consts.F_validate_string
 	_F_allow_control    = consts.F_allow_control
@@ -46,17 +45,21 @@ const (
 	_F_case_sensitive   = consts.F_case_sensitive
 )
 
-type Options uint64
+// Options shares the canonical option bitmask definitions from internal/decoder/consts.
+// Under sonic_compat (encoding/json adapter), OptionUseNumber and OptionDisableUnknown
+// map directly to json.Decoder; Sonic-specific parser flags remain distinct bits and fall
+// back to standard encoding/json behavior rather than aliasing unrelated options.
+type Options = consts.Options
 
 const (
-	OptionUseInt64         Options = 1 << _F_use_int64
-	OptionUseNumber        Options = 1 << _F_use_number
-	OptionUseUnicodeErrors Options = 1 << _F_disable_urc
-	OptionDisableUnknown   Options = 1 << _F_disable_unknown
-	OptionCopyString       Options = 1 << _F_copy_string
-	OptionValidateString   Options = 1 << _F_validate_string
-	OptionNoValidateJSON   Options = 1 << _F_no_validate_json
-	OptionCaseSensitive    Options = 1 << _F_case_sensitive
+	OptionUseInt64         Options = consts.OptionUseInt64
+	OptionUseNumber        Options = consts.OptionUseNumber
+	OptionUseUnicodeErrors Options = consts.OptionUseUnicodeErrors
+	OptionDisableUnknown   Options = consts.OptionDisableUnknown
+	OptionCopyString       Options = consts.OptionCopyString
+	OptionValidateString   Options = consts.OptionValidateString
+	OptionNoValidateJSON   Options = consts.OptionNoValidateJSON
+	OptionCaseSensitive    Options = consts.OptionCaseSensitive
 )
 
 func (self *Decoder) SetOptions(opts Options) {
