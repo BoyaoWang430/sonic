@@ -27,7 +27,6 @@ import (
 	"github.com/bytedance/sonic/internal/encoder/vm"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
-	"github.com/bytedance/sonic/utf8"
 )
 
 // Options is a set of encoding options.
@@ -188,31 +187,6 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 		return nil, err
 	}
 
-	if !vars.UseVM {
-		if (opts&ValidateString != 0) && !utf8.Validate(*buf) {
-			if opts&EscapeHTML == 0 {
-				ret = utf8.CorrectWith(make([]byte, 0, len(*buf)+32), *buf, `\ufffd`)
-				if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
-					*buf = origBuf
-				}
-				vars.FreeBytes(buf)
-				return ret, nil
-			}
-			dst := vars.NewBytes()
-			*buf, *dst = utf8.CorrectWith(*dst, *buf, `\ufffd`), *buf
-			vars.FreeBytes(dst)
-		}
-
-		if opts&EscapeHTML != 0 {
-			ret = HTMLEscape(make([]byte, 0, len(*buf)+len(*buf)>>3+32), *buf)
-			if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
-				*buf = origBuf
-			}
-			vars.FreeBytes(buf)
-			return ret, nil
-		}
-	}
-
 	/* make a copy of the result */
 	if rt.CanSizeResue(cap(*buf)) {
 		ret = rt.CloneBytesNoZero(*buf)
@@ -240,9 +214,6 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 		*buf = (*buf)[:origLen]
 		return err
 	}
-	if !vars.UseVM {
-		*buf = alg.SanitizeAppended(*buf, origLen, uint64(opts)&alg.SanitizeMask)
-	}
 	return nil
 }
 
@@ -257,31 +228,6 @@ func encodeInto(buf *[]byte, val interface{}, opts Options) error {
 	runtime.KeepAlive(buf)
 	runtime.KeepAlive(val)
 	return err
-}
-
-func encodeFinish(buf []byte, opts Options) []byte {
-	if opts&EscapeHTML != 0 {
-		buf = HTMLEscape(nil, buf)
-	}
-	if (opts&ValidateString != 0) && !utf8.Validate(buf) {
-		buf = utf8.CorrectWith(nil, buf, `\ufffd`)
-	}
-	return buf
-}
-
-func encodeFinishWithPool(buf *[]byte, opts Options) {
-	if opts&EscapeHTML != 0 {
-		dst := vars.NewBytes()
-		// put the result bytes to buf and the old buf to dst to return to the pool.
-		// we cannot return buf to the pool because it will be used by the caller.
-		*buf, *dst = HTMLEscape(*dst, *buf), *buf
-		vars.FreeBytes(dst)
-	}
-	if (opts&ValidateString != 0) && !utf8.Validate(*buf) {
-		dst := vars.NewBytes()
-		*buf, *dst = utf8.CorrectWith(*dst, *buf, `\ufffd`), *buf
-		vars.FreeBytes(dst)
-	}
 }
 
 // HTMLEscape appends to dst the JSON-encoded src with <, >, &, U+2028 and U+2029
@@ -367,9 +313,6 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 		vtm[vmPretouchKey{vt: vt, pv: false}] = struct{}{}
 	}
 
-	if !vars.UseVM {
-		return pretouchRecX86(vtm, cfg)
-	}
 	return pretouchRec(vtm, cfg)
 }
 

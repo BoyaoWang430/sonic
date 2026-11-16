@@ -41,7 +41,22 @@ type MapKVEntry struct {
 const (
 	maxPooledMapKV = 4096
 	inlineStackCap = 16
+
+	// Overflow states beyond the inline array live in fixed-size chunks that
+	// are allocated on demand, so a value nested a little deeper than
+	// inlineStackCap pays for one 4 KiB chunk instead of the whole
+	// MaxStack-sized overflow area. Chunks never move, so *State pointers
+	// handed out by Top/Cur stay valid while the stack grows.
+	extraChunkShift = 7
+	extraChunkSize  = 1 << extraChunkShift
+	extraChunkMask  = extraChunkSize - 1
+	maxExtraChunks  = (MaxStack - inlineStackCap + extraChunkSize - 1) / extraChunkSize
+	// pooledExtraChunks overflow chunks survive FreeStack/ResetStack, so
+	// workloads that regularly nest past the inline states reuse them.
+	pooledExtraChunks = 2
 )
+
+type stateChunk [extraChunkSize]State
 
 type Stack struct {
 	sp        int
@@ -50,8 +65,11 @@ type Stack struct {
 	kvOrderSp int
 	kvStrSp   int
 	kvU64Sp   int
+	// extraHigh is one past the highest overflow slot touched since the last
+	// release; slots below it may still hold pointers.
+	extraHigh int
 	sb        [inlineStackCap]State
-	sbExtra   []State
+	sbExtra   [maxExtraChunks]*stateChunk
 	ptrSlots  [8]unsafe.Pointer
 	KVBuf     []MapKVEntry
 	KVOrder   []int
@@ -67,7 +85,7 @@ var (
 			return &Stack{}
 		},
 	}
-	bufferPool     = sync.Pool{}
+	bufferPool      = sync.Pool{}
 	programCache    = caching.CreateProgramCache()
 	programCachePV  = caching.CreateProgramCache()
 	rootEncCache    = caching.CreateProgramCache()
@@ -160,7 +178,7 @@ func ResetStack(p *Stack) {
 	for i := 0; i < limit; i++ {
 		p.sb[i] = State{}
 	}
-	p.sbExtra = nil
+	p.releaseExtra()
 	p.sp = 0
 }
 
@@ -341,10 +359,44 @@ func (s *Stack) PopPtr(idx int) {
 }
 
 func (s *Stack) extraAt(idx int) *State {
-	if s.sbExtra == nil {
-		s.sbExtra = make([]State, MaxStack-inlineStackCap)
+	off := idx - inlineStackCap
+	c := s.sbExtra[off>>extraChunkShift]
+	if c == nil {
+		c = new(stateChunk)
+		s.sbExtra[off>>extraChunkShift] = c
 	}
-	return &s.sbExtra[idx-inlineStackCap]
+	if off >= s.extraHigh {
+		s.extraHigh = off + 1
+	}
+	return &c[off&extraChunkMask]
+}
+
+// releaseExtra clears every overflow state that may still reference memory,
+// keeps the first pooledExtraChunks chunks for reuse and drops the rest.
+func (s *Stack) releaseExtra() {
+	high := s.extraHigh
+	if high == 0 {
+		return
+	}
+	last := (high - 1) >> extraChunkShift
+	for ci := 0; ci <= last; ci++ {
+		c := s.sbExtra[ci]
+		if c == nil {
+			continue
+		}
+		if ci >= pooledExtraChunks {
+			s.sbExtra[ci] = nil
+			continue
+		}
+		n := high - ci*extraChunkSize
+		if n > extraChunkSize {
+			n = extraChunkSize
+		}
+		for i := 0; i < n; i++ {
+			c[i] = State{}
+		}
+	}
+	s.extraHigh = 0
 }
 
 func (s *Stack) Top() *State {
@@ -436,12 +488,19 @@ func FreeBytes(p *[]byte) {
 }
 
 func FreeStack(p *Stack) {
+	limit := p.sp
+	if limit > inlineStackCap {
+		limit = inlineStackCap
+	}
+	for i := 0; i < limit; i++ {
+		p.sb[i] = State{}
+	}
+	p.releaseExtra()
 	p.sp = 0
 	p.ptrSp = 0
 	p.kvStrSp = 0
 	p.kvU64Sp = 0
 	p.ValPtr = nil
-	p.sbExtra = nil
 	if cap(p.KVBuf) > maxPooledMapKV {
 		p.KVBuf = nil
 	}

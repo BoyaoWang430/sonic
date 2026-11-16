@@ -70,6 +70,5 @@ var (
 
 	// Skip skips only one json value, and returns first non-blank character position and its ending position if it is valid.
 	// Otherwise, returns negative error code using start and invalid character position using end
-	Skip                         = api.Skip
-	RegisterNoCopyRawMessageType = api.RegisterNoCopyRawMessageType
+	Skip = api.Skip
 )

@@ -16,14 +16,6 @@
 
 package encoder
 
-import (
-	"github.com/bytedance/sonic/option"
-)
-
 func init() {
 	ForceUseVM()
-}
-
-func pretouchRecX86(vtm map[vmPretouchKey]struct{}, opts option.CompileOptions) error {
-	return pretouchRec(vtm, opts)
 }

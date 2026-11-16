@@ -3,11 +3,11 @@
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/rt"
 	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 func TestScanStringUnalignedAndOverlap(t *testing.T) {

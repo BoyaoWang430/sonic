@@ -3,9 +3,9 @@
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/rt"
 	"runtime"
 	"testing"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 func TestScalarUTF8BulkTransitions(t *testing.T) {

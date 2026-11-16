@@ -372,7 +372,7 @@ func (d *mapStrF32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		key, _ := knode.AsStr(ctx)
 		val := NewNode(PtrOffset(next, 1))
 		ret, ok := val.AsF64(ctx)
-		if !ok || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+		if !ok || float32Overflows(ret) {
 			m[key] = 0
 			if val.IsNull() {
 				next = PtrOffset(val.ptr, 1)
@@ -1062,7 +1062,7 @@ func decodeFloat32Key(dec *mapDecoder, raw string, kv reflect.Value) error {
 	if err != nil {
 		return err
 	}
-	if ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+	if float32Overflows(ret) {
 		return error_value(key, dec.keyType)
 	}
 	kv.SetFloat(ret)

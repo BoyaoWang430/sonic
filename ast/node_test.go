@@ -1962,7 +1962,6 @@ func TestNewBytesEmpty(t *testing.T) {
 	}
 }
 
-
 func TestGenericSkipsEmptyNodes(t *testing.T) {
 	arr := NewArray([]Node{{}, NewNumber("1"), {}, NewString("x")})
 	gotArr, err := arr.Array()

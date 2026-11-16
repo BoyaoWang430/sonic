@@ -137,20 +137,58 @@ func parserCorrectedSource(p *Parser, original string, pos int) string {
 	return original[:pos] + p.Json
 }
 
-func (p *Parser) growNodeTape() {
+// nodeTapeGrowth tracks how far growNodeTape has escalated for one scan.
+type nodeTapeGrowth uint8
+
+const (
+	// growGeometric grows by 4x, clamped to the valid-JSON bound.
+	growGeometric nodeTapeGrowth = iota
+	// growToHardBound is entered after a clamped growth still ran out.
+	growToHardBound
+	// growExhausted means the absolute bound was already reached.
+	growExhausted
+)
+
+// growNodeTape grows the node tape after the scanner filled it and reports
+// whether the scan may be resumed.
+//
+// Valid JSON produces at most calMaxNodeCap(remaining) further nodes, so one
+// growth clamped to that bound always suffices for well-formed input. Running
+// out again after such a clamp means the input is denser than any valid
+// document (for example a long unclosed run of '['). Re-clamping to the
+// valid-JSON bound would then only add half of the remaining bytes per round,
+// copying the whole tape about log2(len) times; instead grow once to the
+// absolute bound of one node per remaining byte, which keeps the total work
+// linear in the input size.
+func (p *Parser) growNodeTape(stage *nodeTapeGrowth) bool {
 	// The scanner has already written the last available node. Restart
 	// from its packed state after copying exactly the initialized prefix.
 	curLen := p.nbuf.nlen
 	if curLen != len(p.nodes) {
 		panic(fmt.Sprintf("current len: %d, real len: %d cap: %d", curLen, len(p.nodes), cap(p.nodes)))
 	}
-	remCap := curLen + calMaxNodeCap(len(p.Json)-p.pos)
-	nextCap := curLen * 4
-	if nextCap < 64 {
-		nextCap = 64
+	rem := len(p.Json) - p.pos
+	if rem < 0 {
+		rem = 0
 	}
-	if nextCap > remCap {
-		nextCap = remCap
+	var nextCap int
+	switch *stage {
+	case growGeometric:
+		validCap := curLen + calMaxNodeCap(rem)
+		nextCap = curLen * 4
+		if nextCap < 64 {
+			nextCap = 64
+		}
+		if nextCap > validCap {
+			nextCap = validCap
+			*stage = growToHardBound
+		}
+	case growToHardBound:
+		// Every node consumes at least one input byte.
+		nextCap = curLen + rem + 2
+		*stage = growExhausted
+	default:
+		return false
 	}
 	retainInPool := uintptr(nextCap) <= maxPooledNodesCap
 	grown := make([]node, nextCap)
@@ -160,6 +198,23 @@ func (p *Parser) growNodeTape() {
 	}
 	p.nodes = grown
 	p.nbuf.ncap = cap(p.nodes)
+	return true
+}
+
+// parseRunsGrowing runs the Runs scanner, growing the node tape whenever it
+// fills up. The growth is bounded (see growNodeTape), so malformed dense input
+// cannot make it loop or copy the tape more than a constant number of times
+// beyond the geometric phase.
+func parseRunsGrowing(p *Parser) ErrorCode {
+	err := cParityParseWithPadding(p)
+	stage := growGeometric
+	for classifyScanStop(err) == scanStopNodeCapExhausted {
+		if !p.growNodeTape(&stage) {
+			break
+		}
+		err = cParityParseWithPadding(p)
+	}
+	return err
 }
 
 func parseImpl(p *Parser) ErrorCode {
@@ -168,11 +223,7 @@ func parseImpl(p *Parser) ErrorCode {
 	if !p.isEface && !p.keepUseNumber {
 		p.options &^= 1 << _F_use_number
 	}
-	err := cParityParseWithPadding(p)
-	for classifyScanStop(err) == scanStopNodeCapExhausted {
-		p.growNodeTape()
-		err = cParityParseWithPadding(p)
-	}
+	err := parseRunsGrowing(p)
 	p.options = old
 	runtime.KeepAlive(p)
 	return err

@@ -36,16 +36,16 @@ func (r *fixedChunkReader) Read(p []byte) (int, error) {
 
 func TestStreamSessionChunkBoundariesAndLifecycles(t *testing.T) {
 	type streamItem struct {
-		ID      int               `json:"id"`
-		Text    string            `json:"text"`
-		Emoji   string            `json:"emoji"`
-		UTF8    string            `json:"utf8"`
-		Score   float64           `json:"score"`
-		Num     json.Number       `json:"num"`
-		Raw     json.RawMessage   `json:"raw"`
-		NoCopy  NoCopyRawMessage  `json:"nocopy"`
-		Flags   []bool            `json:"flags"`
-		Nested  map[string]string `json:"nested"`
+		ID     int               `json:"id"`
+		Text   string            `json:"text"`
+		Emoji  string            `json:"emoji"`
+		UTF8   string            `json:"utf8"`
+		Score  float64           `json:"score"`
+		Num    json.Number       `json:"num"`
+		Raw    json.RawMessage   `json:"raw"`
+		NoCopy NoCopyRawMessage  `json:"nocopy"`
+		Flags  []bool            `json:"flags"`
+		Nested map[string]string `json:"nested"`
 	}
 
 	records := []string{

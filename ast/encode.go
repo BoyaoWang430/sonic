@@ -96,8 +96,10 @@ func (self *Node) MarshalJSON() ([]byte, error) {
 		return bytesNull, nil
 	}
 
-	// fast path for raw node
-	if self.isRaw() {
+	// fast path for raw node. A concurrent-read node (m != nil) can be
+	// materialized by another goroutine at any time, so its raw text must be
+	// read under the lock; the generic path below does that via encodeRaw.
+	if self.m == nil && self.isRaw() {
 		return []byte(self.toString()), nil
 	}
 

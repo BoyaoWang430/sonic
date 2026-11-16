@@ -22,17 +22,17 @@ func TestSearchManySemanticsAndRetention(t *testing.T) {
 	}`
 
 	paths := [][]interface{}{
-		{"tail"},                  // 0: out-of-order late field
-		{"arr", 2, 1},             // 1: nested array bool
-		{"arr", 1, "k"},           // 2: shared "arr" prefix
-		{"arr", 99},               // 3: out-of-bounds index -> !Exists()
-		{"missing_top"},           // 4: missing key -> !Exists()
-		{"nullable", "sub"},       // 5: null intermediate -> !Exists() (no syntax error)
-		{"scalar", 0},             // 6: scalar intermediate -> !Exists() (no syntax error)
-		{"dup"},                   // 7: duplicate key -> first occurrence
-		{"esc\"key", "inner\n"},   // 8: escaped keys
-		{"arr"},                   // 9: ancestor path alongside descendant paths 1 & 2
-		{"tail"},                  // 10: duplicate requested path
+		{"tail"},                // 0: out-of-order late field
+		{"arr", 2, 1},           // 1: nested array bool
+		{"arr", 1, "k"},         // 2: shared "arr" prefix
+		{"arr", 99},             // 3: out-of-bounds index -> !Exists()
+		{"missing_top"},         // 4: missing key -> !Exists()
+		{"nullable", "sub"},     // 5: null intermediate -> !Exists() (no syntax error)
+		{"scalar", 0},           // 6: scalar intermediate -> !Exists() (no syntax error)
+		{"dup"},                 // 7: duplicate key -> first occurrence
+		{"esc\"key", "inner\n"}, // 8: escaped keys
+		{"arr"},                 // 9: ancestor path alongside descendant paths 1 & 2
+		{"tail"},                // 10: duplicate requested path
 	}
 
 	s := NewSearcher(doc)

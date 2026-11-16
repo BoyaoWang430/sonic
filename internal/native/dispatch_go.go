@@ -6,7 +6,6 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/kernels"
-	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/native/types"
 )
 
@@ -52,21 +51,4 @@ func ValidateUTF8Fast(s *string) int {
 		return -next - 1
 	}
 	return 0
-}
-
-// Number-formatting callers reserve at least 32 output bytes.
-func F64toa(out *byte, val float64) int {
-	return len(number.AppendFloat64(unsafe.Slice(out, 32)[:0], val))
-}
-
-func F32toa(out *byte, val float32) int {
-	return len(number.AppendFloat32(unsafe.Slice(out, 32)[:0], val))
-}
-
-func I64toa(out *byte, val int64) int {
-	return number.FormatInt64(out, val)
-}
-
-func U64toa(out *byte, val uint64) int {
-	return number.FormatUint64(out, val)
 }

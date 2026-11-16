@@ -267,7 +267,7 @@ func (d *f32StringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	ret, err := ParseF64(s)
-	if err != nil || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+	if err != nil || float32Overflows(ret) {
 		return error_mismatch(node, ctx, float32Type)
 	}
 

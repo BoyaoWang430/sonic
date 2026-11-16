@@ -216,7 +216,7 @@ func (d *f32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	}
 
 	ret, ok := node.AsF64(ctx)
-	if !ok || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+	if !ok || float32Overflows(ret) {
 		return error_mismatch(node, ctx, d.typ)
 	}
 
@@ -325,4 +325,13 @@ func (d *unsupportedTypeDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *cont
 		return nil
 	}
 	return error_unsuppoted(d.typ)
+}
+
+// float32Overflows reports whether a value parsed as float64 is out of range
+// for a float32 target. It mirrors encoding/json, which parses with
+// strconv.ParseFloat(s, 32): values that round to +/-MaxFloat32 (for example
+// "3.4028235e+38", the shortest form of MaxFloat32) are accepted, and only
+// values that round to +/-Inf are rejected.
+func float32Overflows(v float64) bool {
+	return math.IsInf(float64(float32(v)), 0)
 }

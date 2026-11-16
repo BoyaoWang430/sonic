@@ -99,6 +99,12 @@ func clampRootSizeHint(n int) uint32 {
 	return uint32(n)
 }
 
+// maxSlicePresize caps how far growSliceBufAfterFirst reserves ahead of the
+// bytes already written. The estimate extrapolates from the first element
+// only, so an unusually large first element must not turn into a huge
+// up-front allocation; append's own growth covers anything beyond the cap.
+const maxSlicePresize = 4 << 20
+
 func growSliceBufAfterFirst(buf []byte, startOff int, n int) []byte {
 	if n < 64 {
 		return buf
@@ -108,7 +114,11 @@ func growSliceBufAfterFirst(buf []byte, startOff int, n int) []byte {
 		perElem = 4096
 	}
 	rem := perElem * (n - 1)
-	est := len(buf) + rem + (rem >> 3) + 64
+	rem += rem >> 3
+	if rem > maxSlicePresize {
+		rem = maxSlicePresize
+	}
+	est := len(buf) + rem + 64
 	if est > cap(buf) {
 		grown := make([]byte, len(buf), est)
 		copy(grown, buf)

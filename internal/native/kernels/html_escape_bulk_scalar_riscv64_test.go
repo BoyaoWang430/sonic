@@ -5,9 +5,9 @@ package kernels
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/bytedance/sonic/internal/rt"
 	"strings"
 	"testing"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 func checkScalarHTMLEscape(t *testing.T, src string, capacity, srcAlign, dstAlign, wantConsumed int, want string) {

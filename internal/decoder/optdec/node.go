@@ -1088,7 +1088,7 @@ func (node *Node) AsSliceF32(ctx *Context, vp unsafe.Pointer) error {
 	for i := 0; i < size; i++ {
 		val := NewNode(next)
 		ret, ok := val.AsF64(ctx)
-		if !ok || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+		if !ok || float32Overflows(ret) {
 			if val.IsNull() {
 				next = PtrOffset(val.ptr, 1)
 				continue

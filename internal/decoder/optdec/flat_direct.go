@@ -1099,7 +1099,7 @@ func flatStageLeafValue(
 
 	case fieldKindF32, fieldKindPtrF32:
 		fv, nextPos, ok := flatParseFloat(strPtr, vc, pos, end)
-		if !ok || fv < -math.MaxFloat32 || fv > math.MaxFloat32 {
+		if !ok || float32Overflows(fv) {
 			return 0, false, false
 		}
 		dst.val = uint64(math.Float32bits(float32(fv)))

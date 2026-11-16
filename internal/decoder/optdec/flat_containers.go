@@ -452,7 +452,10 @@ func flatScanContainerPlanGroup(
 					pos += 3
 					goto afterVal
 				}
-				if vc != '[' {
+				if vc != '[' || cs.presentMask&bit != 0 {
+					// A repeated key decodes into the previous result in
+					// encoding/json; staging only keeps one value, so let the
+					// tape path handle duplicates.
 					return 0, false
 				}
 				var startOff, count int
@@ -480,7 +483,7 @@ func flatScanContainerPlanGroup(
 					cs.strMask &^= bit
 					goto afterVal
 				}
-				if vc != '[' {
+				if vc != '[' || cs.presentMask&bit != 0 {
 					return 0, false
 				}
 				var startOff, count int
@@ -509,7 +512,7 @@ func flatScanContainerPlanGroup(
 					cs.strMask &^= bit
 					goto afterVal
 				}
-				if vc != '[' {
+				if vc != '[' || cs.presentMask&bit != 0 {
 					return 0, false
 				}
 				var elemStart, maskStart, count int

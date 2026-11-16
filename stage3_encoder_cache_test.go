@@ -609,7 +609,7 @@ type stage3AppenderRecord struct {
 	Raw  string
 }
 
-func (r stage3AppenderRecord) AppendJSON(dst []byte) ([]byte, error) {
+func (r stage3AppenderRecord) AppendSonicJSON(dst []byte) ([]byte, error) {
 	if r.Fail {
 		dst = append(dst, `{"partial":`...)
 		return dst, errors.New("intentional AppendJSON error")
@@ -629,7 +629,7 @@ func (r stage3AppenderRecord) AppendJSON(dst []byte) ([]byte, error) {
 }
 
 func (r stage3AppenderRecord) MarshalJSON() ([]byte, error) {
-	return r.AppendJSON(nil)
+	return r.AppendSonicJSON(nil)
 }
 
 func TestStage3_E04a_JSONAppenderContracts(t *testing.T) {
@@ -803,7 +803,7 @@ type reviewCountingAppender struct {
 	stdRaceCalls *atomic.Int64
 }
 
-func (c reviewCountingAppender) AppendJSON(dst []byte) ([]byte, error) {
+func (c reviewCountingAppender) AppendSonicJSON(dst []byte) ([]byte, error) {
 	if c.appendCalls != nil || c.stdRaceCalls != nil {
 		if calledFromStdEncodingJSON() {
 			if c.stdRaceCalls != nil {
@@ -829,7 +829,7 @@ func (c reviewCountingAppender) MarshalJSON() ([]byte, error) {
 			c.jsonCalls.Add(1)
 		}
 	}
-	return c.AppendJSON(nil)
+	return c.AppendSonicJSON(nil)
 }
 
 func (c reviewCountingAppender) MarshalText() ([]byte, error) {

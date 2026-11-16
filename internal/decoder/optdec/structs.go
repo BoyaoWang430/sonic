@@ -67,11 +67,15 @@ const (
 
 // fieldEntry is 32 bytes (2 entries per 64B cache line).
 // Cold fallback decFunc interfaces are stored in structDecoder.fieldDecs.
+// The trailing padding is spelled out because go/types before Go 1.21 (used
+// by go vet / go test on Go 1.20) omits implicit trailing padding from
+// unsafe.Sizeof and would otherwise reject the size assertions below.
 type fieldEntry struct {
 	name   string
 	subDec unsafe.Pointer
 	offset uint32
 	kind   uint8
+	_      [3]byte
 }
 
 var _ [32 - unsafe.Sizeof(fieldEntry{})]byte
@@ -578,7 +582,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 	case fieldKindPtrF32:
 		if vtyp == KReal {
 			fv := math.Float64frombits(vnode.val)
-			if fv >= -math.MaxFloat32 && fv <= math.MaxFloat32 {
+			if !float32Overflows(fv) {
 				pp := (**float32)(elem)
 				dst := *pp
 				if dst == nil {
@@ -810,7 +814,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			case fieldKindF32:
 				if vtyp == KReal {
 					fv := math.Float64frombits(vnode.val)
-					if fv >= -math.MaxFloat32 && fv <= math.MaxFloat32 {
+					if !float32Overflows(fv) {
 						*(*float32)(elem) = float32(fv)
 						continue
 					}
@@ -1283,7 +1287,7 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 			case fieldKindF32:
 				if vtyp == KReal {
 					fv := math.Float64frombits(vnode.val)
-					if fv >= -math.MaxFloat32 && fv <= math.MaxFloat32 {
+					if !float32Overflows(fv) {
 						*(*float32)(elem) = float32(fv)
 						continue
 					}

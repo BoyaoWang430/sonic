@@ -272,5 +272,5 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 }
 
 func init() {
-	decoder.RegisterNoCopyRawMessageType(reflect.TypeOf(NoCopyRawMessage(nil)))
+	api.RegisterNoCopyRawMessageType(reflect.TypeOf(NoCopyRawMessage(nil)))
 }

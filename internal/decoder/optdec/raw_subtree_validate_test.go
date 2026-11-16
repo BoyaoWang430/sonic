@@ -1,0 +1,54 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
+package optdec
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// TestNoValidateJSONStillValidatesRawSubtrees checks that NoValidateJSONSkip
+// only relaxes values that are skipped. A json.RawMessage is consumed, so an
+// invalid subtree must be rejected whether the decode runs through the full
+// parser (small input) or the schema projection (input of 64 bytes or more).
+func TestNoValidateJSONStillValidatesRawSubtrees(t *testing.T) {
+	type target struct {
+		ID   int             `json:"id"`
+		Data json.RawMessage `json:"data"`
+		Pad  string          `json:"pad"`
+	}
+	noValidate := uint64(1 << _F_no_validate_json)
+	pad := strings.Repeat("p", 80)
+
+	invalid := []struct {
+		raw  string
+		opts uint64
+	}{
+		{`{"a" 1,"b":[1,,2]}`, noValidate},
+		{`[1,,2]`, noValidate},
+		{`{"a":[}`, noValidate},
+		{"\"x\x01y\"", noValidate | 1<<_F_validate_string},
+	}
+	for _, tc := range invalid {
+		for _, doc := range []string{
+			`{"id":1,"data":` + tc.raw + `}`,
+			`{"id":1,"data":` + tc.raw + `,"pad":"` + pad + `"}`,
+		} {
+			var got target
+			if _, _, err := DecodeOne(doc, tc.opts, &got); err == nil {
+				t.Fatalf("invalid raw subtree accepted for %q: Data=%q", doc, got.Data)
+			}
+		}
+	}
+
+	const raw = `{"a":[1,2,{"b":"c"}]}`
+	var got target
+	doc := `{"id":2,"data":` + raw + `,"pad":"` + pad + `"}`
+	if _, _, err := DecodeOne(doc, noValidate, &got); err != nil {
+		t.Fatalf("valid raw subtree rejected: %v", err)
+	}
+	if got.ID != 2 || string(got.Data) != raw || got.Pad != pad {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+}

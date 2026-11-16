@@ -45,15 +45,20 @@ func EncodeNil(rb *[]byte) error {
 // JSONAppender is an opt-in interface for custom types that can append their
 // JSON representation directly into the destination buffer's spare capacity.
 //
+// The method is deliberately named AppendSonicJSON rather than a generic
+// AppendJSON: it takes priority over MarshalJSON, so a type from another
+// library that merely happens to have an AppendJSON method must not have its
+// output silently switched away from MarshalJSON (encoding/json semantics).
+//
 // Dispatch & allocation contract:
-//   - Priority: JSONAppender (AppendJSON) > json.Marshaler (MarshalJSON) >
+//   - Priority: JSONAppender (AppendSonicJSON) > json.Marshaler (MarshalJSON) >
 //     encoding.TextMarshaler (MarshalText) across concrete fields, pointer fields,
 //     slice elements, any / non-marshaler interfaces, and static json.Marshaler
 //     interface fields (while static encoding.TextMarshaler interface fields still
 //     call MarshalText to match encoding/json).
-//     Types implementing both AppendJSON and MarshalJSON should produce semantically
+//     Types implementing both AppendSonicJSON and MarshalJSON should produce semantically
 //     equivalent JSON so callers and fallback paths observe identical payloads.
-//   - AppendJSON is called with a zero-length slice `dst[origLen:origLen:cap(dst)]`
+//   - AppendSonicJSON is called with a zero-length slice `dst[origLen:origLen:cap(dst)]`
 //     sharing the parent encoding session's spare capacity, and must return the
 //     appended JSON value slice (`ret`) or a non-nil error.
 //   - If `ret` stays within `dst`'s spare suffix, has container nesting depth <= 64,
@@ -63,10 +68,10 @@ func EncodeNil(rb *[]byte) error {
 //   - If whitespace compaction or character escaping/replacement must rewrite an
 //     overlapping slice, DetachIfOverlappingSpare allocates a detached copy so
 //     source bytes are never overwritten before reading.
-//   - If AppendJSON returns an error or invalid JSON, the parent buffer is
+//   - If AppendSonicJSON returns an error or invalid JSON, the parent buffer is
 //     restored to `buf[:origLen]`.
 type JSONAppender interface {
-	AppendJSON(dst []byte) ([]byte, error)
+	AppendSonicJSON(dst []byte) ([]byte, error)
 }
 
 var JSONAppenderType = reflect.TypeOf((*JSONAppender)(nil)).Elem()
@@ -75,7 +80,7 @@ func EncodeJSONAppender(buf *[]byte, val JSONAppender, opt uint64) error {
 	b := *buf
 	origLen := len(b)
 	spare := b[origLen:origLen:cap(b)]
-	ret, err := val.AppendJSON(spare)
+	ret, err := val.AppendSonicJSON(spare)
 	if err != nil {
 		*buf = b[:origLen]
 		return err

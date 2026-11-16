@@ -19,6 +19,7 @@ package ast
 import (
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
+	"strings"
 )
 
 // SearchOptions controls Searcher's behavior
@@ -126,7 +127,7 @@ func (self *Searcher) getManyWithPlan(plan *PathPlan, copyReturn bool) ([]Node, 
 		if copyReturn {
 			// Allocate an independent backing string per Node so retaining one
 			// small node never pins large sibling results or the source buffer.
-			raw = string([]byte(view.src[sp.start:sp.end]))
+			raw = strings.Clone(view.src[sp.start:sp.end])
 		} else {
 			raw = view.src[sp.start:sp.end]
 		}

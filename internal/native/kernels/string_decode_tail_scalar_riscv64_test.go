@@ -6,9 +6,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/bytedance/sonic/internal/rt"
 	"strings"
 	"testing"
-	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )

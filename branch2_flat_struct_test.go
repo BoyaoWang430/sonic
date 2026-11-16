@@ -37,33 +37,33 @@ type b2NestedMeta struct {
 }
 
 type b2IDLRecord struct {
-	ReqID       *string          `json:"req_id"`
-	ServiceName *string          `json:"service_name"`
-	Caller      *string          `json:"caller"`
-	Region      *string          `json:"region"`
-	Cluster     *string          `json:"cluster"`
-	Env         *string          `json:"env"`
-	NoteEscaped *string          `json:"note_escaped"`
-	EmptyStr    *string          `json:"empty_str"`
-	UserID      *int64           `json:"user_id"`
-	DeltaI64    *int64           `json:"delta_i64"`
-	SeqInt      *int             `json:"seq_int"`
-	CodeI32     *int32           `json:"code_i32"`
-	NegI32      *int32           `json:"neg_i32"`
-	HashU64     *uint64          `json:"hash_u64"`
-	CountUint   *uint            `json:"count_uint"`
-	FlagsU32    *uint32          `json:"flags_u32"`
-	Active      *bool            `json:"active"`
-	Cached      *bool            `json:"cached"`
-	LatencyMs   *float64         `json:"latency_ms"`
-	RatioF64    *float64         `json:"ratio_f64"`
-	RatioF32    *float32         `json:"ratio_f32"`
-	StrOptI64   *int64           `json:"str_opt_i64,string"`
-	NamedScalar *b2NamedInt64    `json:"named_scalar"`
-	NamedPtr    b2NamedPtrInt64  `json:"named_ptr"`
-	CustomPtr   *b2CustomInt64   `json:"custom_ptr"`
-	Meta        *b2NestedMeta    `json:"meta"`
-	InlineMeta  b2NestedMeta     `json:"inline_meta"`
+	ReqID       *string         `json:"req_id"`
+	ServiceName *string         `json:"service_name"`
+	Caller      *string         `json:"caller"`
+	Region      *string         `json:"region"`
+	Cluster     *string         `json:"cluster"`
+	Env         *string         `json:"env"`
+	NoteEscaped *string         `json:"note_escaped"`
+	EmptyStr    *string         `json:"empty_str"`
+	UserID      *int64          `json:"user_id"`
+	DeltaI64    *int64          `json:"delta_i64"`
+	SeqInt      *int            `json:"seq_int"`
+	CodeI32     *int32          `json:"code_i32"`
+	NegI32      *int32          `json:"neg_i32"`
+	HashU64     *uint64         `json:"hash_u64"`
+	CountUint   *uint           `json:"count_uint"`
+	FlagsU32    *uint32         `json:"flags_u32"`
+	Active      *bool           `json:"active"`
+	Cached      *bool           `json:"cached"`
+	LatencyMs   *float64        `json:"latency_ms"`
+	RatioF64    *float64        `json:"ratio_f64"`
+	RatioF32    *float32        `json:"ratio_f32"`
+	StrOptI64   *int64          `json:"str_opt_i64,string"`
+	NamedScalar *b2NamedInt64   `json:"named_scalar"`
+	NamedPtr    b2NamedPtrInt64 `json:"named_ptr"`
+	CustomPtr   *b2CustomInt64  `json:"custom_ptr"`
+	Meta        *b2NestedMeta   `json:"meta"`
+	InlineMeta  b2NestedMeta    `json:"inline_meta"`
 }
 
 func TestBranch2FlatStruct(t *testing.T) {
@@ -260,13 +260,13 @@ type b2BenchIDL24 struct {
 }
 
 type b2OrderItem struct {
-	SKU       string   `json:"sku_identifier"`
-	Title     string   `json:"product_title"`
-	Qty       int32    `json:"quantity_count"`
-	UnitCents int64    `json:"unit_price_cents"`
-	Discount  *int64   `json:"discount_cents"`
-	PromoTag  *string  `json:"promotion_code"`
-	TaxRate   float64  `json:"applied_tax_rate"`
+	SKU       string  `json:"sku_identifier"`
+	Title     string  `json:"product_title"`
+	Qty       int32   `json:"quantity_count"`
+	UnitCents int64   `json:"unit_price_cents"`
+	Discount  *int64  `json:"discount_cents"`
+	PromoTag  *string `json:"promotion_code"`
+	TaxRate   float64 `json:"applied_tax_rate"`
 }
 
 type b2OrderBuyer struct {

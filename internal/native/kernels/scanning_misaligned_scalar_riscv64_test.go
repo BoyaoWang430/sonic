@@ -3,11 +3,11 @@
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/rt"
 	"math/rand"
 	"runtime"
 	"strings"
 	"testing"
-	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )

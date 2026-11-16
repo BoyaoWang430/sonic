@@ -67,7 +67,7 @@ func (failingFloat) MarshalJSON() ([]byte, error) { return nil, errors.New("cust
 // Types implementing ONLY AppendJSON (without MarshalJSON or MarshalText).
 type appenderOnlyFloat64 float64
 
-func (f appenderOnlyFloat64) AppendJSON(dst []byte) ([]byte, error) {
+func (f appenderOnlyFloat64) AppendSonicJSON(dst []byte) ([]byte, error) {
 	if f < 0 {
 		return dst, errors.New("negative-appender-float")
 	}
@@ -76,7 +76,7 @@ func (f appenderOnlyFloat64) AppendJSON(dst []byte) ([]byte, error) {
 
 type appenderOnlyPtrFloat32 float32
 
-func (f *appenderOnlyPtrFloat32) AppendJSON(dst []byte) ([]byte, error) {
+func (f *appenderOnlyPtrFloat32) AppendSonicJSON(dst []byte) ([]byte, error) {
 	if *f < 0 {
 		return dst, errors.New("negative-appender-ptr-float32")
 	}

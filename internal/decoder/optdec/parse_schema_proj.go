@@ -414,7 +414,18 @@ func (sc *schemaScanner) scanRaw(c byte, valStart int) bool {
 		sc.nIdx++
 		return true
 	}
-	if !sc.skipValidateValue(c) {
+	// A raw subtree is consumed (json.RawMessage, Unmarshaler), not skipped,
+	// so NoValidateJSON must not relax its validation: the full parser always
+	// validates it, and the projection path has to accept exactly the same
+	// inputs or the result would depend on which path a decode happens to take.
+	// Both the scanner flag and the option bit (read by the string and
+	// container skippers) are cleared for the duration of the raw scan.
+	noValidate, opts := sc.noValidateJSON, sc.opts
+	sc.noValidateJSON = false
+	sc.opts &^= 1 << _F_no_validate_json
+	ok := sc.skipValidateValue(c)
+	sc.noValidateJSON, sc.opts = noValidate, opts
+	if !ok {
 		return false
 	}
 	valEnd := sc.pos
@@ -1026,11 +1037,7 @@ func (sc *schemaScanner) scanFullSubtree(c byte, valStart int) bool {
 	// or dense-slice bailout restores pristine source bytes first.
 	sc.mutatedPadded = true
 
-	err := cParityParseWithPadding(p)
-	for classifyScanStop(err) == scanStopNodeCapExhausted {
-		p.growNodeTape()
-		err = cParityParseWithPadding(p)
-	}
+	err := parseRunsGrowing(p)
 
 	subMaxDepth := uint64(p.nbuf.stat.max_depth)
 	if uint64(savedMaxDepth) > subMaxDepth {

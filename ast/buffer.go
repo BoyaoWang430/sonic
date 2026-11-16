@@ -321,12 +321,40 @@ func (self *linkedPairs) Pop() {
 }
 
 func (self *linkedPairs) Unset(i int) {
+	var key string
+	removed := false
 	if self.index != nil {
 		if p := self.At(i); p != nil && !p.isUnset() {
-			delete(self.index, p.Key)
+			key, removed = p.Key, true
 		}
 	}
 	self.set(i, tombstonePair)
+	if removed {
+		self.reindexKey(key)
+	}
+}
+
+// reindexKey repairs the index entry for key after a pair with that key was
+// replaced by a tombstone. Objects may contain duplicate keys and Get trusts
+// the index on a miss, so dropping the entry outright would hide a remaining
+// live duplicate; instead re-point it to the last live pair with that key
+// (matching BuildIndex) or delete it when none is left.
+func (self *linkedPairs) reindexKey(key string) {
+	if self.index == nil {
+		return
+	}
+	if j, ok := self.index[key]; ok {
+		if p := self.At(j); p != nil && p.Key == key && !p.isUnset() {
+			return
+		}
+	}
+	delete(self.index, key)
+	for j := self.size - 1; j >= 0; j-- {
+		if p := self.At(j); p != nil && p.Key == key && !p.isUnset() {
+			self.index[key] = j
+			return
+		}
+	}
 }
 
 func (self *linkedPairs) Set(i int, v Pair) {

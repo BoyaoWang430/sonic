@@ -200,14 +200,14 @@ var quoteHTMLEscapes = []struct{ src, want string }{
 	{"&", `\u0026`},
 	{"\u2028", `\u2028`},
 	{"\u2029", `\u2029`},
-	{"—", "—"},                                 // 0xe2 0x80 0x94
-	{"€", "€"},                                 // 0xe2 0x82 0xac
-	{"\xe2", "\xe2"},                           // lone 0xe2 at EOF
-	{"\xe2\x80", "\xe2\x80"},                   // truncated 2-byte 0xe2 0x80
-	{"\xe2\x80\xa7", "\xe2\x80\xa7"},           // U+2027 (neighbor below U+2028)
-	{"\xe2\x80\xaa", "\xe2\x80\xaa"},           // U+202A (neighbor above U+2029)
-	{"\xe2\xe2\x80\xa8", "\xe2\\u2028"},        // 0xe2 immediately before U+2028
-	{"\xe2\xe2\x80\xa9", "\xe2\\u2029"},        // 0xe2 immediately before U+2029
+	{"—", "—"},                          // 0xe2 0x80 0x94
+	{"€", "€"},                          // 0xe2 0x82 0xac
+	{"\xe2", "\xe2"},                    // lone 0xe2 at EOF
+	{"\xe2\x80", "\xe2\x80"},            // truncated 2-byte 0xe2 0x80
+	{"\xe2\x80\xa7", "\xe2\x80\xa7"},    // U+2027 (neighbor below U+2028)
+	{"\xe2\x80\xaa", "\xe2\x80\xaa"},    // U+202A (neighbor above U+2029)
+	{"\xe2\xe2\x80\xa8", "\xe2\\u2028"}, // 0xe2 immediately before U+2028
+	{"\xe2\xe2\x80\xa9", "\xe2\\u2029"}, // 0xe2 immediately before U+2029
 	{`<a href="https://x.test?a=1&b=2">x</a>`, `\u003ca href=\"https://x.test?a=1\u0026b=2\"\u003ex\u003c/a\u003e`},
 }
 

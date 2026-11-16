@@ -75,7 +75,6 @@ func TestParseNativeRetryLargeJson(t *testing.T) {
 	})
 }
 
-
 func TestSubPlanSharingAndRecursiveBind(t *testing.T) {
 	type sharedLeaf struct {
 		ID   int64  `json:"id"`

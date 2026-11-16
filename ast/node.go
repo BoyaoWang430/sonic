@@ -140,8 +140,22 @@ func (self *Node) Check() error {
 	} else if self.loadt() != V_ERROR {
 		return nil
 	} else {
-		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
+		return self.errorValue()
 	}
+}
+
+// errorValue returns the error reported by a V_ERROR node. The sentinels
+// behind ErrNotExist and ErrUnsupportType are returned as-is so that
+// `err == ast.ErrNotExist` keeps working; any other error node is copied so
+// that self does not escape through the returned interface.
+func (self *Node) errorValue() error {
+	switch self {
+	case errNotExistNode:
+		return ErrNotExist
+	case errUnsupportTypeNode:
+		return ErrUnsupportType
+	}
+	return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
 }
 
 func (self *Node) checkFast() error {
@@ -150,7 +164,7 @@ func (self *Node) checkFast() error {
 	} else if self.t != V_ERROR {
 		return nil
 	} else {
-		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
+		return self.errorValue()
 	}
 }
 
@@ -203,7 +217,7 @@ func (self *Node) checkRaw() error {
 
 	t := self.loadt()
 	if t == V_ERROR {
-		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
+		return self.errorValue()
 	}
 
 	if t&_V_RAW != 0 {
@@ -883,6 +897,9 @@ func (self *Node) SetByIndex(index int, node Node) (bool, error) {
 
 	p := self.Index(index)
 	if p != nil && p.t == V_ERROR {
+		if types.ParsingError(p.l) == _ERR_NOT_FOUND {
+			return false, ErrNotExist
+		}
 		return false, p.Check()
 	}
 	if !p.Exists() {
@@ -1678,7 +1695,7 @@ func (self *Node) Load() error {
 	case _V_OBJECT_LAZY:
 		self.loadAllKey(true)
 	case V_ERROR:
-		return &Node{t: self.t, l: self.l, p: self.p, m: self.m}
+		return self.errorValue()
 	case V_NONE:
 		return nil
 	}
@@ -2005,8 +2022,9 @@ func (self *Node) loadAllIndex(loadOnce bool) error {
 	var err types.ParsingError
 	parser, stack := self.getParserAndArrayStack()
 	if !loadOnce {
+		// The materialized tree replaces *self and is kept, so nested objects
+		// keep their key index (noIndex is only for throwaway parses).
 		parser.noLazy = true
-		parser.noIndex = true
 	} else {
 		parser.loadOnce = true
 	}
@@ -2024,8 +2042,8 @@ func (self *Node) loadAllKey(loadOnce bool) error {
 	var err types.ParsingError
 	parser, stack := self.getParserAndObjectStack()
 	if !loadOnce {
+		// See loadAllIndex: the result is retained, so build key indexes.
 		parser.noLazy = true
-		parser.noIndex = true
 		*self, err = parser.decodeObject(&stack.v)
 	} else {
 		parser.loadOnce = true
@@ -2052,19 +2070,18 @@ func (self *Node) removePair(i int) {
 	if last == nil {
 		return
 	}
-	if !last.isUnset() {
+	wasLive, key := !last.isUnset(), last.Key
+	*last = tombstonePair
+	if wasLive {
 		if !self.isLazy() {
-			if s := (*linkedPairs)(self.p); s != nil && s.index != nil {
-				delete(s.index, last.Key)
+			if s := (*linkedPairs)(self.p); s != nil {
+				s.reindexKey(key)
 			}
 		} else {
 			_, stack := self.getParserAndObjectStack()
-			if stack.v.index != nil {
-				delete(stack.v.index, last.Key)
-			}
+			stack.v.reindexKey(key)
 		}
 	}
-	*last = tombstonePair
 	// NOTICE: should be consistent with linkedPair.Len()
 	self.l--
 }
@@ -2736,31 +2753,44 @@ func (self *Node) setObject(v *linkedPairs) {
 }
 
 func (self *Node) parseRaw(full bool) {
-	lock := self.lock()
+	// Capture the mutex before anything can overwrite *self, and release it
+	// through the captured value: on error *self is replaced, and a panic in
+	// the parser must not leave concurrent readers blocked forever.
+	m := self.m
+	if m != nil {
+		m.Lock()
+		defer m.Unlock()
+	}
 	if !self.isRaw() {
-		self.unlock()
 		return
 	}
 	raw := self.toString()
 	parser := NewParserObj(raw)
 	var e types.ParsingError
-	if full && !lock {
+	if full && m == nil {
 		parser.noLazy = true
 		parser.noIndex = true
 		*self, e = parser.Parse()
-	} else if lock {
+	} else if m != nil {
 		var n Node
 		parser.noLazy = true
 		parser.loadOnce = true
 		n, e = parser.Parse()
-		self.assign(n)
+		if e == 0 {
+			self.assign(n)
+		}
 	} else {
 		*self, e = parser.Parse()
 	}
 	if e != 0 {
-		*self = *newSyntaxError(parser.syntaxError(e))
+		if m != nil {
+			// Publish the error like any other state change and keep the
+			// mutex, which other goroutines may already be waiting on.
+			self.assign(*newSyntaxError(parser.syntaxError(e)))
+		} else {
+			*self = *newSyntaxError(parser.syntaxError(e))
+		}
 	}
-	self.unlock()
 }
 
 func (self *Node) assign(n Node) {

@@ -4,11 +4,11 @@ package kernels
 
 import (
 	"fmt"
+	"github.com/bytedance/sonic/internal/rt"
 	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
-	"github.com/bytedance/sonic/internal/rt"
 
 	"github.com/bytedance/sonic/internal/native/types"
 )

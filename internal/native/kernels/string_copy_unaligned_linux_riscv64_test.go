@@ -4,9 +4,9 @@ package kernels
 
 import (
 	"bytes"
+	"github.com/bytedance/sonic/internal/rt"
 	"strings"
 	"testing"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 // Check independent alignments, output capacities, and write boundaries.

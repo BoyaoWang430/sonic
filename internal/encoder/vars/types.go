@@ -92,7 +92,7 @@ var (
 	JsonMarshalerType         = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	EncodingTextMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 	jsonAppenderMethodType    = reflect.TypeOf((*interface {
-		AppendJSON([]byte) ([]byte, error)
+		AppendSonicJSON([]byte) ([]byte, error)
 	})(nil)).Elem()
 	isZeroerMethodType = reflect.TypeOf((*interface {
 		IsZero() bool

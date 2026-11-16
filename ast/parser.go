@@ -40,10 +40,16 @@ const (
 
 var (
 	// ErrNotExist means both key and value doesn't exist
-	ErrNotExist error = newError(_ERR_NOT_FOUND, "value not exists")
+	ErrNotExist error = errNotExistNode
 
 	// ErrUnsupportType means API on the node is unsupported
-	ErrUnsupportType error = newError(_ERR_UNSUPPORT_TYPE, "unsupported type")
+	ErrUnsupportType error = errUnsupportTypeNode
+
+	// The sentinel nodes behind ErrNotExist and ErrUnsupportType. Error
+	// accessors return these exact values (not copies) so callers can keep
+	// comparing errors with ==.
+	errNotExistNode      = newError(_ERR_NOT_FOUND, "value not exists")
+	errUnsupportTypeNode = newError(_ERR_UNSUPPORT_TYPE, "unsupported type")
 )
 
 type Parser struct {

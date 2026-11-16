@@ -388,7 +388,7 @@ func (n *ptrTextMarshalerInt) MarshalText() ([]byte, error) {
 
 type ptrAppenderInt int
 
-func (n *ptrAppenderInt) AppendJSON(dst []byte) ([]byte, error) {
+func (n *ptrAppenderInt) AppendSonicJSON(dst []byte) ([]byte, error) {
 	return append(dst, fmt.Sprintf(`"app:%d"`, *n)...), nil
 }
 
@@ -1162,17 +1162,17 @@ func TestStepD2StringArenaAndUnmarshalBytesSafety(t *testing.T) {
 type customStructMap map[string]pureLeafSpecItem
 
 type stepD4MapHolder struct {
-	SS      map[string]string            `json:"ss"`
-	SI      map[string]int               `json:"si"`
-	SI64    map[string]int64             `json:"si64"`
-	SU64    map[string]uint64            `json:"su64"`
-	SF64    map[string]float64           `json:"sf64"`
-	SB      map[string]bool              `json:"sb"`
-	IS      map[int]string               `json:"is"`
-	I64S    map[int64]string             `json:"i64s"`
-	NamedSI customStringIntMap           `json:"named_si"`
-	NamedSt customStructMap              `json:"named_st"`
-	U64St   map[uint64]pureLeafSpecItem  `json:"u64_st"`
+	SS      map[string]string           `json:"ss"`
+	SI      map[string]int              `json:"si"`
+	SI64    map[string]int64            `json:"si64"`
+	SU64    map[string]uint64           `json:"su64"`
+	SF64    map[string]float64          `json:"sf64"`
+	SB      map[string]bool             `json:"sb"`
+	IS      map[int]string              `json:"is"`
+	I64S    map[int64]string            `json:"i64s"`
+	NamedSI customStringIntMap          `json:"named_si"`
+	NamedSt customStructMap             `json:"named_st"`
+	U64St   map[uint64]pureLeafSpecItem `json:"u64_st"`
 }
 
 func TestStepD4BuiltinAndPooledMaps(t *testing.T) {
@@ -1308,10 +1308,10 @@ func TestStepD4BuiltinAndPooledMaps(t *testing.T) {
 }
 
 type benchD4Payload struct {
-	StrStr  map[string]string           `json:"str_str"`
-	StrI64  map[string]int64            `json:"str_i64"`
-	I64Str  map[int64]string            `json:"i64_str"`
-	NamedSt customStructMap             `json:"named_st"`
+	StrStr  map[string]string `json:"str_str"`
+	StrI64  map[string]int64  `json:"str_i64"`
+	I64Str  map[int64]string  `json:"i64_str"`
+	NamedSt customStructMap   `json:"named_st"`
 }
 
 func makeBenchD4Payload() benchD4Payload {
