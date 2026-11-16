@@ -1882,3 +1882,34 @@ func TestFlatDirectStreamingOver1MiBBuffer(t *testing.T) {
 		}
 	}
 }
+
+func TestFlatDirect20DigitUint64(t *testing.T) {
+	type u64Holder struct {
+		V   uint64   `json:"v"`
+		Arr []uint64 `json:"arr"`
+	}
+	var dst u64Holder
+	_, vp, _, _, flatSD, err := unpackAndCompileRoot(&dst)
+	if err != nil || flatSD == nil {
+		t.Fatalf("expected flatSD for u64Holder, err=%v", err)
+	}
+	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
+
+	doc := `{"v":18446744073709551615,"arr":[10000000000000000000,18446744073709551615]}`
+	endPos, ok := tryDecodeFlatStruct(doc, 0, 0, vp, flatSD, false, true)
+	if !ok || endPos != len(doc) {
+		t.Fatalf("expected 20-digit uint64 to stay on flat path, ok=%v endPos=%d", ok, endPos)
+	}
+	if dst.V != math.MaxUint64 || len(dst.Arr) != 2 || dst.Arr[0] != 10000000000000000000 || dst.Arr[1] != math.MaxUint64 {
+		t.Fatalf("unexpected decoded u64Holder: %+v", dst)
+	}
+
+	overflowDoc := `{"v":18446744073709551616}`
+	if _, ok := tryDecodeFlatStruct(overflowDoc, 0, 0, vp, flatSD, false, true); ok {
+		t.Fatalf("expected uint64 overflow to bail from flat path")
+	}
+	var out u64Holder
+	if _, _, err := DecodeOne(overflowDoc, 0, &out); err == nil {
+		t.Fatalf("expected DecodeOne error on uint64 overflow")
+	}
+}

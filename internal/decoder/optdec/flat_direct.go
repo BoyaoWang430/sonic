@@ -1644,6 +1644,17 @@ func flatParseUnsigned(strPtr unsafe.Pointer, c byte, pos, end int, maxVal uint6
 		digits++
 	}
 	d := schemaByteAt(strPtr, pos, end)
+	if d >= '0' && d <= '9' {
+		const maxU64Div10 = math.MaxUint64 / 10
+		const maxU64Mod10 = math.MaxUint64 % 10
+		digit := uint64(d - '0')
+		if u > maxU64Div10 || (u == maxU64Div10 && digit > maxU64Mod10) {
+			return 0, 0, false
+		}
+		u = u*10 + digit
+		pos++
+		d = schemaByteAt(strPtr, pos, end)
+	}
 	if (d >= '0' && d <= '9') || d == '.' || (d|0x20) == 'e' || u > maxVal {
 		return 0, 0, false
 	}

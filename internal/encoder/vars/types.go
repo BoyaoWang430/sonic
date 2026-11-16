@@ -24,6 +24,12 @@ import (
 
 var (
 	ByteType                 = reflect.TypeOf(byte(0))
+	BoolType                 = reflect.TypeOf(false)
+	StringType               = reflect.TypeOf("")
+	IntType                  = reflect.TypeOf(int(0))
+	Int64Type                = reflect.TypeOf(int64(0))
+	Uint64Type               = reflect.TypeOf(uint64(0))
+	Float64Type              = reflect.TypeOf(float64(0))
 	ByteSliceType            = reflect.TypeOf([]byte(nil))
 	BoolSliceType            = reflect.TypeOf([]bool(nil))
 	Float32SliceType         = reflect.TypeOf([]float32(nil))
@@ -83,6 +89,35 @@ func BuiltinMapKind(vt reflect.Type) (int, bool) {
 	case Int64StringMapType:
 		return MapBuiltinI64Str, true
 	default:
+		if vt.Kind() == reflect.Map {
+			switch vt.Key() {
+			case StringType:
+				switch vt.Elem() {
+				case EmptyInterfaceType:
+					return MapBuiltinStrAny, true
+				case StringType:
+					return MapBuiltinStrStr, true
+				case IntType:
+					return MapBuiltinStrInt, true
+				case Int64Type:
+					return MapBuiltinStrI64, true
+				case Uint64Type:
+					return MapBuiltinStrU64, true
+				case Float64Type:
+					return MapBuiltinStrF64, true
+				case BoolType:
+					return MapBuiltinStrBool, true
+				}
+			case IntType:
+				if vt.Elem() == StringType {
+					return MapBuiltinIntStr, true
+				}
+			case Int64Type:
+				if vt.Elem() == StringType {
+					return MapBuiltinI64Str, true
+				}
+			}
+		}
 		return 0, false
 	}
 }

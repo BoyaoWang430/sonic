@@ -61,14 +61,45 @@ type rootEncPlan struct {
 	pureSpecs      []ir.StructFieldSpec
 	denseSpecs     []ir.StructFieldSpec
 	elemSize       uintptr
+	builtinMapKind int
 	sizeHint       atomic.Uint32
 	isDirectPtr    bool
+	isDirectMap    bool
 	hasPureSpecs   bool
 	hasDenseSpecs  bool
 	isPureSlice    bool
 	isPurePtrSlice bool
 	allowSizeHint  bool
 	boxHasPtrs     bool
+	_              [64]byte
+	concCooldown   atomic.Uint32
+	_              [60]byte
+	inDirectUse    atomic.Uint32
+}
+
+var encConcStripes [64]struct {
+	tick uint32
+	_    [60]byte
+}
+
+func (p *rootEncPlan) tryAcquireDirectSingle() bool {
+	if p.concCooldown.Load() > 0 {
+		return false
+	}
+	if p.inDirectUse.CompareAndSwap(0, 1) {
+		return true
+	}
+	p.concCooldown.Store(64)
+	return false
+}
+
+func (p *rootEncPlan) decayConcCooldown(bufSeed uintptr) {
+	if cd := p.concCooldown.Load(); cd > 0 {
+		idx := (uint64(bufSeed) * 0x9e3779b97f4a7c15) >> 58
+		if (atomic.AddUint32(&encConcStripes[idx].tick, 1) & 255) == 0 {
+			p.concCooldown.CompareAndSwap(cd, cd-1)
+		}
+	}
 }
 
 func typeHasPointers(vt reflect.Type) bool {
@@ -314,7 +345,8 @@ func extractPureStructSpecs(prog *ir.Program, start, end int) ([]ir.StructFieldS
 func newValueBoxPool(vt reflect.Type) *sync.Pool {
 	return &sync.Pool{
 		New: func() any {
-			return reflect.New(vt)
+			v := reflect.New(vt)
+			return &v
 		},
 	}
 }
@@ -385,6 +417,19 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 			boxPool:       newValueBoxPool(vt),
 			allowSizeHint: vt.Elem().Kind() == reflect.Struct || (vt.Elem().Kind() == reflect.Ptr && vt.Elem().Elem().Kind() == reflect.Struct),
 			boxHasPtrs:    true,
+		}, nil
+	case reflect.Map:
+		if len(*prog) == 10 && (*prog)[5].Op() == ir.OP_map_string_any {
+			return &rootEncPlan{
+				prog:           prog,
+				builtinMapKind: (*prog)[5].Vi(),
+				isDirectMap:    true,
+			}, nil
+		}
+		return &rootEncPlan{
+			prog:       prog,
+			boxPool:    newValueBoxPool(vt),
+			boxHasPtrs: true,
 		}, nil
 	default:
 		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
@@ -700,6 +745,38 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 	if plan.isPurePtrSlice {
 		return encodePurePtrStructSliceRoot(buf, rv, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
 	}
+	if plan.isDirectMap {
+		mh := rv.UnsafePointer()
+		if mh == nil {
+			if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
+				*buf = append(*buf, '{', '}')
+			} else {
+				*buf = append(*buf, 'n', 'u', 'l', 'l')
+			}
+			return nil
+		}
+		if rv.Len() == 0 {
+			*buf = append(*buf, '{', '}')
+			return nil
+		}
+		if !sb.Save(0, 0, nil, nil) || !sb.Save(0, 0, nil, nil) {
+			return vars.ERR_too_deep
+		}
+		*buf = append(*buf, '{')
+		var err error
+		if plan.builtinMapKind == vars.MapBuiltinStrAny {
+			err = encodeStringAnyMap(buf, *(*map[string]any)(unsafe.Pointer(&mh)), sb, fv)
+		} else {
+			err = encodeBuiltinMap(buf, unsafe.Pointer(&mh), plan.builtinMapKind, sb, fv)
+		}
+		if err != nil {
+			return err
+		}
+		sb.Drop()
+		sb.Drop()
+		*buf = append(*buf, '}')
+		return nil
+	}
 	if plan.boxPool == nil {
 		ptr := rv.UnsafePointer()
 		if plan.isDirectPtr {
@@ -727,7 +804,8 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 		sb.PopPtr(idx)
 		return err
 	}
-	box := plan.boxPool.Get().(reflect.Value)
+	boxPtr := plan.boxPool.Get().(*reflect.Value)
+	box := *boxPtr
 	elem := box.Elem()
 	elem.Set(rv)
 	var err error
@@ -741,7 +819,7 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 	if plan.boxHasPtrs {
 		elem.SetZero()
 	}
-	plan.boxPool.Put(box)
+	plan.boxPool.Put(boxPtr)
 	return err
 }
 
@@ -787,7 +865,7 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 
 	if plan.allowSizeHint {
 		hint := int(plan.sizeHint.Load())
-		if hint >= minDirectRootHint && hint <= maxDirectRootHint {
+		if hint >= minDirectRootHint && hint <= maxDirectRootHint && plan.tryAcquireDirectSingle() {
 			capHint := hint + (hint >> 5) + 96
 			out := make([]byte, 0, capHint)
 			var stk *vars.Stack
@@ -795,6 +873,7 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 				stk = vars.NewStack()
 			}
 			err = encodeWithRootPlan(&out, rv, plan, stk, fv)
+			plan.inDirectUse.Store(0)
 			if err != nil {
 				if stk != nil {
 					vars.ResetStack(stk)
@@ -821,6 +900,7 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	}
 
 	buf := vars.NewBytes()
+	plan.decayConcCooldown(uintptr(unsafe.Pointer(buf)))
 	origBuf := (*buf)[:0]
 	var stk *vars.Stack
 	if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {

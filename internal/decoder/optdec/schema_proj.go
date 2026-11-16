@@ -4,6 +4,7 @@ package optdec
 
 import (
 	"reflect"
+	"runtime"
 	"sync/atomic"
 	"unsafe"
 )
@@ -278,10 +279,10 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 }
 
 func (p *projPlan) shouldUse(jsonLen int) bool {
-	return p.shouldUseSeeded(jsonLen, uintptr(unsafe.Pointer(p)))
+	return p.shouldUseSeededOpts(jsonLen, 0, uintptr(unsafe.Pointer(p)))
 }
 
-func (p *projPlan) shouldUseSeeded(jsonLen int, seed uintptr) bool {
+func (p *projPlan) shouldUseSeededOpts(jsonLen int, f uint64, seed uintptr) bool {
 	if p == nil || p.kind == projFull || p.kind == projScalar || p.kind == projBytes {
 		return false
 	}
@@ -300,6 +301,9 @@ func (p *projPlan) shouldUseSeeded(jsonLen int, seed uintptr) bool {
 		}
 	}
 	if p.isBounded {
+		if runtime.GOOS != "darwin" && f&(1<<_F_no_validate_json) == 0 && p.maxStructWidth >= 40 {
+			return jsonLen >= p.totalFields*512
+		}
 		return jsonLen >= p.totalFields*24
 	}
 	return jsonLen >= 384 && p.maxStructWidth > 0 && p.maxStructWidth <= 32 && p.totalFields <= 64

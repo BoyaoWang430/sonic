@@ -81,7 +81,11 @@ func (p *Parser) ensurePadded() {
 			p.padded = make([]byte, 0, needed)
 		} else {
 			allocCap := int(maxPooledJsonPaddedCap)
-			if needed <= 256<<10 {
+			if needed <= 4<<10 {
+				allocCap = 4 << 10
+			} else if needed <= 32<<10 {
+				allocCap = 32 << 10
+			} else if needed <= 256<<10 {
 				allocCap = 256 << 10
 			}
 			p.padded = make([]byte, 0, allocCap)
