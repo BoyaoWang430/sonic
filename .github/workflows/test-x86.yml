@@ -56,6 +56,12 @@ jobs:
       - name: Generic Test
         run: GOMAXPROCS=4 go test -v -race ./generic_test
 
+      - name: Non-AVX2 and Non-SSSE3 ISA Fallback Tests
+        if: startsWith(matrix.go-version, '1.25') || startsWith(matrix.go-version, '1.27')
+        run: |
+          SONIC_MODE=noavx2 GOMAXPROCS=4 go test -count=1 . ./decoder ./encoder ./ast ./utf8 ./unquote ./internal/native/... ./internal/decoder/optdec
+          SONIC_MODE=nossse3 GOMAXPROCS=4 go test -count=1 . ./decoder ./encoder ./ast ./utf8 ./unquote ./internal/native/... ./internal/decoder/optdec
+
       - name: Codecov
         uses: codecov/codecov-action@v5
         with:

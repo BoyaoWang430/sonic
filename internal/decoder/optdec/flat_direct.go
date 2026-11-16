@@ -374,16 +374,30 @@ func buildFlatPlanGroup(plan *flatStructPlan, sd *structDecoder, baseOffset uint
 // completely untouched for the standard decoder fallback.
 func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd *structDecoder, utf8Prechecked, checkTrailing bool) (int, bool) {
 	end := len(s)
-	maxLen := flatMaxInputLen
-	if checkTrailing {
-		maxLen = flatSingleDocMaxLen
-	}
-	if startPos < 0 || startPos >= end || end-startPos > maxLen || end > math.MaxUint32 || f&flatUnsupportedOpts != 0 {
+	if startPos < 0 || startPos >= end || f&flatUnsupportedOpts != 0 {
 		return 0, false
+	}
+	baseOffset := 0
+	if checkTrailing {
+		if end-startPos > flatSingleDocMaxLen || end > math.MaxUint32 {
+			return 0, false
+		}
+	} else {
+		// In session/streaming mode (e.g. multi-MiB NDJSON buffers), bound the
+		// scan window to flatMaxInputLen from startPos instead of rejecting based
+		// on total remaining stream length.
+		rem := end - startPos
+		if rem > flatMaxInputLen {
+			rem = flatMaxInputLen
+		}
+		s = s[startPos : startPos+rem]
+		baseOffset = startPos
+		startPos = 0
+		end = rem
 	}
 	streak := atomic.LoadUint32(&sd.flatFailStreak)
 	if streak >= flatBackoffThreshold {
-		if (atomic.AddUint32(&sd.flatProbeTick, 1) & 255) != 0 {
+		if !hitBackoffProbe(uintptr(vp), &sd.flatProbeTick) {
 			return 0, false
 		}
 	}
@@ -402,7 +416,7 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 		if streak != 0 {
 			atomic.StoreUint32(&sd.flatFailStreak, 0)
 		}
-		return nextPos, true
+		return baseOffset + nextPos, true
 	}
 	if streak < 16 {
 		atomic.AddUint32(&sd.flatFailStreak, 1)

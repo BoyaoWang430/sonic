@@ -72,4 +72,21 @@ func TestParseUnclosedArrayRunBoundedGrowth(t *testing.T) {
 	if got := after.TotalAlloc - before.TotalAlloc; got > 96<<20 {
 		t.Fatalf("parsing a 1 MiB unclosed array run allocated %d MiB", got>>20)
 	}
+
+	// A 16 MiB unclosed '[' run must stop at MAX_RECURSE (SONIC_STACK_OVERFLOW)
+	// without allocating a 16M-entry (256 MiB) node tape.
+	huge := strings.Repeat("[", 16<<20)
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	p2 := newParserImpl(huge, 0, 0)
+	p2.presizeNodesOne()
+	err2 := parseImpl(p2)
+	runtime.ReadMemStats(&after)
+	p2.free()
+	if err2 != SONIC_STACK_OVERFLOW {
+		t.Fatalf("expected SONIC_STACK_OVERFLOW for 16 MiB unclosed '[', got %v", err2)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 48<<20 {
+		t.Fatalf("parsing a 16 MiB unclosed array run allocated %d MiB (want <= 48 MiB)", got>>20)
+	}
 }

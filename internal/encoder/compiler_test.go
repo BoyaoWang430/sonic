@@ -72,6 +72,26 @@ func TestPretouchTypeVM(t *testing.T) {
 	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subC{}), pv: false})
 }
 
+func TestExplicitDefaultMaxInlineDepthNotRewrittenTo16(t *testing.T) {
+	type defLeaf struct{ X int }
+	type defMid struct{ B [1]defLeaf }
+	type defRoot struct{ A [1]defMid }
+
+	defSub, err := pretouchTypeVM(reflect.TypeOf(defRoot{}), option.DefaultCompileOptions(), false)
+	assert.NoError(t, err)
+	assert.Empty(t, defSub, "untouched default options inline up to depth 16 in VM")
+
+	type expLeaf struct{ X int }
+	type expMid struct{ B [1]expLeaf }
+	type expRoot struct{ A [1]expMid }
+
+	explicitOpts := option.DefaultCompileOptions()
+	option.WithCompileMaxInlineDepth(option.DefaultMaxInlineDepth)(&explicitOpts)
+	expSub, err := pretouchTypeVM(reflect.TypeOf(expRoot{}), explicitOpts, false)
+	assert.NoError(t, err)
+	assert.Contains(t, expSub, vmPretouchKey{vt: reflect.TypeOf(expLeaf{}), pv: false}, "explicit WithCompileMaxInlineDepth(3) must not be rewritten to 16")
+}
+
 func TestStructFieldsCompilation(t *testing.T) {
 	previous := vars.UseVM
 	defer func() { vars.UseVM = previous }()

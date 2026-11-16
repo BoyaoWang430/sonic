@@ -110,7 +110,7 @@ sc_no_brackets:
 
 sc_quote_prefix:
 	VMOVQ R13, X2
-	PCLMULQDQ $0, X8, X2
+	VPCLMULQDQ $0, X8, X2, X2
 	VMOVQ X2, R13
 	XORQ R11, R13                 // R13 = inString mask
 	MOVQ R13, R11
@@ -247,12 +247,12 @@ sc_avx_tail_slash:
 	JNE  sc_avx_tail_open
 	ORQ  AX, 8(SP)
 sc_avx_tail_open:
-	CMPB R12B, open+16(FP)
+	CMPQ R12, open+16(FP)
 	JNE  sc_avx_tail_close
 	ORQ  AX, DX
 sc_avx_tail_close:
-	SUBB open+16(FP), R12B
-	CMPB R12B, $2
+	SUBQ open+16(FP), R12
+	CMPQ R12, $2
 	JNE  sc_avx_tail_next
 	ORQ  AX, BX
 sc_avx_tail_next:
@@ -303,11 +303,14 @@ sc_sse_entry:
 	MOVOU ·sc_quote_vec<>(SB), X4
 	MOVOU ·sc_slash_vec<>(SB), X5
 	MOVQ 0(SP), R15
-	PXOR X1, X1
 	MOVQ DX, X6
-	PSHUFB X1, X6
+	PUNPCKLBW X6, X6
+	PUNPCKLBW X6, X6
+	PSHUFD $0, X6, X6
 	MOVQ BX, X7
-	PSHUFB X1, X7
+	PUNPCKLBW X7, X7
+	PUNPCKLBW X7, X7
+	PSHUFD $0, X7, X7
 
 sc_sse_block:
 	MOVQ $64, R12
@@ -357,12 +360,12 @@ sc_sse_tail_slash:
 	JNE  sc_sse_tail_open
 	ORQ  AX, 8(SP)
 sc_sse_tail_open:
-	CMPB R12B, open+16(FP)
+	CMPQ R12, open+16(FP)
 	JNE  sc_sse_tail_close
 	ORQ  AX, DX
 sc_sse_tail_close:
-	SUBB open+16(FP), R12B
-	CMPB R12B, $2
+	SUBQ open+16(FP), R12
+	CMPQ R12, $2
 	JNE  sc_sse_tail_next
 	ORQ  AX, BX
 sc_sse_tail_next:

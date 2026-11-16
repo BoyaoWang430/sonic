@@ -163,6 +163,8 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 		length := cParitySkipPositive(&cur, remain)
 		if length < 0 {
 			code = ErrorCode(-length)
+		} else if negative && length == 0 && p.strictRawNum {
+			code = SONIC_INVALID_NUM
 		}
 		value := uint64(length)
 		if negative {

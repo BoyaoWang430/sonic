@@ -74,9 +74,11 @@ TEXT ·nonSpaceMask(SB), NOSPLIT, $0-24
 	RET
 
 ns_short:
-	MOVOU ·ws_lut<>(SB), X8
 	XORQ R8, R8           // R8 = nonspace bitmask
 	XORQ CX, CX           // CX = bit offset (0, 16, 32, 48)
+	CMPB ·hasSSSE3(SB), $0
+	JE   ns_tail
+	MOVOU ·ws_lut<>(SB), X8
 
 ns_vec_loop:
 	MOVQ DX, R9
@@ -184,14 +186,15 @@ tm_pack64:
 	RET
 
 tm_short:
+	XORQ R8, R8           // events
+	XORQ R9, R9           // nonspace
+	XORQ CX, CX
+	CMPB ·hasSSSE3(SB), $0
+	JE   tm_tail
 	MOVOU ·ws_lut<>(SB), X8
 	MOVOU ·quote_vec<>(SB), X9
 	MOVOU ·slash_vec<>(SB), X10
 	MOVOU ·ctrl_vec<>(SB), X11
-
-	XORQ R8, R8           // events
-	XORQ R9, R9           // nonspace
-	XORQ CX, CX
 
 tm_vec_loop:
 	MOVQ DX, R11
@@ -345,17 +348,18 @@ TEXT ·pathMasks(SB), NOSPLIT, $0-40
 	RET
 
 pm_short:
+	XORQ R8, R8           // events
+	XORQ R9, R9           // nonspace
+	XORQ R10, R10         // boundaries
+	XORQ CX, CX
+	CMPB ·hasSSSE3(SB), $0
+	JE   pm_tail
 	MOVOU ·ws_lut<>(SB), X8
 	MOVOU ·quote_vec<>(SB), X9
 	MOVOU ·slash_vec<>(SB), X10
 	MOVOU ·bound_lut<>(SB), X11
 	MOVOU ·rbrack_vec<>(SB), X12
 	MOVOU ·rbrace_vec<>(SB), X13
-
-	XORQ R8, R8           // events
-	XORQ R9, R9           // nonspace
-	XORQ R10, R10         // boundaries
-	XORQ CX, CX
 
 pm_vec_loop:
 	MOVQ DX, R11

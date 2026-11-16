@@ -1,3 +1,5 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
 package optdec
 
 import (
@@ -132,6 +134,7 @@ type Parser struct {
 	hasProjHints   bool
 	strictURC      bool
 	keepUseNumber  bool
+	strictRawNum   bool
 	scalarSlab     []uint64
 	scalarSlabOff  int
 	scalarSlabNext int
@@ -487,12 +490,20 @@ func looksLikeJSONLPrefix(s string) bool {
 	return false
 }
 
+// maxPresizeNodesOne caps the initial up-front node reservation before any
+// scan runs, so pathological inputs (e.g. multi-MiB unclosed '[') fail at
+// MAX_RECURSE instead of pre-allocating millions of nodes up front.
+const maxPresizeNodesOne = 1 << 18
+
 func (p *Parser) presizeNodesOne() {
 	start := firstContainerStart(p.Json)
 	if start < 0 {
 		return
 	}
 	estNodes := (len(p.Json)-start)/11 + 1024
+	if estNodes > maxPresizeNodesOne {
+		estNodes = maxPresizeNodesOne
+	}
 	if estNodes <= cap(p.nodes) {
 		return
 	}
@@ -532,6 +543,7 @@ func (p *Parser) reset() {
 	p.hasProjHints = false
 	p.strictURC = false
 	p.keepUseNumber = false
+	p.strictRawNum = false
 	p.lazyPadded = false
 	p.sessionPadded = nil
 	p.unesc = nil

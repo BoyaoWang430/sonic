@@ -1,3 +1,5 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
 package optdec
 
 import (
@@ -192,13 +194,13 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 			return s, endPos, nil
 		}
 	}
-	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUse(len(s))) {
+	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUseSeeded(len(s), uintptr(vp))) {
 		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
 
 	var activeProj *projPlan
 	var p *Parser
-	if proj != nil && proj.shouldUse(len(s)) {
+	if proj != nil && proj.shouldUseSeeded(len(s), uintptr(vp)) {
 		activeProj = proj
 		p = newParserLazy(s, 0, f)
 	} else {
@@ -211,7 +213,11 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 
 	ctx, err := newContextOnParserWithPlan(p, f, etp, activeProj)
 	if err == errGiantStreamFallback {
-		return decodeGiantOneCompiled(s, f, etp, vp, dec)
+		gf := f
+		if activeProj != nil && activeProj.kind == projRaw {
+			gf |= 1 << _F_use_number
+		}
+		return decodeGiantOneCompiled(s, gf, etp, vp, dec)
 	}
 	if p.Utf8Inv {
 		s = p.Json
@@ -257,7 +263,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
 		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
 		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
-		(proj == nil || !proj.hasRawSubtree || !proj.shouldUse(len(*s)-origPos)) {
+		(proj == nil || !proj.hasRawSubtree || !proj.shouldUseSeeded(len(*s)-origPos, uintptr(vp))) {
 		*i = origPos
 		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
@@ -265,7 +271,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	/* parse into document */
 	var activeProj *projPlan
 	var p *Parser
-	if proj != nil && proj.shouldUse(len(*s)-origPos) {
+	if proj != nil && proj.shouldUseSeeded(len(*s)-origPos, uintptr(vp)) {
 		activeProj = proj
 		p = newParserLazyFromSession(*s, origPos, uint64(f), sess)
 	} else {
@@ -279,7 +285,11 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, activeProj)
 	if err == errGiantStreamFallback {
 		*i = origPos
-		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
+		gf := f
+		if activeProj != nil && activeProj.kind == projRaw {
+			gf |= 1 << _F_use_number
+		}
+		return decodeGiantWithSessionCompiled(s, i, gf, etp, vp, dec, sessPtr)
 	}
 	if p.Utf8Inv {
 		*s = parserCorrectedSource(p, *s, origPos)

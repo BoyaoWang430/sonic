@@ -110,9 +110,9 @@ q_vec64_event:
 
 q_scan_32:
 	CMPQ CX, $32
-	JB   q_scan_16
+	JB   q_avx_scan_16
 	CMPQ DX, $32
-	JB   q_scan_16
+	JB   q_avx_scan_16
 
 	VMOVDQU 0(SI), Y0
 	VPMAXUB Y3, Y0, Y2
@@ -130,12 +130,12 @@ q_scan_32:
 	ADDQ $32, DI
 	SUBQ $32, CX
 	SUBQ $32, DX
-	JMP  q_scan_16
+	JMP  q_avx_scan_16
 
 q_vec32_event:
 	BSFL AX, BX                   // BX = plain prefix length (0..31)
 	CMPQ BX, $16
-	JB   q_vec16_prefix
+	JB   q_avx_vec16_prefix
 	VMOVDQU X0, 0(DI)
 	VEXTRACTI128 $1, Y0, X0
 	ADDQ $16, SI
@@ -143,7 +143,45 @@ q_vec32_event:
 	SUBQ $16, CX
 	SUBQ $16, DX
 	SUBQ $16, BX
-	JMP  q_vec16_prefix
+	JMP  q_avx_vec16_prefix
+
+q_avx_scan_16:
+	CMPQ CX, $16
+	JB   q_scan_word_entry
+	CMPQ DX, $16
+	JB   q_scan_word_entry
+
+	VMOVDQU (SI), X0
+	VPMAXUB X3, X0, X2
+	VPCMPEQB X3, X2, X2
+	VPCMPEQB X4, X0, X1
+	VPOR X1, X2, X2
+	VPCMPEQB X5, X0, X1
+	VPOR X1, X2, X2
+	VPMOVMSKB X2, AX
+	TESTL AX, AX
+	JNZ  q_avx_vec16_event
+
+	VMOVDQU X0, (DI)
+	ADDQ $16, SI
+	ADDQ $16, DI
+	SUBQ $16, CX
+	SUBQ $16, DX
+	JMP  q_avx_scan_16
+
+q_avx_vec16_event:
+	BSFL AX, BX
+q_avx_vec16_prefix:
+	TESTQ BX, BX
+	JZ   q_classify
+	MOVQ DI, R11
+	VMOVQ X0, AX
+	TESTQ $8, BX
+	JZ   q_prefix4
+	MOVQ AX, (R11)
+	ADDQ $8, R11
+	VPEXTRQ $1, X0, AX
+	JMP  q_prefix4
 
 q_scan_16:
 	CMPQ CX, $16

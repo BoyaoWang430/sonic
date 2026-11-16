@@ -82,8 +82,31 @@ sr_sse_block:
 	XORQ AX, AX
 	XORQ R8, R8
 	XORQ R9, R9
+	JMP  sr_sse_16_loop
 
 sr_tail_16_avx:
+	CMPQ R9, $64
+	JAE  sr_tail_done_avx
+	MOVQ DX, CX
+	SUBQ R9, CX
+	CMPQ CX, $16
+	JB   sr_tail_scalar_avx
+	VMOVDQU (SI)(R9*1), X0
+	VPCMPEQB X8, X0, X4
+	VPMOVMSKB X4, BX
+	MOVQ R9, CX
+	SHLQ CL, BX
+	ORQ  BX, AX
+
+	VPCMPEQB X9, X0, X4
+	VPMOVMSKB X4, BX
+	SHLQ CL, BX
+	ORQ  BX, R8
+
+	ADDQ $16, R9
+	JMP  sr_tail_16_avx
+
+sr_sse_16_loop:
 	CMPQ R9, $64
 	JAE  sr_tail_done_avx
 	MOVQ DX, CX
@@ -105,7 +128,7 @@ sr_tail_16_avx:
 	ORQ  BX, R8
 
 	ADDQ $16, R9
-	JMP  sr_tail_16_avx
+	JMP  sr_sse_16_loop
 
 sr_tail_scalar_avx:
 	CMPQ R9, $64
@@ -375,8 +398,31 @@ srb_sse_block:
 	XORQ AX, AX
 	XORQ R8, R8
 	XORQ R9, R9
+	JMP  srb_sse_16_loop
 
 srb_tail_16_avx:
+	CMPQ R9, $64
+	JAE  srb_tail_done_avx
+	MOVQ DX, CX
+	SUBQ R9, CX
+	CMPQ CX, $16
+	JB   srb_tail_scalar_avx
+	VMOVDQU (SI)(R9*1), X0
+	VPCMPEQB X8, X0, X4
+	VPMOVMSKB X4, BX
+	MOVQ R9, CX
+	SHLQ CL, BX
+	ORQ  BX, AX
+
+	VPCMPEQB X9, X0, X4
+	VPMOVMSKB X4, BX
+	SHLQ CL, BX
+	ORQ  BX, R8
+
+	ADDQ $16, R9
+	JMP  srb_tail_16_avx
+
+srb_sse_16_loop:
 	CMPQ R9, $64
 	JAE  srb_tail_done_avx
 	MOVQ DX, CX
@@ -398,7 +444,7 @@ srb_tail_16_avx:
 	ORQ  BX, R8
 
 	ADDQ $16, R9
-	JMP  srb_tail_16_avx
+	JMP  srb_sse_16_loop
 
 srb_tail_scalar_avx:
 	CMPQ R9, $64

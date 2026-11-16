@@ -36,6 +36,8 @@ sp_start_vec:
 	JNE  sp_avx2_init
 
 sp_sse_loop:
+	CMPB ·hasSSSE3(SB), $0
+	JE   sp_scalar
 	MOVOU ·runs_ws_lut<>(SB), X4
 	MOVOU (SI), X0
 	PSHUFB X0, X4

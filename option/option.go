@@ -42,6 +42,8 @@ type CompileOptions struct {
 	// EncOnlyOmitNull sets the encoder to only omit nil value (ex: nil pointer, nil container) instead of zero value,
 	// with `omitempty` tag.
 	EncOnlyOmitNull bool
+
+	inlineDepthExplicit bool
 }
 
 var (
@@ -92,7 +94,15 @@ func WithCompileMaxInlineDepth(depth int) CompileOption {
 			panic("depth must be > 0")
 		}
 		o.MaxInlineDepth = depth
+		o.inlineDepthExplicit = true
 	}
+}
+
+// HasExplicitMaxInlineDepth reports whether WithCompileMaxInlineDepth was
+// explicitly applied, distinguishing an explicit DefaultMaxInlineDepth from an
+// untouched default option set.
+func (o CompileOptions) HasExplicitMaxInlineDepth() bool {
+	return o.inlineDepthExplicit
 }
 
 // WithCompileEncOnlyOmitNull sets the encoder to only omit nil value instead of zero value with `omitempty` tag.

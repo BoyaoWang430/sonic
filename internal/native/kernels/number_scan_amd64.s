@@ -392,6 +392,8 @@ num_skip_block32:
 	JLT   num_skip_tail
 
 num_skip16_init:
+	CMPB ·hasSSSE3(SB), $0
+	JE   num_skip_tail
 	MOVOU ·num_delim_lut<>(SB), X7
 	MOVOU ·num_rbrack_vec<>(SB), X5
 	MOVOU ·num_rbrace_vec<>(SB), X6

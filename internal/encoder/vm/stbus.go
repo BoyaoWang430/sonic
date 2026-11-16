@@ -245,19 +245,28 @@ func encodePurePtrStructSliceRoot(b *[]byte, rv reflect.Value, specs []ir.Struct
 	return nil
 }
 
-func extractPurePtrSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
+// sliceArrayElemEnd locates the OP_slice_next instruction emitted by
+// Compiler.compileSliceArray: [0]=OP_slice_begin(done=n), [1:loop]=elem,
+// [loop]=OP_slice_next(exit=n-2), [loop+1:n-3]=elem, [n-3]=OP_goto(loop),
+// [n-2]=OP_drop, [n-1]=OP_byte(']').
+func sliceArrayElemEnd(prog *ir.Program) (int, bool) {
 	n := len(*prog)
-	if (n != 29 && n != 27) || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
-		return nil, false
+	if n < 7 || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
+		return 0, false
 	}
-	if (*prog)[n-2].Op() != ir.OP_drop || (*prog)[n-1].Op() != ir.OP_byte || (*prog)[n-1].Byte() != ']' {
-		return nil, false
+	if (*prog)[n-3].Op() != ir.OP_goto || (*prog)[n-2].Op() != ir.OP_drop || (*prog)[n-1].Op() != ir.OP_byte || (*prog)[n-1].Byte() != ']' {
+		return 0, false
 	}
-	elemEnd := 13
-	if n == 27 {
-		elemEnd = 12
+	elemEnd := (*prog)[n-3].Vi()
+	if elemEnd <= 1 || elemEnd >= n-3 || (*prog)[elemEnd].Op() != ir.OP_slice_next || (*prog)[elemEnd].Vi() != n-2 {
+		return 0, false
 	}
-	if (*prog)[elemEnd].Op() != ir.OP_slice_next {
+	return elemEnd, true
+}
+
+func extractPurePtrSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
+	elemEnd, ok := sliceArrayElemEnd(prog)
+	if !ok || elemEnd < 8 {
 		return nil, false
 	}
 	if (*prog)[1].Op() != ir.OP_is_nil || (*prog)[1].Vr() != nil ||
@@ -270,18 +279,8 @@ func extractPurePtrSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
 }
 
 func extractPureSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
-	n := len(*prog)
-	if (n != 17 && n != 15) || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
-		return nil, false
-	}
-	if (*prog)[n-2].Op() != ir.OP_drop || (*prog)[n-1].Op() != ir.OP_byte || (*prog)[n-1].Byte() != ']' {
-		return nil, false
-	}
-	elemEnd := 7
-	if n == 15 {
-		elemEnd = 6
-	}
-	if (*prog)[elemEnd].Op() != ir.OP_slice_next {
+	elemEnd, ok := sliceArrayElemEnd(prog)
+	if !ok {
 		return nil, false
 	}
 	return extractPureStructSpecs(prog, 1, elemEnd)

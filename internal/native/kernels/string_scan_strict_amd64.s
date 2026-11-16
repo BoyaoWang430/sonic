@@ -40,7 +40,7 @@ TEXT ·scanStringStrict(SB), NOSPLIT, $0-48
 
 ss_scan:
 	CMPQ DX, $32
-	JB   ss_scan_16
+	JB   ss_avx_scan_16
 
 	MOVQ $32, R9
 	VMOVDQU 0(SI), Y0
@@ -60,6 +60,20 @@ ss_scan:
 	CMPQ DX, $16
 	JAE  ss_scan
 	JMP  ss_tail
+
+ss_avx_scan_16:
+	MOVQ $16, R9
+	VMOVDQU 0(SI), X0
+	VPCMPEQB X8, X0, X2
+	VPCMPEQB X9, X0, X3
+	VPOR X3, X2, X2
+	VPMAXUB X10, X0, X3
+	VPCMPEQB X10, X3, X3
+	VPOR X2, X3, X3
+	VPMOVMSKB X3, AX
+	TESTL AX, AX
+	JZ   ss_advance
+	JMP  ss_event
 
 ss_init_16:
 	MOVOU ·ss_quote_vec<>(SB), X8
@@ -155,10 +169,15 @@ ss_advance:
 	ADDQ R9, SI
 	SUBQ R9, DX
 	JZ   ss_eof
-	CMPQ DX, $32
+	CMPQ size+8(FP), $32
 	JB   ss_advance_16
 	CMPB ·hasAVX2(SB), $0
-	JNE  ss_scan
+	JE   ss_advance_16
+	CMPQ DX, $32
+	JAE  ss_scan
+	CMPQ DX, $16
+	JAE  ss_avx_scan_16
+	JMP  ss_tail
 ss_advance_16:
 	CMPQ DX, $16
 	JAE  ss_scan_16
@@ -246,7 +265,7 @@ TEXT ·scanStringStrictBlock(SB), NOSPLIT, $0-64
 
 ssb_scan:
 	CMPQ DX, $32
-	JB   ssb_scan_16
+	JB   ssb_avx_scan_16
 
 	MOVQ $32, R9
 	VMOVDQU 0(SI), Y0
@@ -269,6 +288,21 @@ ssb_scan:
 
 ssb_pack_event32:
 	VPMOVMSKB Y2, R8
+	JMP  ssb_event
+
+ssb_avx_scan_16:
+	MOVQ $16, R9
+	VMOVDQU 0(SI), X0
+	VPCMPEQB X8, X0, X2
+	VPCMPEQB X9, X0, X3
+	VPOR X3, X2, X2
+	VPMAXUB X10, X0, X3
+	VPCMPEQB X10, X3, X3
+	VPOR X2, X3, X3
+	VPMOVMSKB X3, AX
+	TESTL AX, AX
+	JZ   ssb_advance
+	VPMOVMSKB X2, R8
 	JMP  ssb_event
 
 ssb_init_16:
@@ -366,10 +400,15 @@ ssb_advance:
 	ADDQ R9, SI
 	SUBQ R9, DX
 	JZ   ssb_eof
-	CMPQ DX, $32
+	CMPQ size+8(FP), $32
 	JB   ssb_advance_16
 	CMPB ·hasAVX2(SB), $0
-	JNE  ssb_scan
+	JE   ssb_advance_16
+	CMPQ DX, $32
+	JAE  ssb_scan
+	CMPQ DX, $16
+	JAE  ssb_avx_scan_16
+	JMP  ssb_tail
 ssb_advance_16:
 	CMPQ DX, $16
 	JAE  ssb_scan_16

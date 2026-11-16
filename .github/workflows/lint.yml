@@ -9,3 +9,47 @@ jobs:
       - uses: actions/checkout@v4
       - name: spell check
         uses: codespell-project/actions-codespell@v2
+        with:
+          ignore_words_file: .github/workflows/.ignore_words
+          skip: "./.git,./native,./testdata,./tools,./skills"
+
+  static-and-fallback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: Check gofmt on core and non-legacy packages
+        run: |
+          unformatted=$(find . -name '*.go' \
+            -not -path './tools/*' -not -path './skills/*' \
+            -not -path './testdata/*' -not -path './issue_test/*' \
+            -not -path './examples/*' -not -path './fuzz/*' \
+            -not -path './generic_test/*' -not -path './external_jsonlib_test/*' \
+            -exec gofmt -l {} +)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted Go files:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Check zero go:linkname
+        run: |
+          if grep -rn '//go:linkname' --include='*.go' --exclude-dir=tools --exclude-dir=skills .; then
+            echo "Unexpected //go:linkname directive found"
+            exit 1
+          fi
+      - name: Run go vet across native architectures
+        run: |
+          GOOS=linux GOARCH=amd64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GOOS=linux GOARCH=arm64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GORISCV64=rva22u64 GOOS=linux GOARCH=riscv64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GORISCV64=rva23u64 GOOS=linux GOARCH=riscv64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+      - name: Build fallback targets
+        run: |
+          GOOS=linux GOARCH=ppc64le go build ./...
+          GOOS=linux GOARCH=s390x go build ./...
+          GOOS=js GOARCH=wasm go build ./...
+          GORISCV64=rva20u64 GOOS=linux GOARCH=riscv64 go build ./...

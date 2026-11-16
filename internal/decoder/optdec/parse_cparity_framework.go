@@ -209,6 +209,12 @@ func parseRunsGrowing(p *Parser) ErrorCode {
 	err := cParityParseWithPadding(p)
 	stage := growGeometric
 	for classifyScanStop(err) == scanStopNodeCapExhausted {
+		if p.nbuf.depth > types.MAX_RECURSE && len(p.nodes) > types.MAX_RECURSE+2 {
+			if uint32(p.nbuf.depth) > p.nbuf.stat.max_depth {
+				p.nbuf.stat.max_depth = uint32(p.nbuf.depth)
+			}
+			return SONIC_STACK_OVERFLOW
+		}
 		if !p.growNodeTape(&stage) {
 			break
 		}

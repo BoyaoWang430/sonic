@@ -31,6 +31,8 @@ func TestFlatDuplicateContainerKeysMatchStd(t *testing.T) {
 		`{"s":["x","y"],"s":[null,"z"]}`,
 		`{"f":[1.5],"f":[]}`,
 		`{"i":[1,2],"i":null,"i":[null]}`,
+		`{"arr":[5,6],"arr":null,"arr":[null]}`,
+		`{"authors":[{"name":"a"}],"authors":null,"authors":[{"age":1}]}`,
 		`{"i":null,"i":[3]}`,
 	}
 	for _, in := range inputs {

@@ -24,18 +24,22 @@ import (
 var (
 	HasAVX2   bool
 	HasSSE    bool
+	HasSSSE3  bool
 	HasPOPCNT bool
 	HasCLMUL  bool
 )
 
 func init() {
-	HasAVX2, HasSSE, HasPOPCNT, HasCLMUL = detectCPU()
+	HasAVX2, HasSSE, HasSSSE3, HasPOPCNT, HasCLMUL = detectCPU()
 	switch v := os.Getenv("SONIC_MODE"); v {
 	case "", "auto":
 		break
 	case "noavx", "noavx2":
 		HasAVX2 = false
+	case "nossse3":
+		HasAVX2 = false
+		HasSSSE3 = false
 	default:
-		panic(fmt.Sprintf("invalid mode: '%s', should be one of 'auto', 'noavx', 'noavx2'", v))
+		panic(fmt.Sprintf("invalid mode: '%s', should be one of 'auto', 'noavx', 'noavx2', 'nossse3'", v))
 	}
 }

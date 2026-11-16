@@ -1,3 +1,5 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
 package optdec
 
 import (
@@ -71,6 +73,7 @@ func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj 
 	}
 	p.strictURC = (opts & (1 << _F_disable_urc)) != 0
 	p.keepUseNumber = (opts & (1 << _F_use_number)) != 0
+	p.strictRawNum = true
 
 	var ecode ErrorCode
 	if proj != nil {

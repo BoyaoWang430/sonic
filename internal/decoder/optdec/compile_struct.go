@@ -1,3 +1,5 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
 package optdec
 
 import (
@@ -135,7 +137,8 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 	if dec, ok := c.compiled[vt]; ok {
 		return dec
 	}
-	if c.depth > 1 && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth {
+	defaultDepth := !c.opts.HasExplicitMaxInlineDepth() && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth
+	if c.depth > 1 && defaultDepth {
 		if val := programCache.Get(vt); val != nil {
 			if sd, ok := val.(*structDecoder); ok {
 				c.compiled[vt] = sd
@@ -145,7 +148,7 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 	}
 
 	maxDepth := c.opts.MaxInlineDepth
-	if maxDepth == option.DefaultMaxInlineDepth {
+	if defaultDepth {
 		maxDepth = 16
 	}
 	if c.depth >= maxDepth+1 {

@@ -526,11 +526,16 @@ func (self *Compiler) compileString(p *ir.Program, vt reflect.Type) {
 	}
 }
 
-func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) effectiveMaxInlineDepth() int {
 	maxDepth := self.opts.MaxInlineDepth
-	if self.useVM && maxDepth == option.DefaultMaxInlineDepth {
-		maxDepth = 16
+	if self.useVM && !self.opts.HasExplicitMaxInlineDepth() && maxDepth == option.DefaultMaxInlineDepth {
+		return 16
 	}
+	return maxDepth
+}
+
+func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
+	maxDepth := self.effectiveMaxInlineDepth()
 	if sp >= maxDepth || p.PC() >= vars.MAX_ILBUF || (!self.useVM && sp > 0 && vt.NumField() >= vars.MAX_FIELDS) {
 		p.Vp(ir.OP_recurse, vt, self.pv)
 		if self.opts.RecursiveDepth > 0 {
@@ -569,10 +574,7 @@ func specNoCommaSkip(hasGuaranteedField bool) uint8 {
 }
 
 func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]ir.StructFieldSpec, bool) {
-	maxDepth := self.opts.MaxInlineDepth
-	if self.useVM && maxDepth == option.DefaultMaxInlineDepth {
-		maxDepth = 16
-	}
+	maxDepth := self.effectiveMaxInlineDepth()
 	if !self.useVM || depth >= maxDepth || self.tab[vt] || self.isCustomMarshaler(vt, true) {
 		return nil, false
 	}
@@ -845,10 +847,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 }
 
 func (self *Compiler) tryFlattenNestedStruct(fv *resolver.FieldMeta, baseOffset uintptr, sp int) (uintptr, bool) {
-	maxDepth := self.opts.MaxInlineDepth
-	if self.useVM && maxDepth == option.DefaultMaxInlineDepth {
-		maxDepth = 16
-	}
+	maxDepth := self.effectiveMaxInlineDepth()
 	if !self.useVM || sp+1 >= maxDepth || !fv.HasStructBegin || len(fv.KeyBlob) == 0 {
 		return 0, false
 	}

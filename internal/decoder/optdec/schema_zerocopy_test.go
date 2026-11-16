@@ -1841,3 +1841,44 @@ func BenchmarkSmallBookFlatDirect(b *testing.B) {
 		}
 	})
 }
+
+func TestFlatDirectStreamingOver1MiBBuffer(t *testing.T) {
+	type streamItem struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	line := `{"id":42,"name":"ndjson-record"}` + "\n"
+	reps := (flatMaxInputLen / len(line)) + 128
+	stream := strings.Repeat(line, reps)
+	if len(stream) <= flatMaxInputLen {
+		t.Fatalf("expected stream > %d bytes, got %d", flatMaxInputLen, len(stream))
+	}
+
+	var item streamItem
+	_, vp, _, _, flatSD, err := unpackAndCompileRoot(&item)
+	if err != nil || flatSD == nil {
+		t.Fatalf("expected flatSD for streamItem, err=%v", err)
+	}
+	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
+
+	nextPos, ok := tryDecodeFlatStruct(stream, 0, 0, vp, flatSD, false, false)
+	if !ok || nextPos != len(line)-1 {
+		t.Fatalf("tryDecodeFlatStruct at stream start: ok=%v nextPos=%d want=%d", ok, nextPos, len(line)-1)
+	}
+	if item.ID != 42 || item.Name != "ndjson-record" {
+		t.Fatalf("unexpected decoded item: %+v", item)
+	}
+
+	// Verify DecodeWithSession advances cleanly across multiple records in a >1MiB stream.
+	pos := 0
+	var sess *InputSession
+	for idx := 0; idx < 5; idx++ {
+		var got streamItem
+		if err := DecodeWithSession(&stream, &pos, 0, &got, &sess); err != nil {
+			t.Fatalf("DecodeWithSession #%d failed: %v", idx, err)
+		}
+		if got.ID != 42 || got.Name != "ndjson-record" {
+			t.Fatalf("DecodeWithSession #%d got %+v", idx, got)
+		}
+	}
+}

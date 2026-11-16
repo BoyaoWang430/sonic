@@ -116,7 +116,7 @@ sd_vec64_second:
 
 sd_scan32:
 	CMPQ CX, $32
-	JB   sd_scan16
+	JB   sd_avx_scan16
 
 	VMOVDQU 0(SI), Y0
 	VPCMPEQB Y5, Y0, Y2
@@ -143,7 +143,7 @@ sd_vec32_advance:
 sd_vec32_event:
 	BSFL AX, BX                   // BX = plain prefix length (0..31)
 	CMPQ BX, $16
-	JB   sd_vec16_prefix
+	JB   sd_avx_vec16_prefix
 	CMPQ SI, DI
 	JE   sd_vec32_event_advance16
 	VMOVDQU X0, 0(DI)
@@ -153,7 +153,55 @@ sd_vec32_event_advance16:
 	ADDQ $16, DI
 	SUBQ $16, CX
 	SUBQ $16, BX
-	JMP  sd_vec16_prefix
+	JMP  sd_avx_vec16_prefix
+
+sd_avx_scan16:
+	CMPQ CX, $16
+	JB   sd_scan_scalar
+
+	VMOVDQU (SI), X0
+	VPCMPEQB X5, X0, X2
+	TESTQ $4, R8
+	JZ    sd_avx_vec16_mask
+	VPCMPEQB X6, X0, X3; VPOR X3, X2, X2
+	TESTQ $8, R8
+	JZ    sd_avx_vec16_mask
+	VPMAXUB X7, X0, X3; VPCMPEQB X7, X3, X3; VPOR X3, X2, X2
+
+sd_avx_vec16_mask:
+	VPMOVMSKB X2, AX
+	TESTL AX, AX
+	JNZ   sd_avx_vec_event
+	CMPQ  SI, DI
+	JE    sd_avx_vec16_advance
+	VMOVDQU X0, (DI)
+sd_avx_vec16_advance:
+	ADDQ  $16, SI
+	ADDQ  $16, DI
+	SUBQ  $16, CX
+	JMP   sd_avx_scan16
+
+sd_avx_vec_event:
+	BSFL AX, BX                   // BX = plain prefix length (0..15)
+sd_avx_vec16_prefix:
+	TESTQ BX, BX
+	JZ   sd_special
+	CMPQ SI, DI
+	JNE  sd_avx_vec_prefix
+	ADDQ BX, SI
+	ADDQ BX, DI
+	SUBQ BX, CX
+	JMP  sd_special
+
+sd_avx_vec_prefix:
+	MOVQ DI, R12
+	VMOVQ X0, AX
+	TESTQ $8, BX
+	JZ   sd_vec_prefix4
+	MOVQ AX, (R12)
+	ADDQ $8, R12
+	VPEXTRQ $1, X0, AX
+	JMP  sd_vec_prefix4
 
 sd_scan16:
 	CMPQ CX, $16
@@ -729,10 +777,17 @@ sd_short_plain:
 	JMP  sd_word_classify
 
 sd_resume_scan:
-	CMPQ CX, $32
+	CMPQ 16(SP), $32
 	JB   sd_resume_16
 	CMPB ·hasAVX2(SB), $0
-	JNE  sd_scan
+	JE   sd_resume_16
+	CMPQ CX, $32
+	JAE  sd_scan
+	CMPQ CX, $16
+	JAE  sd_avx_scan16
+	CMPQ CX, $8
+	JAE  sd_scan_word
+	JMP  sd_short_plain
 sd_resume_16:
 	CMPQ CX, $16
 	JAE  sd_scan16

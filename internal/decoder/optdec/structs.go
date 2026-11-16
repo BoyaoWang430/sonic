@@ -1,3 +1,5 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
 package optdec
 
 import (
@@ -249,6 +251,7 @@ type structDecoder struct {
 	flatPtrMask       uint32
 	flatPlan          *flatStructPlan
 	flatKeyPrefixes   []flatKeyPrefix
+	_                 [64]byte
 	flatFailStreak    uint32
 	flatProbeTick     uint32
 }

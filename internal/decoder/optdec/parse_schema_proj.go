@@ -100,6 +100,13 @@ func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 	if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
 		return errCodeGiantStreamFallback
 	}
+	if plan.kind == projRaw {
+		oldOpts := p.options
+		p.options |= 1 << _F_use_number
+		code := resetAndRunFullParse(p, mutated)
+		p.options = oldOpts
+		return code
+	}
 	return resetAndRunFullParse(p, mutated)
 }
 
@@ -422,7 +429,7 @@ func (sc *schemaScanner) scanRaw(c byte, valStart int) bool {
 	// container skippers) are cleared for the duration of the raw scan.
 	noValidate, opts := sc.noValidateJSON, sc.opts
 	sc.noValidateJSON = false
-	sc.opts &^= 1 << _F_no_validate_json
+	sc.opts = (sc.opts &^ (1 << _F_no_validate_json)) | (1 << _F_use_number)
 	ok := sc.skipValidateValue(c)
 	sc.noValidateJSON, sc.opts = noValidate, opts
 	if !ok {
@@ -2359,34 +2366,48 @@ func skipStringBodyAt(jsonStr string, strPtr, tailPtr unsafe.Pointer, pos, end, 
 		}
 		return pos + relEnd, true
 	}
-	steps := 0
-	for {
+	bs, quote, control := cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
+	if cParityAtFirst(quote, bs|control) {
+		pos += bits.TrailingZeros32(quote) + 1
+		return pos, pos <= end
+	}
+	if opts&(1<<_F_validate_string) != 0 && cParityAtFirst(control, bs|quote) {
+		return pos, false
+	}
+	if !cParityAtFirst(bs, quote) {
+		pos += 32
 		if pos >= end {
 			return pos, false
 		}
-		// Avoid ABI0 slice/tail dispatch overhead on short/medium strings (<40B after opening quote);
-		// switch to SkipStringStrict once the first 32B chunk finishes without quote/escape/control.
-		if steps > 0 && end-pos >= 32 && opts&(1<<_F_validate_string) != 0 && opts&(1<<_F_disable_urc) == 0 {
+		// Switch to SkipStringStrict once the first 32B block is clean, avoiding
+		// ABI0 dispatch on short strings and keeping steps/jsonStr out of the loop.
+		if end-pos >= 32 && opts&(1<<_F_validate_string) != 0 && opts&(1<<_F_disable_urc) == 0 {
 			relEnd, err := kernels.SkipStringStrict(jsonStr[pos:end])
 			if err != 0 {
 				return pos, false
 			}
 			return pos + relEnd, true
 		}
-		steps++
-		bs, quote, control := cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
-		if cParityAtFirst(quote, bs|control) {
-			pos += bits.TrailingZeros32(quote) + 1
-			return pos, pos <= end
+		for {
+			if pos >= end {
+				return pos, false
+			}
+			bs, quote, control = cParityStringMasks32(schemaPtrAt64(strPtr, tailPtr, pos, safe64, tailStart), opts)
+			if cParityAtFirst(quote, bs|control) {
+				pos += bits.TrailingZeros32(quote) + 1
+				return pos, pos <= end
+			}
+			if opts&(1<<_F_validate_string) != 0 && cParityAtFirst(control, bs|quote) {
+				return pos, false
+			}
+			if cParityAtFirst(bs, quote) {
+				pos += bits.TrailingZeros32(bs)
+				break
+			}
+			pos += 32
 		}
-		if opts&(1<<_F_validate_string) != 0 && cParityAtFirst(control, bs|quote) {
-			return pos, false
-		}
-		if cParityAtFirst(bs, quote) {
-			pos += bits.TrailingZeros32(bs)
-			break
-		}
-		pos += 32
+	} else {
+		pos += bits.TrailingZeros32(bs)
 	}
 
 	for {

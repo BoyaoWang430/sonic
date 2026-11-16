@@ -25,7 +25,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/bytedance/sonic/internal/envs"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -211,10 +210,6 @@ func TestUnmarshalWithTrailingChars(t *testing.T) {
 }
 
 func TestUnmarshalJSONSuite(t *testing.T) {
-	if envs.UseOptDec {
-		t.Skip("this test still fails in OPTDEC") // FIXME: fix the optdec issues
-	}
-
 	gzFile, err := os.Open("testdata/JSONTestSuite/testdata.json.gz")
 	require.NoError(t, err)
 	defer gzFile.Close()

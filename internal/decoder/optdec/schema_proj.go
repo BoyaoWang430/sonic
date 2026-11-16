@@ -1,8 +1,11 @@
+//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+
 package optdec
 
 import (
 	"reflect"
 	"sync/atomic"
+	"unsafe"
 )
 
 type projKind uint8
@@ -35,8 +38,24 @@ type projPlan struct {
 	sd             *structDecoder
 	elem           *projPlan
 	fields         []*projPlan
+	_              [64]byte
 	denseStreak    uint32
 	probeTick      uint32
+}
+
+// backoffProbeStripes shards 1-in-256 backoff recovery ticks across 128
+// cache-line-isolated counters indexed by target pointer address, avoiding
+// multi-core LOCK XADD contention and false sharing on projPlan/structDecoder
+// while remaining deterministic within <=256 calls on a single target variable.
+var backoffProbeStripes [128]struct {
+	tick uint32
+	_    [60]byte
+}
+
+func hitBackoffProbe(seed uintptr, localTick *uint32) bool {
+	idx := (uint64(seed) * 0x9e3779b97f4a7c15) >> 57
+	v := atomic.AddUint32(&backoffProbeStripes[idx].tick, 1) + atomic.LoadUint32(localTick)
+	return (v & 255) == 0
 }
 
 func (p *projPlan) recordDense() {
@@ -259,17 +278,24 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 }
 
 func (p *projPlan) shouldUse(jsonLen int) bool {
+	return p.shouldUseSeeded(jsonLen, uintptr(unsafe.Pointer(p)))
+}
+
+func (p *projPlan) shouldUseSeeded(jsonLen int, seed uintptr) bool {
 	if p == nil || p.kind == projFull || p.kind == projScalar || p.kind == projBytes {
 		return false
 	}
+	if p.kind == projRaw {
+		return jsonLen > 0
+	}
 	if p.hasRawSubtree {
-		return jsonLen >= 64
+		return jsonLen > 0
 	}
 	if jsonLen < 256 {
 		return false
 	}
 	if atomic.LoadUint32(&p.denseStreak) >= 2 {
-		if (atomic.AddUint32(&p.probeTick, 1) & 255) != 0 {
+		if !hitBackoffProbe(seed, &p.probeTick) {
 			return false
 		}
 	}
