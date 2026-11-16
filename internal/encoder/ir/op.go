@@ -314,10 +314,12 @@ type StructFieldSpec struct {
 	_           [4]byte
 }
 
-// Keep StructFieldSpec strictly 24 bytes with a single pointer word for L1 & GC scan density.
+// Keep StructFieldSpec compact (24 bytes on 64-bit, 16 bytes on 32-bit) with a single pointer word for L1 & GC scan density.
+const expectedStructFieldSpecSize = 2*unsafe.Sizeof(uintptr(0)) + 8
+
 var (
-	_ [24 - unsafe.Sizeof(StructFieldSpec{})]byte
-	_ [unsafe.Sizeof(StructFieldSpec{}) - 24]byte
+	_ [expectedStructFieldSpecSize - unsafe.Sizeof(StructFieldSpec{})]byte
+	_ [unsafe.Sizeof(StructFieldSpec{}) - expectedStructFieldSpecSize]byte
 )
 
 type StructSliceSpec struct {

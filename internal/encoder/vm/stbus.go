@@ -89,14 +89,14 @@ func (p *rootEncPlan) tryAcquireDirectSingle() bool {
 	if p.inDirectUse.CompareAndSwap(0, 1) {
 		return true
 	}
-	p.concCooldown.Store(64)
+	p.concCooldown.Store(1024)
 	return false
 }
 
 func (p *rootEncPlan) decayConcCooldown(bufSeed uintptr) {
 	if cd := p.concCooldown.Load(); cd > 0 {
 		idx := (uint64(bufSeed) * 0x9e3779b97f4a7c15) >> 58
-		if (atomic.AddUint32(&encConcStripes[idx].tick, 1) & 255) == 0 {
+		if (atomic.AddUint32(&encConcStripes[idx].tick, 1) & 1023) == 0 {
 			p.concCooldown.CompareAndSwap(cd, cd-1)
 		}
 	}

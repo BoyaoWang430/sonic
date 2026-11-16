@@ -71,9 +71,8 @@ func SkipNumber(src string, pos int) (ret int) {
 	return i
 }
 
-// Hack: this is used for both checking space and cause friendly compile errors in 32-bit arch.
-const _Sonic_Not_Support_32Bit_Arch__Checking_32Bit_Arch_Here = (1 << ' ') | (1 << '\t') | (1 << '\r') | (1 << '\n')
+const spaceMask = (uint64(1) << ' ') | (uint64(1) << '\t') | (uint64(1) << '\r') | (uint64(1) << '\n')
 
 func IsSpace(c byte) bool {
-	return (int(1<<c) & _Sonic_Not_Support_32Bit_Arch__Checking_32Bit_Arch_Here) != 0
+	return (uint64(1)<<c)&spaceMask != 0
 }

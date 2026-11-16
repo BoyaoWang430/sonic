@@ -496,7 +496,6 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 	var nonASCII uint64
 
 	fields := sd.fields
-	nfields := len(fields)
 	keyPrefixes := sd.flatKeyPrefixes
 	expectedIdx := 0
 
@@ -519,63 +518,33 @@ func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Po
 			}
 		}
 
-		{
-			keyStart := pos
-			keyEnd, ok := flatScanSimpleString(strPtr, pos, end, validateStr, &nonASCII)
+		idx, pos, ok = flatScanGroupKeySlow(strPtr, pos, end, sd, &expectedIdx, caseSensitive, validateStr, &nonASCII)
+		if !ok {
+			return 0, false
+		}
+		if idx == -1 {
+			if disUnknown {
+				return 0, false
+			}
+			var vc byte
+			if pos < end {
+				vc = *(*byte)(unsafe.Add(strPtr, pos))
+				if vc > ' ' {
+					pos++
+				} else {
+					pos, vc, ok = flatSkipWS(strPtr, pos, end)
+					if !ok {
+						return 0, false
+					}
+				}
+			} else {
+				return 0, false
+			}
+			pos, ok = flatSkipValue(strPtr, vc, pos, end, opts, &nonASCII)
 			if !ok {
 				return 0, false
 			}
-			key := unsafe.String((*byte)(unsafe.Add(strPtr, keyStart)), keyEnd-keyStart)
-			pos = keyEnd + 1
-			if pos < end && *(*byte)(unsafe.Add(strPtr, pos)) == ':' {
-				pos++
-			} else {
-				var colon byte
-				pos, colon, ok = flatSkipWS(strPtr, pos, end)
-				if !ok || colon != ':' {
-					return 0, false
-				}
-			}
-
-			if uint(expectedIdx) < uint(nfields) && fields[expectedIdx].name == key {
-				idx = expectedIdx
-				expectedIdx++
-			} else if caseSensitive {
-				idx = sd.fieldMap.Get(key, true)
-				if idx != -1 {
-					expectedIdx = idx + 1
-				}
-			} else {
-				idx = sd.fieldMap.GetInsensitive(key)
-				if idx != -1 {
-					expectedIdx = idx + 1
-				}
-			}
-
-			if idx == -1 {
-				if disUnknown {
-					return 0, false
-				}
-				var vc byte
-				if pos < end {
-					vc = *(*byte)(unsafe.Add(strPtr, pos))
-					if vc > ' ' {
-						pos++
-					} else {
-						pos, vc, ok = flatSkipWS(strPtr, pos, end)
-						if !ok {
-							return 0, false
-						}
-					}
-				} else {
-					return 0, false
-				}
-				pos, ok = flatSkipValue(strPtr, vc, pos, end, opts, &nonASCII)
-				if !ok {
-					return 0, false
-				}
-				goto afterFieldValue
-			}
+			goto afterFieldValue
 		}
 
 	parseFieldValue:
@@ -797,7 +766,6 @@ func flatScanPlanGroup(
 	grp := &plan.groups[groupIdx]
 	sd := grp.sd
 	fields := sd.fields
-	nfields := len(fields)
 	keyPrefixes := grp.keyPrefixes
 	slotBase := int(grp.slotStart)
 	ptrMask := plan.ptrMask
@@ -826,63 +794,33 @@ func flatScanPlanGroup(
 			}
 		}
 
-		{
-			keyStart := pos
-			keyEnd, ok := flatScanSimpleString(strPtr, pos, end, validateStr, &st.nonASCII)
+		idx, pos, ok = flatScanGroupKeySlow(strPtr, pos, end, sd, &expectedIdx, caseSensitive, validateStr, &st.nonASCII)
+		if !ok {
+			return 0, false
+		}
+		if idx == -1 {
+			if disUnknown {
+				return 0, false
+			}
+			var vc byte
+			if pos < end {
+				vc = *(*byte)(unsafe.Add(strPtr, pos))
+				if vc > ' ' {
+					pos++
+				} else {
+					pos, vc, ok = flatSkipWS(strPtr, pos, end)
+					if !ok {
+						return 0, false
+					}
+				}
+			} else {
+				return 0, false
+			}
+			pos, ok = flatSkipValue(strPtr, vc, pos, end, st.opts, &st.nonASCII)
 			if !ok {
 				return 0, false
 			}
-			key := unsafe.String((*byte)(unsafe.Add(strPtr, keyStart)), keyEnd-keyStart)
-			pos = keyEnd + 1
-			if pos < end && *(*byte)(unsafe.Add(strPtr, pos)) == ':' {
-				pos++
-			} else {
-				var colon byte
-				pos, colon, ok = flatSkipWS(strPtr, pos, end)
-				if !ok || colon != ':' {
-					return 0, false
-				}
-			}
-
-			if uint(expectedIdx) < uint(nfields) && fields[expectedIdx].name == key {
-				idx = expectedIdx
-				expectedIdx++
-			} else if caseSensitive {
-				idx = sd.fieldMap.Get(key, true)
-				if idx != -1 {
-					expectedIdx = idx + 1
-				}
-			} else {
-				idx = sd.fieldMap.GetInsensitive(key)
-				if idx != -1 {
-					expectedIdx = idx + 1
-				}
-			}
-
-			if idx == -1 {
-				if disUnknown {
-					return 0, false
-				}
-				var vc byte
-				if pos < end {
-					vc = *(*byte)(unsafe.Add(strPtr, pos))
-					if vc > ' ' {
-						pos++
-					} else {
-						pos, vc, ok = flatSkipWS(strPtr, pos, end)
-						if !ok {
-							return 0, false
-						}
-					}
-				} else {
-					return 0, false
-				}
-				pos, ok = flatSkipValue(strPtr, vc, pos, end, st.opts, &st.nonASCII)
-				if !ok {
-					return 0, false
-				}
-				goto afterVal
-			}
+			goto afterVal
 		}
 
 	parseVal:

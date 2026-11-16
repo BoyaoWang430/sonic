@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"unicode/utf8"
 
+	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/internal/compat"
 	"github.com/bytedance/sonic/internal/native/types"
 )
@@ -92,7 +93,11 @@ func (self *Parser) decodeStringTail(start, _ int) (Node, types.ParsingError) {
 }
 
 func (self *Parser) skip() (int, types.ParsingError) {
-	e, s := skipValue(self.s, self.p)
+	return self.skipDepth(0)
+}
+
+func (self *Parser) skipDepth(depth int) (int, types.ParsingError) {
+	e, s := skipValueDepth(self.s, self.p, depth)
 	if e < 0 {
 		return self.p, types.ParsingError(-e)
 	}
@@ -189,6 +194,7 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 	for i, path := range plan {
 		p := Parser{s: view.src, p: view.base}
 		ok := true
+		depth := 0
 		for _, comp := range path {
 			p.p = p.lspace(p.p)
 			if p.p >= len(p.s) {
@@ -203,7 +209,7 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 				if c != '{' {
 					var e types.ParsingError
 					if validate {
-						_, e = p.skip()
+						_, e = p.skipDepth(depth)
 					} else {
 						_, e = p.skipFast()
 					}
@@ -212,6 +218,10 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 					}
 					ok = false
 					break
+				}
+				depth++
+				if depth >= types.MAX_RECURSE {
+					return p.p, types.ERR_RECURSE_EXCEED_MAX
 				}
 				if err := p.searchKey(rv.String()); err != 0 {
 					if err == types.ERR_NOT_FOUND {
@@ -224,7 +234,7 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 				if c != '[' {
 					var e types.ParsingError
 					if validate {
-						_, e = p.skip()
+						_, e = p.skipDepth(depth)
 					} else {
 						_, e = p.skipFast()
 					}
@@ -233,6 +243,10 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 					}
 					ok = false
 					break
+				}
+				depth++
+				if depth >= types.MAX_RECURSE {
+					return p.p, types.ERR_RECURSE_EXCEED_MAX
 				}
 				if err := p.searchIndex(int(rv.Int())); err != 0 {
 					if err == types.ERR_NOT_FOUND {
@@ -250,7 +264,7 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 		var start int
 		var e types.ParsingError
 		if validate {
-			start, e = p.skip()
+			start, e = p.skipDepth(depth)
 		} else {
 			start, e = p.skipFast()
 		}
@@ -267,12 +281,7 @@ func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, o
 }
 
 func encodePatchValue(buf *[]byte, val interface{}) error {
-	b, err := json.Marshal(val)
-	if err != nil {
-		return err
-	}
-	*buf = append(*buf, b...)
-	return nil
+	return encoder.EncodeInto(buf, val, encoder.NoEncoderNewline)
 }
 
 func validJSONBytes(b []byte) bool {

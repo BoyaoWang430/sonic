@@ -54,8 +54,8 @@ BenchmarkEncoder_Parallel_Generic_Sonic_Fast-16                 7660 ns/op      
 BenchmarkEncoder_Parallel_Generic_JsonIter-16                   5859 ns/op       2224.94 MB/s       18007 B/op        153 allocs/op
 BenchmarkEncoder_Parallel_Generic_GoJson-16                    11613 ns/op       1122.49 MB/s       26885 B/op         55 allocs/op
 BenchmarkEncoder_Parallel_Generic_StdLib-16                     6087 ns/op       2141.52 MB/s        9605 B/op          8 allocs/op
-BenchmarkEncoder_Parallel_Binding_Sonic_Next-16                 4281 ns/op       3044.74 MB/s        9508 B/op          1 allocs/op
-BenchmarkEncoder_Parallel_Binding_Sonic_Next_Fast-16            4237 ns/op       3076.55 MB/s        9510 B/op          1 allocs/op
+BenchmarkEncoder_Parallel_Binding_Sonic_Next-16                 2865 ns/op       4549.90 MB/s        9497 B/op          1 allocs/op
+BenchmarkEncoder_Parallel_Binding_Sonic_Next_Fast-16            2772 ns/op       4701.62 MB/s        9493 B/op          1 allocs/op
 BenchmarkEncoder_Parallel_Binding_Sonic-16                      2886 ns/op       4517.18 MB/s       11510 B/op          2 allocs/op
 BenchmarkEncoder_Parallel_Binding_Sonic_Fast-16                 2726 ns/op       4781.62 MB/s       11380 B/op          2 allocs/op
 BenchmarkEncoder_Parallel_Binding_JsonIter-16                   2579 ns/op       5055.05 MB/s        9490 B/op          2 allocs/op

@@ -623,6 +623,10 @@ func skipValueFast(src string, pos int) (ret int, start int) {
 }
 
 func skipValue(src string, pos int) (ret int, start int) {
+	return skipValueDepth(src, pos, 0)
+}
+
+func skipValueDepth(src string, pos int, depth int) (ret int, start int) {
 	if uint(pos) >= uint(len(src)) {
 		return -int(types.ERR_EOF), -1
 	}
@@ -638,9 +642,9 @@ func skipValue(src string, pos int) (ret int, start int) {
 	case '"':
 		ret, _ = skipString(src, pos)
 	case '{':
-		ret = skipObject(src, pos)
+		ret = skipObjectDepth(src, pos, depth)
 	case '[':
-		ret = skipArray(src, pos)
+		ret = skipArrayDepth(src, pos, depth)
 	case 't':
 		ret = decodeTrue(src, pos)
 	case 'f':
@@ -653,8 +657,16 @@ func skipValue(src string, pos int) (ret int, start int) {
 	return ret, pos
 }
 
-// skipObject starts at the opening { already checked by skipValue.
 func skipObject(src string, pos int) int {
+	return skipObjectDepth(src, pos, 0)
+}
+
+// skipObjectDepth starts at the opening { already checked by skipValueDepth.
+func skipObjectDepth(src string, pos int, depth int) int {
+	nextDepth := depth + 1
+	if nextDepth > types.MAX_RECURSE {
+		return -int(types.ERR_RECURSE_EXCEED_MAX)
+	}
 	pos++
 	if uint(pos) >= uint(len(src)) {
 		return -int(types.ERR_EOF)
@@ -684,7 +696,7 @@ func skipObject(src string, pos int) int {
 		}
 
 		pos++
-		pos, _ = skipValue(src, pos)
+		pos, _ = skipValueDepth(src, pos, nextDepth)
 		if pos < 0 {
 			return pos
 		}
@@ -709,8 +721,16 @@ func skipObject(src string, pos int) int {
 	}
 }
 
-// skipArray starts at the opening [ already checked by skipValue.
 func skipArray(src string, pos int) int {
+	return skipArrayDepth(src, pos, 0)
+}
+
+// skipArrayDepth starts at the opening [ already checked by skipValueDepth.
+func skipArrayDepth(src string, pos int, depth int) int {
+	nextDepth := depth + 1
+	if nextDepth > types.MAX_RECURSE {
+		return -int(types.ERR_RECURSE_EXCEED_MAX)
+	}
 	pos++
 	if uint(pos) >= uint(len(src)) {
 		return -int(types.ERR_EOF)
@@ -726,7 +746,7 @@ func skipArray(src string, pos int) int {
 	}
 
 	for {
-		pos, _ = skipValue(src, pos)
+		pos, _ = skipValueDepth(src, pos, nextDepth)
 		if pos < 0 {
 			return pos
 		}

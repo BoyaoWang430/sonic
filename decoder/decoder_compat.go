@@ -97,7 +97,7 @@ func (self *Decoder) CheckTrailings() error {
 	buf := self.s
 	/* skip all the trailing spaces */
 	if pos != len(buf) {
-		for pos < len(buf) && (types.SPACE_MASK&(1<<buf[pos])) != 0 {
+		for pos < len(buf) && (uint64(types.SPACE_MASK)&(uint64(1)<<buf[pos])) != 0 {
 			pos++
 		}
 	}

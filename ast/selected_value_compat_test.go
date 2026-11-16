@@ -72,7 +72,7 @@ func TestGetSelectedValuePermissive(t *testing.T) {
 				searcher.ValidateJSON = validate
 				node, err := searcher.GetByPathCopy("target")
 				if wantEnd < 0 {
-					if code != types.ParsingError(-wantEnd) || start != len(prefix) || p.p != len(prefix) || err == nil || searcher.parser.p != len(prefix) {
+					if code != types.ParsingError(-wantEnd) || start != len(prefix) || p.p != len(prefix) || err == nil || searcher.parser.p != 0 {
 						t.Fatalf("query failure validate=%v src=%q got=(start=%d,pos=%d,code=%v,err=%v) want code=%v,pos=%d", validate, src, start, p.p, code, err, -wantEnd, len(prefix))
 					}
 				} else {

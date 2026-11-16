@@ -158,6 +158,17 @@ func TestPatchByPathSemanticsAndConflicts(t *testing.T) {
 		t.Fatalf("expected ErrInvalidPatchRaw, got %v", err)
 	}
 
+	// Non-scalar replacement values must not HTML-escape '<', '>', '&' (matching scalar string patches).
+	htmlPatched, err := PatchByPath([]byte(`{"tags":[]}`),
+		PathPatch{Path: []interface{}{"tags"}, Value: []string{"a<b>&c"}},
+	)
+	if err != nil {
+		t.Fatalf("PatchByPath non-scalar HTML err: %v", err)
+	}
+	if string(htmlPatched) != `{"tags":["a<b>&c"]}` {
+		t.Fatalf("PatchByPath non-scalar HTML mismatch: got %s", htmlPatched)
+	}
+
 	// Unencodable replacement (NaN) must fail cleanly.
 	if _, err := PatchByPath(orig,
 		PathPatch{Path: []interface{}{"id"}, Value: math.NaN()},

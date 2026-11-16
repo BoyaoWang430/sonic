@@ -27,6 +27,14 @@ var (
 	HasSSSE3  bool
 	HasPOPCNT bool
 	HasCLMUL  bool
+
+	// UseAVX2 and UseSSSE3 record the resolved SIMD dispatch tier selected once
+	// at process init (after applying SONIC_MODE overrides). Direct //go:noescape
+	// assembly entrypoints read package-local mirrors of these booleans rather
+	// than indirect Go func pointers so pointer arguments remain non-escaping
+	// and avoid ABI0 closure trampolines.
+	UseAVX2  bool
+	UseSSSE3 bool
 )
 
 func init() {
@@ -42,4 +50,6 @@ func init() {
 	default:
 		panic(fmt.Sprintf("invalid mode: '%s', should be one of 'auto', 'noavx', 'noavx2', 'nossse3'", v))
 	}
+	UseAVX2 = HasAVX2 && HasPOPCNT && HasCLMUL
+	UseSSSE3 = HasSSSE3
 }
