@@ -1,54 +1,54 @@
-# Compatibility and Migration Notes
+# Compatibility, Ownership, and Contract Matrix
 
-This document summarizes the platform matrix, runtime architecture changes, and intentional API/behavioral updates introduced in the `go:linkname`-free native scanner & VM refactor.
+This document defines Sonic's platform matrix, four-layer compatibility contract, memory ownership rules, and backend capability boundaries. Architectural rationale is recorded in [`docs/adr/0001-architecture-convergence.md`](docs/adr/0001-architecture-convergence.md).
 
-## 1. Go Version and Architecture Matrix
+## 1. Platform, Go Version, and Backend Matrix
 
-| Platform | Go Versions | Backend |
+| Layer | Target | Go Versions | Execution Backend & Semantics |
+|---|---|---|---|
+| **Accelerated Native** | `amd64` (AVX2 / SSSE3 / SSE2), `arm64` (NEON) | Go 1.20 – 1.27 (certified) | Shared Sonic Go core (`OptDec` + `VM` + `ast`) + handwritten Plan9 SIMD assembly kernels (`sonic.APIKind == sonic.UseSonicJSON`) |
+| **Accelerated Native (RISC-V)** | `riscv64` (`GORISCV64=rva22u64` / `rva23u64`) | Go 1.26 – 1.27 (certified) | Shared Sonic Go core (`OptDec` + `VM` + `ast`) + RVA22 scalar / RVV 1.0 vector kernels (`sonic.APIKind == sonic.UseSonicJSON`) |
+| **Scalar Reference Core** | 64-bit targets with scalar kernel mode / uncertified Go toolchains (staged in S8) | Go 1.20+ | Shared Sonic Go core + pure-Go bounded scalar kernels (`sonic.APIKind == sonic.UseSonicJSON`; identical Sonic product semantics without SIMD assembly) |
+| **Explicit Stdlib Adapter** | `-tags=sonic_compat` or legacy fallback targets (`386`, `arm`, `ppc64le`, `s390x`, `wasm`, `rva20u64`) | Go 1.20+ | Standard library `encoding/json` adapter (`sonic.APIKind == sonic.UseStdJSON`) |
+
+- **Minimum Go version**: Go 1.20.
+- **Zero `//go:linkname` and zero runtime JIT**: Sonic uses no private Go runtime symbols, no `loader` module, no runtime machine-code generation, and no executable heap pages (`W^X`-safe).
+
+## 2. Four-Layer Compatibility Contract (`ConfigStd` vs `encoding/json`)
+
+Compatibility claims are evaluated across four explicit layers rather than a single binary claim:
+
+| Layer | Guarantee under `ConfigStd` (`UseSonicJSON`) | Intentional / Documented Differences |
 |---|---|---|
-| `amd64` (Linux / macOS / Windows) | Go 1.20 – 1.27 | Native `OptDec` + `VM` encoder + handwritten AVX2 / SSSE3 / SSE2 kernels |
-| `arm64` (Linux / macOS / Windows) | Go 1.20 – 1.27 | Native `OptDec` + `VM` encoder + handwritten NEON kernels |
-| `riscv64` (`GORISCV64=rva22u64` / `rva23u64`) | Go 1.26 – 1.27 | Native `OptDec` + `VM` encoder + handwritten RVA22 scalar / RVV kernels |
-| Other platforms (`ppc64le`, `s390x`, `wasm`, `386`, `riscv64 rva20u64`, Go >= 1.28, or `-tags=sonic_compat`) | Go 1.20+ | Automatic `encoding/json` compatibility fallback (`sonic.APIKind == sonic.UseStdJSON`) |
+| **1. Decoded/Encoded Value on Valid Input** | Aligned with `encoding/json` (classic v1 / Go 1.27 `DefaultOptionsV1`), including single-step `float32` rounding, `,string` `strconv` rules, duplicate-key overwrite/merge, and sorted/HTML-escaped marshal output. | Invalid UTF-8 bytes during `ConfigStd.Marshal` escape as `\ufffd` (`UTF8-ENC`); float map keys (`MAP-F64-DEC`) are accepted on unmarshal; named pointers to `UnmarshalJSON` follow classic v1 (`TMPTR-UNJ`). |
+| **2. Input Acceptance / Rejection Set** | Strict RFC 8259 syntax validation across all consumed values, skipped unknown fields, and raw subtrees (`json.RawMessage`, `NoCopyRawMessage`, `json.Unmarshaler`), including trailing non-whitespace rejection. | `OptionUseUnicodeErrors` (`_F_disable_urc`), `CaseSensitive`, and `NoValidateJSONSkip` are explicit Sonic opt-in extensions. |
+| **3. Error Types and Positions** | Syntax failures return `decoder.SyntaxError` (0-based `Pos`); type/range failures return `*decoder.MismatchTypeError`. `MarshalJSON` errors return the unwrapped user error (`MARSHAL-ERR-WRAP`). | `-tags=sonic_compat` returns `encoding/json` error types (`*json.SyntaxError` 1-based/stdlib `Offset`, `*json.UnmarshalTypeError`, `*json.MarshalerError`), except `decoder.Decoder.CheckTrailings()` which wraps into `decoder.SyntaxError`. |
+| **4. Post-Error Target State & Callbacks** | Syntax errors inside a single top-level value fail **before** mutating the destination or calling `UnmarshalJSON` (`SYN-PREMUT`). Numeric range/type mismatches leave the failed slot unmutated (`0`/`nil`, never `±Inf`) while recording the first error across remaining struct/slice elements. | Trailing garbage after a complete top-level value (`{"a":1} trailing`) is detected after the first value materializes. Custom `UnmarshalJSON` error continuation follows `OptDec` (`UNJ-PARTIAL` in `docs/sonic-go127-compatibility.md`). Malformed base64 clears target `[]byte` to empty (`BASE64-ERROR`). |
 
-- **Minimum Go version is Go 1.20** (Go 1.18 and 1.19 are no longer supported).
-- **Zero `//go:linkname` and zero JIT**: All `//go:linkname` bindings into private Go runtime symbols, the `loader` module, and dynamic machine-code JIT execution (`golang-asm`, `cpuid`, `base64x`) have been removed. Sonic no longer requires executable heap pages (`W^X` / hardened containers) or Go runtime internal struct layout coupling.
+## 3. Input/Output Ownership and Memory Retention Contract
 
-## 2. Public API Changes
+| Entry Point / Option | Ownership & Retention Guarantee | Caller Responsibility |
+|---|---|---|
+| `Unmarshal(buf []byte, &dst)` (default) | **Detached from `buf`**: decoded `string` fields and returned error sources do not alias `buf`. Mutating or reusing `buf` after `Unmarshal` returns is safe for built-in Go targets. | Do not mutate `buf` **concurrently during** the `Unmarshal` call. Custom `UnmarshalJSON` implementations that retain their `[]byte` argument must copy it themselves per `encoding/json` rules. |
+| `UnmarshalString(s string, &dst)` (`CopyString == false`, default in `ConfigDefault`) | **Zero-copy string borrowing**: unescaped JSON strings may slice directly into immutable `s`. | If `s` was constructed via an unsafe `[]byte -> string` cast by the caller, the caller must keep the backing bytes immutable for the lifetime of decoded strings; if retaining one small field from a multi-MiB `s` long-term, enable `CopyString: true`. |
+| `CopyString: true` / `decoder.OptionCopyString` | Decoded strings are detached from the input JSON and allocated from bounded per-decode string slabs (`<= 16 KiB` per slab; strings `> 1 KiB` allocate standalone). | Retaining one decoded string pins at most its bounded `<= 16 KiB` slab, never the entire multi-MiB input document. |
+| `sonic.NoCopyRawMessage` | Borrows raw JSON slice only when input is `string` (`UnmarshalString` / `Decoder`) and `CopyString` is disabled; copies when `CopyString` is enabled or via `Unmarshal([]byte)` copy mode. | Treat `NoCopyRawMessage` as read-only; use `json.RawMessage` when standalone ownership is required. |
+| `StreamDecoder` (`NewDecoder(io.Reader)`) | Forces `OptionCopyString` internally because the stream buffer compacts and slides across `Decode` calls; returned values and errors never dangle into recycled stream scratch. | Standard `io.Reader` stream usage; note `StreamDecoder` buffers and validates each complete top-level JSON value before materialization (not constant-memory for a single multi-GiB value). |
+| `Marshal` / `Encode` vs `EncodeInto` | `Marshal` / `Encode` return a freshly detached `[]byte` owned by the caller (internal scratch returns to bounded `sync.Pool` `<= LimitBufferSize`). `EncodeInto(&buf, ...)` appends directly to caller `buf` while preserving existing prefix bytes on both success and error. | None beyond normal slice ownership. |
 
-1. **Zero-copy custom marshaler interface renamed to `AppendSonicJSON`**:
-   - The opt-in fast-append encoder interface was renamed from `AppendJSON([]byte) ([]byte, error)` to `AppendSonicJSON([]byte) ([]byte, error)` so existing user types with an unrelated `AppendJSON` method still honor standard `json.Marshaler` (`MarshalJSON`).
-2. **`decoder.RegisterNoCopyRawMessageType` unexported**:
-   - `sonic.NoCopyRawMessage` remains registered automatically at package initialization; the internal registration hook is no longer part of the public `decoder` package API.
-3. **Explicit `option.WithCompileMaxInlineDepth` preserved**:
-   - Explicitly passing `option.WithCompileMaxInlineDepth(n)` (including `n == option.DefaultMaxInlineDepth`) is now respected instead of being overwritten by VM default inlining depth.
-4. **Expanded `ast` APIs**:
-   - Added `PathPlan`, `PatchByPath`, and streaming materialization helpers on `ast.Node` / `ast.Searcher`.
+## 4. Backend Extension Capability Matrix (`Native / Scalar Sonic` vs `sonic_compat`)
 
-## 3. Decoder and Encoder Behavioral Alignment
+| Capability | Native & Scalar Sonic (`APIKind == UseSonicJSON`) | Stdlib Adapter (`-tags=sonic_compat`, `APIKind == UseStdJSON`) | Portability Guidance |
+|---|---|---|---|
+| `ConfigStd` / `Marshal` / `Unmarshal` / `Stream` / `CheckTrailings` | Supported | Supported | Drop-in portable across all backends. |
+| `encoder.JSONAppender` (`AppendSonicJSON`) | Supported (priority over `MarshalJSON`) | Uses `MarshalJSON` (`encoding/json`) | Portable types implementing `AppendSonicJSON` **must also** implement semantically equivalent `MarshalJSON`. |
+| `CaseSensitive`, `UseInt64`, `UseUnicodeErrors`, `ValidateString`, `NoValidateJSONSkip` | Enforced | `UseNumber` and `DisallowUnknownFields` enforced; Sonic-only parser flags fall back to `encoding/json` behavior | Branch on `sonic.APIKind` when asserting Sonic-only extension flags in cross-backend tests. |
+| `ast` (`Get`, `Searcher`, `PathPlan`, `PatchByPath`) | Accelerated native / shared core | Functional pure-Go compatibility implementation | Portable across all backends. |
 
-1. **Unified `OptDec` + `VM` semantics across `amd64`, `arm64`, and `riscv64`**:
-   - `amd64` now uses the same `OptDec` decoder and `VM` encoder as `arm64` and `riscv64` instead of a separate JIT pipeline.
-2. **`float32` single-step rounding and boundary alignment with `encoding/json`**:
-   - Decoding into `float32` targets (scalars, struct fields, pointers, slices, maps, and `,string` fields) performs exact IEEE-754 single-step rounding matching `strconv.ParseFloat(s, 32)` (avoiding `decimal -> float64 -> float32` midpoint double rounding, accepting decimal literals that round to `±math.MaxFloat32`, and rejecting only literals that round to `±Inf`).
-3. **Raw JSON subtrees, huge-exponent numbers, and error boundaries**:
-   - Raw subtrees (`json.RawMessage`, `NoCopyRawMessage`, `json.Unmarshaler`) are always syntactically validated even when `NoValidateJSONSkip` is enabled (`NoValidateJSONSkip` relaxes only skipped unknown values).
-   - Valid RFC 8259 decimal numbers whose exponent exceeds `float64` range (for example `1.5e+9999`) are validated syntactically during scanning and deferred as raw number tokens: they succeed in `json.RawMessage`, `NoCopyRawMessage`, `json.Unmarshaler`, `json.Number` (including pre-populated pointers inside `interface{}` or slice backing elements), and skipped unknown struct fields across all decode paths (`flat`, `schema_proj`, `runs`, `giant`, and `io.Reader` `StreamDecoder`), while producing `MismatchTypeError` during materialization when targeting `float64`, `float32`, integers, or empty `interface{}` without `UseNumber`.
-   - Error-time mutation boundaries: malformed JSON syntax inside the current top-level JSON value is rejected before materializing fields or invoking `UnmarshalJSON` (trailing bytes after a complete top-level value are checked after that value finishes decoding); numeric range/type mismatches leave the failed slot unmutated (`0` rather than `±Inf`) while outer structs/slices record the first error and continue processing remaining elements (`UNJ-PARTIAL` behavior for custom `UnmarshalJSON` errors is unchanged; see `docs/sonic-go127-compatibility.md`).
-4. **`,string` struct tag numeric parsing (`STRING-GONUM` / `STRING-GONUM-PLUS`)**:
-   - Quoted numeric fields (`json:",string"`) delegate to Go's `strconv` numeric parsers (accepting zero-padded integers, Go hex/underscore floats, `+` prefixes, and `.5` leading decimal points while rejecting `NaN` and `±Inf`), matching `OptDec` and Go 1.27's `jsonv2`-backed `encoding/json` behavior rather than the legacy `amd64` JIT scanner.
-5. **Duplicate container keys**:
-   - Duplicate slice, array, map, and nested struct keys in JSON objects follow `encoding/json` overwrite/merge semantics across all decode paths (`flat`, `schema_proj`, `runs`, and `giant`).
-6. **`UseNumber` bare minus rejection**:
-   - Malformed bare `"-"` tokens (such as `{"":-}` or `[-]`) are rejected as invalid numbers even when `UseNumber` is enabled.
-7. **`ast.ErrNotExist` sentinel identity**:
-   - `ast` lookup and out-of-bounds index setters preserve direct sentinel equality (`err == ast.ErrNotExist` and `errors.Is(err, ast.ErrNotExist)`).
-8. **Resource bounds on untrusted inputs**:
-   - Pathological unclosed container inputs (`[[[[...`) stop at `MAX_RECURSE` (`4096`) without unbounded node-tape growth; encoder overflow stacks grow in `4 KiB` chunks; slice output preallocation is capped at `4 MiB`.
+## 5. Public API & Policy Summary
 
-## 4. Environment Variables
-
-- `SONIC_MODE`: Controls `amd64` SIMD ISA dispatch (`auto` by default):
-  - `SONIC_MODE=noavx` or `SONIC_MODE=noavx2`: Disables AVX2 (`HasAVX2=false`) while keeping SSE2/SSSE3 active.
-  - `SONIC_MODE=nossse3`: Disables both AVX2 and SSSE3 (`HasAVX2=false`, `HasSSSE3=false`) to exercise pure SSE2/scalar fallbacks.
-- `SONIC_USE_OPTDEC`, `SONIC_USE_FASTMAP`, `SONIC_ENCODER_USE_VM`: Retained only for script backward compatibility; `OptDec`, `FastMap`, and the `VM` encoder are always enabled on native platforms.
+1. **`AppendSonicJSON([]byte) ([]byte, error)`**: Opt-in buffer-appending marshaler interface (`encoder.JSONAppender`), named specifically to avoid colliding with unrelated third-party `AppendJSON` methods.
+2. **Explicit `option.WithCompileMaxInlineDepth` & `EncOnlyOmitNull`**: Inline depth is respected deterministically without hidden backend overwrites. Semantic compile flags (`EncOnlyOmitNull` / `OnlyOmitNull`) participate in encoder plan identity rather than letting `Pretouch` call ordering mutate global behavior for other callers.
+3. **Go Version Certification Policy**: Certified Go versions (`Go 1.20–1.27` on `amd64`/`arm64`, `Go 1.26–1.27` on `riscv64`) run full SIMD native acceleration. Uncertified newer Go versions are distinguished from certified releases: the zero-`linkname` Go + bounded-kernel architecture eliminates runtime-struct breakage, while scalar reference mode (`SONIC_MODE=scalar`) or `-tags=sonic_compat` provides deterministic fallback prior to formal release certification.
+4. **AST Duplicate Keys & Indexing**: `ast.Node` preserves appearance-order slots in `linkedPairs`, updates hash indices to resolve duplicate keys to the latest live entry, and maintains tombstones (`Unset`) without moving existing `Node` addresses.
+5. **Resource bounds**: Container recursion stops at `MAX_RECURSE` (`4096`); initial tape sizing, pooled buffers (`LimitBufferSize`), string slabs (`16 KiB`), interface slice chunks, overflow stacks (`4 KiB` chunks), and slice output preallocation (`4 MiB`) are all explicitly bounded.

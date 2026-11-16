@@ -46,7 +46,7 @@ C/Clang 是一种理想的编译工具（内部集成了 LLVM ）。但关键是
 
 基于以上思考，Sonic 当前的多架构原生架构在不依赖任何 `//go:linkname` 私有运行时符号或运行期 JIT 机器码生成的前提下，由四大核心机制协同加速：
 
-1. **Schema 预编译表驱动 VM 与直解快路径（`internal/encoder/vm`、`internal/decoder/optdec`）**：将 Go 类型一次性编译为紧凑、缓存友好的执行计划（编码侧的表驱动 `OP_struct_fields` 与稠密结构体描述符；解码侧的 `flat` 零中间层直解、稀疏字段 `schema_proj` 投影与 `Runs` 磁带物化），缓存在无锁读优化的并发 RCU 类型表中，兼顾插拔式易用性与低调用开销。
+1. **Schema 预编译表驱动 VM 与按需投影计划（`internal/encoder/vm`、`internal/decoder/optdec`）**：取代逐字段反射与早期探索阶段的运行期 JIT 机器码生成，将 Go 类型一次性编译为不可变、缓存友好的执行计划（编码侧的表驱动 `OP_struct_fields` 与稠密结构体描述符；解码侧的稀疏字段投影模式与 `Runs` 顺序物化），兼顾插拔式易用性与低维护成本。
 2. **大小负载自适应混合执行**：短字符串与标量字段直接在 Go 内联层通过 64 位字级 SWAR 快路径处理（零跨 ABI 调用开销），长字符串、结构化扫描、HTML 转义与 UTF-8 校验则自动切入向量化 SIMD 主循环。
 3. **手写跨架构 Plan9 原生 SIMD 汇编内核（`internal/native/kernels`、`internal/decoder/optdec`）**：核心计算热路径（空白跳过、字符串引号转义/反转义、HTML 转义、UTF-8 校验及 `Runs` 语法磁带扫描器）直接由手写 Go Plan9 汇编原生覆盖 **AMD64**（AVX2 / SSSE3 / SSE2）、**ARM64**（NEON）与 **RISC-V**（`rva22u64` 标量位操作与 `rva23u64` RVV 1.0 向量指令），彻底移除外部 C/Clang 转译链路与 Go 运行时内部耦合。
 4. **惰性加载与流式 AST 引擎（`ast`）**：`ast.Node`、`Searcher`、`PathPlan` 与 `PatchByPath` 将 SIMD 快速跳过、按需惰性物化、对象键索引保留与单遍流式子树扫描相结合，同时兼顾单键极速提取与多键查询/修改吞吐。

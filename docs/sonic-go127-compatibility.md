@@ -1,5 +1,7 @@
 # Sonic and Go 1.27 Compatibility
 
+> **Historical Architecture Note (Updated November 2026)**: Sections below discussing `JIT`, `loader/funcdata_go127.go`, `moduledata`, and `GoMapIterator` linkname shims record the **historical July 2026 pre-convergence baseline**. Current Sonic has removed `JIT`, `loader`, and all `//go:linkname` private runtime dependencies (see [`COMPATIBILITY.md`](../COMPATIBILITY.md) and [`docs/adr/0001-architecture-convergence.md`](adr/0001-architecture-convergence.md)). The JSON behavioral case catalog in [`compatibility/`](../compatibility/) remains active.
+
 Last updated: July 30, 2026
 Test module: [`compatibility/`](../compatibility/)
 

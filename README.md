@@ -22,7 +22,7 @@ see [go.dev](https://pkg.go.dev/github.com/bytedance/sonic)
 
 ## Benchmarks
 
-For **all sizes** of json and **all scenarios** of usage, **Sonic performs best**.
+Sonic delivers high-throughput multi-architecture JSON serialization, deserialization, and lazy AST manipulation with a maintainable, `//go:linkname`-free Go core and bounded SIMD assembly kernels (without runtime JIT or private Go runtime coupling).
 
 > Note: `Sonic_Next` / `sonic-next` denotes this refactored multi-arch branch (zero `//go:linkname`, zero JIT, native Go SIMD scanners + VM), while `Sonic` / `sonic` denotes upstream `main` (`4640e45`, built with `-ldflags=-checklinkname=0` on Go 1.27; on `riscv64`, upstream `main` falls back to `encoding/json` for Marshal/Unmarshal).
 
@@ -740,15 +740,17 @@ func init() {
 }
 ```
 
-### Copy string
+### String Ownership and `CopyString`
 
-When decoding **string values without any escaped characters**, sonic references them from the origin JSON buffer instead of mallocing a new buffer to copy. This helps a lot for CPU performance but may leave the whole JSON buffer in memory as long as the decoded objects are being used. In practice, we found the extra memory introduced by referring JSON buffer is usually 20% ~ 80% of decoded objects. Once an application holds these objects for a long time (for example, cache the decoded objects for reusing), its in-use memory on the server may go up. - `Config.CopyString`/`decoder.CopyString()`: We provide the option for `Decode()` / `Unmarshal()` users to choose not to reference the JSON buffer, which may cause a decline in CPU performance to some degree.
+Sonic separates `[]byte` safety from `string` zero-copy borrowing (see [`COMPATIBILITY.md`](COMPATIBILITY.md) for the full ownership matrix):
 
-- `GetFromStringNoCopy()`: For memory safety, `sonic.Get()` / `sonic.GetFromString()` now copies return JSON. If users want to get json more quickly and not care about memory usage, you can use `GetFromStringNoCopy()` to return a JSON directly referenced from source.
+- **`Unmarshal(buf []byte, &v)` (safe detached strings by default)**: Decoded `string` values and returned errors are copied out of `buf` (into bounded `<= 16 KiB` string slabs or standalone allocations), so mutating or reusing `buf` after `Unmarshal` returns will **not** corrupt decoded strings. Callers only need to avoid mutating `buf` concurrently while `Unmarshal` is running.
+- **`UnmarshalString(s string, &v)` (borrows immutable `string` unless `CopyString` is set)**: Under `ConfigDefault` (`CopyString: false`), unescaped JSON strings reference substrings of `s` without copying. If `s` is a large document and your application caches only a few small fields long-term, enable `Config{CopyString: true}.Froze()` (or `decoder.CopyString()`) so decoded strings are detached from `s`. If you constructed `s` via an unsafe `[]byte -> string` conversion, you remain responsible for keeping the underlying bytes immutable.
+- **`GetFromStringNoCopy()` and `NoCopyRawMessage`**: `sonic.Get()` / `sonic.GetFromString()` copy returned slices by default for memory safety; opt into `GetFromStringNoCopy()` or `sonic.NoCopyRawMessage` (with `UnmarshalString` and `CopyString: false`) only when you explicitly want zero-copy views tied to the source string's lifetime.
 
-### Pass string or []byte?
+### Pass `string` or `[]byte`?
 
-`Unmarshal([]byte, &v)` decodes directly from the input slice without an upfront whole-input copy (unless `CopyString` is enabled, in which case decoded strings are copied into standalone heap allocations; callers must not mutate the input `[]byte` concurrently during `Unmarshal` or while holding zero-copy decoded strings). If your input is already a `string`, `UnmarshalString()` and `GetFromString()` avoid slice-header conversion boilerplate; `MarshalString()` likewise returns the newly encoded JSON buffer as a `string` without an extra copy.
+Pass `[]byte` to `Unmarshal(buf, &v)` when reading from reusable I/O buffers—Sonic scans `buf` without an upfront whole-buffer copy while safely detaching decoded output strings. When your input is already an immutable `string`, `UnmarshalString()` and `GetFromString()` avoid copying unescaped output strings under `ConfigDefault`; `MarshalToString()` likewise returns the newly encoded JSON buffer as a `string` without an extra copy.
 
 ### Accelerate `encoding.TextMarshaler`
 

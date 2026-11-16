@@ -2,7 +2,14 @@
 
 ## Project Structure & Module Organization
 
-Sonic is a Go JSON library accelerated by handwritten Plan9 SIMD assembly kernels, multi-path adaptive Go scanners (`OptDec`), and a table-driven encoder `VM` with zero `//go:linkname` dependencies. Public APIs live at the repository root and in `ast/`, `decoder/`, `encoder/`, `option/`, `unquote/`, and `utf8/`. Implementation details live under `internal/`, including CPU feature detection (`internal/cpu`), multi-architecture SIMD kernels (`internal/native/`), runtime helpers (`internal/rt/`), caching, and encoder/decoder internals (`internal/encoder/`, `internal/decoder/`). The workspace in `go.work` includes the root module plus `compatibility/`, `external_jsonlib_test/`, `fuzz/`, `generic_test/`, and `issue_test/`. Test data and examples live in `testdata/`, `examples/`, `fuzz/corpus/`, and package-local `*_test.go` files.
+Sonic is a Go JSON library built around a shared, `//go:linkname`-free Go semantic core (`OptDec` decoder, table-driven `VM` encoder, and lazy/streaming `ast`) paired with bounded, multi-architecture Plan9 SIMD assembly kernels and pure-Go scalar reference primitives (see `docs/adr/0001-architecture-convergence.md`). Public APIs live at the repository root and in `ast/`, `decoder/`, `encoder/`, `option/`, `unquote/`, and `utf8/`. Implementation details live under `internal/`, including CPU feature detection (`internal/cpu`), bounded kernels (`internal/native/`), memory helpers (`internal/rt/`), type-plan caching (`internal/caching/`, `internal/optcaching/`), field metadata (`internal/resolver/`), and codec engines (`internal/encoder/`, `internal/decoder/`). The workspace in `go.work` includes the root module plus `compatibility/`, `external_jsonlib_test/`, `fuzz/`, `generic_test/`, and `issue_test/`.
+
+## Architectural Guardrails (Must Follow)
+
+- **Zero JIT and zero private Go runtime coupling**: Never introduce `//go:linkname`, private runtime struct mirrors (`g`, `hmap`, `moduledata`, custom slice headers), dynamic machine-code generation, or private uninitialized allocators.
+- **Single authoritative grammar & semantics**: Do not introduce parallel JSON parsers (such as standalone struct-only parsers) or duplicate JSON number/string/validation state machines. Assembly kernels must stay bounded `(ptr, len, cap)` primitives with narrow state structs and must never receive `reflect.Type`, user object graphs, pools, or full `Parser` structs.
+- **Deterministic, stateless routing & immutable plans**: Compiled type plans must remain read-only after publication. Never route requests using cross-request input history counters, target pointer address hashes, monotonic/wall clock cooldown windows, `runtime.GOOS` microarchitecture proxies, or VM opcode sequence reverse-matching.
+- **Semantics over microbenchmarks**: Performance optimizations may only reduce local cost; they must never alter accepted inputs, error boundaries, callback counts/order (including under `-race`), or buffer ownership/retention contracts documented in `COMPATIBILITY.md`.
 
 ## Build, Test, and Development Commands
 
