@@ -9,17 +9,14 @@ import "unsafe"
 //go:noescape
 func cParityNonspace64(src unsafe.Pointer) (mask uint64)
 
-// cParityStringMasks32 reads exactly 32 padded bytes and returns C's masks.
-// Only option bit 5 enables raw-control classification.
+// cParityStringMasks32 reads exactly 32 padded bytes and returns backslash,
+// quote, and (when option bit 5 is set) raw-control bitmasks.
 //
 //go:noescape
 func cParityStringMasks32(src unsafe.Pointer, opts uint64) (bs, quote, control uint32)
 
-//go:noescape
-func cParityMove32(dst, src unsafe.Pointer)
-
-// cParityNumberMasks16 supports the C raw-number scanner. Its valid mask is
-// decimal digits plus '.', 'e', 'E', '+', and '-'; high bytes are invalid.
+// cParityNumberMasks16 classifies 16 padded bytes for the raw-number scanner.
+// Its valid mask covers decimal digits plus '.', 'e', 'E', '+', and '-'.
 //
 //go:noescape
 func cParityNumberMasks16(src unsafe.Pointer) (decimal, exponent, sign, valid uint32)

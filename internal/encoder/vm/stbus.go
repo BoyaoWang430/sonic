@@ -823,6 +823,39 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 	return err
 }
 
+func encodeRootDirectSingle(val interface{}, rv reflect.Value, plan *rootEncPlan, hint int, fv uint64) ([]byte, error) {
+	defer plan.inDirectUse.Store(0)
+	capHint := hint + (hint >> 5) + 96
+	out := make([]byte, 0, capHint)
+	var stk *vars.Stack
+	if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {
+		stk = vars.NewStack()
+	}
+	err := encodeWithRootPlan(&out, rv, plan, stk, fv)
+	if err != nil {
+		if stk != nil {
+			vars.ResetStack(stk)
+			vars.FreeStack(stk)
+		}
+		runtime.KeepAlive(val)
+		return nil, err
+	}
+	if stk != nil {
+		vars.FreeStack(stk)
+	}
+	runtime.KeepAlive(val)
+
+	if len(out) > capHint || len(out)*2 < hint {
+		plan.sizeHint.Store(clampRootSizeHint(len(out)))
+	}
+	if cap(out) > len(out)*2 && cap(out) > 1024 {
+		shrunk := make([]byte, len(out))
+		copy(shrunk, out)
+		return shrunk, nil
+	}
+	return out, nil
+}
+
 // EncodeRoot encodes top-level struct and struct-slice values via per-P pooled scratch buffers
 // with adaptive steady-state capacity hints and unzeroed result cloning, avoiding cold heap
 // zeroing and sync.Pool Stack traffic on pure/dense struct schemas.
@@ -866,36 +899,8 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	if plan.allowSizeHint {
 		hint := int(plan.sizeHint.Load())
 		if hint >= minDirectRootHint && hint <= maxDirectRootHint && plan.tryAcquireDirectSingle() {
-			capHint := hint + (hint >> 5) + 96
-			out := make([]byte, 0, capHint)
-			var stk *vars.Stack
-			if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {
-				stk = vars.NewStack()
-			}
-			err = encodeWithRootPlan(&out, rv, plan, stk, fv)
-			plan.inDirectUse.Store(0)
-			if err != nil {
-				if stk != nil {
-					vars.ResetStack(stk)
-					vars.FreeStack(stk)
-				}
-				runtime.KeepAlive(val)
-				return nil, true, err
-			}
-			if stk != nil {
-				vars.FreeStack(stk)
-			}
-			runtime.KeepAlive(val)
-
-			if len(out) > capHint || len(out)*2 < hint {
-				plan.sizeHint.Store(clampRootSizeHint(len(out)))
-			}
-			if cap(out) > len(out)*2 && cap(out) > 1024 {
-				shrunk := make([]byte, len(out))
-				copy(shrunk, out)
-				return shrunk, true, nil
-			}
-			return out, true, nil
+			out, err := encodeRootDirectSingle(val, rv, plan, hint, fv)
+			return out, true, err
 		}
 	}
 

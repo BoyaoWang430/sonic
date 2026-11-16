@@ -8,10 +8,10 @@ import (
 	"unsafe"
 )
 
-// In native/parse_with_padding.c, parse_true/false/null consume the first
-// mismatching byte, then node_on_bool/null write only typ. check_error precedes
-// check_visit and value_inc: even a full tape must retain that partial node and
-// report the literal error without growing or counting it as a completed child.
+// In the padded Runs parser contract, literal scanners (true/false/null) consume
+// the first mismatching byte and write only typ on the partial node. Error checks
+// precede visit/child accounting: even a full tape retains that partial node and
+// reports the literal error without counting it as a completed child.
 func TestCParityRunsLiteralErrorBoundary(t *testing.T) {
 	for _, context := range []struct {
 		name, prefix, suffix string

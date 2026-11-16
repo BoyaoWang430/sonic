@@ -73,21 +73,43 @@ func TestEncoderMemoryCorruption(t *testing.T) {
 }
 
 func TestEncoderPanicString(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			println("recover")
-		} else {
-			t.Fatal("no panic")
-		}
-	}()
-	var s = struct {
+	type payload struct {
 		A string
 		S string
-	}{
-		A: "a",
 	}
-	s.S = unsafe.String((*byte)(nil), 1)
-	Encode(s, 0)
+	largeA := strings.Repeat("a", 600)
+	// Prime rootEncPlan sizeHint so the direct-single root path is also exercised under panic.
+	if _, err := Encode(payload{A: largeA, S: "ok"}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	reachedEncode := false
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("no panic")
+			}
+		}()
+		var s payload
+		s.A = largeA
+		// Construct a {Data: nil, Len: 1} string header directly so panic occurs inside Encode,
+		// not inside unsafe.String before Encode is called.
+		(*[2]uintptr)(unsafe.Pointer(&s.S))[1] = 1
+		reachedEncode = true
+		_, _ = Encode(s, 0)
+	}()
+	if !reachedEncode {
+		t.Fatal("panic occurred before Encode was called")
+	}
+
+	out, err := Encode(payload{A: largeA, S: "b"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got payload
+	if err := json.Unmarshal(out, &got); err != nil || got.A != largeA || got.S != "b" {
+		t.Fatalf("unexpected encode result after panic recovery: err=%v got=%+v", err, got)
+	}
 }
 
 type sample struct {

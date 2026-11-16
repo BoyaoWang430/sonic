@@ -121,22 +121,6 @@ TEXT ·cParityStringMasks32(SB), NOSPLIT, $0-28
 	MOVW X22, control+24(FP)
 	RET
 
-// func cParityMove32(dst, src unsafe.Pointer)
-// Load all 32 bytes before storing any, matching C's value semantics when the
-// output trails the input by fewer than 32 bytes.
-TEXT ·cParityMove32(SB), NOSPLIT, $0-16
-	MOV dst+0(FP), X10
-	MOV src+8(FP), X11
-	MOV 0(X11), X5
-	MOV 8(X11), X6
-	MOV 16(X11), X7
-	MOV 24(X11), X9
-	MOV X5, 0(X10)
-	MOV X6, 8(X10)
-	MOV X7, 16(X10)
-	MOV X9, 24(X10)
-	RET
-
 // One word of numeric classification merged at bit position shift into
 // X20 dots, X21 exponent letters, X22 signs and X23 valid bytes. A digit has
 // high nibble 3 and a low nibble whose sum with 6 stays below 16; the nibble

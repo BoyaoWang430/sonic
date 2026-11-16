@@ -19,11 +19,8 @@ package vars
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"strconv"
-	"strings"
-	"unsafe"
 )
 
 var ERR_too_deep = &json.UnsupportedValueError{
@@ -53,37 +50,4 @@ func Error_unsuppoted(typ reflect.Type) error {
 
 func Error_marshaler(ret []byte, pos int) error {
 	return fmt.Errorf("invalid Marshaler output json syntax at %d: %q", pos, ret)
-}
-
-const (
-	PanicNilPointerOfNonEmptyString int = 1 + iota
-)
-
-func GoPanic(code int, val unsafe.Pointer, buf string) {
-	sb := strings.Builder{}
-	switch code {
-	case PanicNilPointerOfNonEmptyString:
-		sb.WriteString(fmt.Sprintf("val: %p has nil pointer while its length is not zero!\nThis is a nil pointer exception (NPE) problem. There might be a data race issue. It is recommended to execute the tests related to the code with the `-race` compile flag to detect the problem.\n", val))
-	default:
-		sb.WriteString("encoder error: ")
-		sb.WriteString(strconv.Itoa(code))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("JSON: ")
-	if len(buf) > maxJSONLength {
-		sb.WriteString(buf[len(buf)-maxJSONLength:])
-	} else {
-		sb.WriteString(buf)
-	}
-	panic(sb.String())
-}
-
-var maxJSONLength = 1024
-
-func init() {
-	if v := os.Getenv("SONIC_PANIC_MAX_JSON_LENGTH"); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			maxJSONLength = i
-		}
-	}
 }

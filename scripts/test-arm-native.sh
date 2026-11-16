@@ -33,7 +33,6 @@ if (( !build_only )) && [[ $("$go_bin" env GOHOSTARCH) != arm64 ]]; then
 fi
 export GOARCH=arm64 GOFLAGS= GOTOOLCHAIN=local GOMAXPROCS=${GOMAXPROCS:-4}
 if (( build_only )); then export CGO_ENABLED=0; fi
-unset SONIC_USE_OPTDEC SONIC_USE_FASTMAP SONIC_ENCODER_USE_VM
 cd "$root"
 "$go_bin" version
 exec_flags=()
@@ -68,12 +67,8 @@ while IFS= read -r pkg; do
     packages+=("$pkg")
 done <<< "$package_lines"
 "$go_bin" test "${exec_flags[@]}" "${packages[@]}"
-SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
-    "$go_bin" test "${exec_flags[@]}" "${packages[@]}"
 # Older toolchains may not support newer workspace modules. In build-only mode,
 # callers can use GOWORK=off to validate the main module's minimum Go version.
 if [[ ${GOWORK:-} != off ]]; then
     "$go_bin" test "${exec_flags[@]}" ./issue_test ./generic_test
-    SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
-        "$go_bin" test "${exec_flags[@]}" ./issue_test ./generic_test
 fi

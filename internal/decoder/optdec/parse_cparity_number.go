@@ -19,9 +19,9 @@ import (
 	"unsafe"
 )
 
-// These experimental routines deliberately follow native/parse_with_padding.c.
-// The caller owns a readable 64-byte C sentinel after the logical document.
-// In particular, errors leave num unchanged and publish C's current cursor.
+// These routines preserve Sonic's padded-input number parser contract.
+// The caller owns a readable 64-byte sentinel after the logical document.
+// Errors leave num unchanged and publish the exact error cursor.
 type cParityNum struct {
 	typ uint64
 	val uint64
@@ -246,8 +246,8 @@ func cParityAtofFast(mant uint64, exp int32, neg, trunc bool) (float64, bool) {
 	return value, ok && upper == value
 }
 
-// The Eisel-Lemire implementation and power table are translated from
-// native/atof_eisel_lemire.h; the copied license is in the tables source.
+// Eisel-Lemire float64 conversion using the 128-bit power-of-10 mantissa table;
+// the third-party license header is preserved in parse_cparity_number_tables.go.
 func cParityEiselLemire(mant uint64, exp int32, neg bool) (float64, bool) {
 	if exp < -348 || exp > 347 {
 		return 0, false

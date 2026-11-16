@@ -417,7 +417,14 @@ See [bench.sh](https://github.com/bytedance/sonic/blob/main/scripts/bench.sh) fo
 
 ## How it works
 
-See [INTRODUCTION.md](./docs/INTRODUCTION.md).
+Sonic achieves high throughput across **AMD64**, **ARM64**, and **RISC-V (`rva22u64` / `rva23u64`)** without code generation, runtime JIT, or `//go:linkname` dependencies:
+
+- **Multi-architecture handwritten Plan9 SIMD kernels** (`internal/native/kernels`): vectorized whitespace skipping, string quoting/unquoting, HTML escaping, structural scanning, and UTF-8 validation using AVX2/SSSE3/SSE2 on x86-64, NEON on ARM64, and Zbb / RVV 1.0 on RISC-V.
+- **Adaptive multi-path decoder** (`internal/decoder/optdec`): automatically routes payloads across zero-allocation flat struct scanning, lazy sparse schema projection, SIMD `Runs` tape parsing, and streaming giant-payload (>4MiB) decoding.
+- **Table-driven VM encoder** (`internal/encoder/vm`): precompiles Go types into compact `OP_struct_fields` / dense field descriptors with inline SWAR short-string handling, radix-sorted map fast paths, and pooled per-P scratch buffers.
+- **Lazy & streaming AST** (`ast`): native Go + SIMD structural skipping, retained object key indexing, compiled `PathPlan` lookups, and `PatchByPath` mutations.
+
+See [INTRODUCTION.md](./docs/INTRODUCTION.md) and [COMPATIBILITY.md](./COMPATIBILITY.md) for architectural background and migration notes.
 
 ## Usage
 
@@ -712,7 +719,7 @@ Sonic **DOES NOT** ensure to support all environments, due to the difficulty of 
 
 ### Pretouch
 
-Since Sonic uses [golang-asm](https://github.com/twitchyliquid64/golang-asm) as a JIT assembler, which is NOT very suitable for runtime compiling, first-hit running of a huge schema may cause request-timeout or even process-OOM. For better stability, we advise **using `PretouchMany()` for huge-schema or lantency-sensitive applications** before `Marshal()/Unmarshal()`.
+Sonic compiles Go struct schemas into cached encoder VM programs and decoder field tables on first use. Although compilation is lightweight (no runtime assembler/JIT), latency-sensitive services with very large schemas can still warm type caches ahead of traffic using `Pretouch()` or `PretouchMany()`:
 
 ```go
 import (
@@ -725,12 +732,9 @@ func init() {
     var v1 HugeStruct1
     var v2 HugeStruct2
 
-    // For most large types (nesting depth <= option.DefaultMaxInlineDepth)
+    // Pre-build encoder and decoder type plans before serving requests.
     sonic.PretouchMany([]reflect.Type{reflect.TypeOf(v1), reflect.TypeOf(v2)},
-        // If the type is too deep nesting (nesting depth > option.DefaultMaxInlineDepth),
-        // you can set more recursive loops in Pretouch for fully sufficient JIT.
         option.WithCompileRecursiveDepth(loop),
-        // For a large struct, try to set a smaller depth to reduce compiling time.
         option.WithCompileMaxInlineDepth(depth),
     )
 }
@@ -744,7 +748,7 @@ When decoding **string values without any escaped characters**, sonic references
 
 ### Pass string or []byte?
 
-For alignment to `encoding/json`, we provide API to pass `[]byte` as an argument, but the string-to-bytes copy is conducted at the same time considering safety, which may lose performance when the origin JSON is huge. Therefore, you can use `UnmarshalString()` and `GetFromString()` to pass a string, as long as your origin data is a string or **nocopy-cast** is safe for your []byte. We also provide API `MarshalString()` for convenient **nocopy-cast** of encoded JSON []byte, which is safe since sonic's output bytes is always duplicated and unique.
+`Unmarshal([]byte, &v)` decodes directly from the input slice without an upfront whole-input copy (unless `CopyString` is enabled, in which case decoded strings are copied into standalone heap allocations; callers must not mutate the input `[]byte` concurrently during `Unmarshal` or while holding zero-copy decoded strings). If your input is already a `string`, `UnmarshalString()` and `GetFromString()` avoid slice-header conversion boilerplate; `MarshalString()` likewise returns the newly encoded JSON buffer as a `string` without an extra copy.
 
 ### Accelerate `encoding.TextMarshaler`
 
@@ -799,7 +803,7 @@ Sonic use memory pool in many places like `encoder.Encode`, `ast.Node.MarshalJSO
 
 ### Faster JSON Skip
 
-For security, sonic use [FSM](native/skip_one.c) algorithm to  validate JSON when decoding raw JSON or encoding `json.Marshaler`, which is much slower (1~10x) than [SIMD-searching-pair](native/skip_one_fast.c) algorithm. If user has many redundant JSON value and DO NOT NEED to strictly validate JSON correctness, you can enable below options:
+For security, Sonic validates skipped JSON values using a full structural state machine when decoding raw JSON or encoding `json.Marshaler`, which does more work than fast bracket-pair SIMD skipping. If your workload skips large redundant JSON subtrees and does **not** require strict syntax validation on skipped values, you can enable:
 
 - `Config.NoValidateSkipJSON`: for faster skipping JSON when decoding, such as unknown fields, json.Unmarshaler(json.RawMessage), mismatched values, and redundant array elements
 - `Config.NoValidateJSONMarshaler`: avoid validating JSON when encoding `json.Marshaler`

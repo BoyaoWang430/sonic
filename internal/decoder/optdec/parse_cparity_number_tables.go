@@ -47,8 +47,8 @@
 
 package optdec
 
-// Tables copied exactly from native/atof_eisel_lemire.h, scanning.h and
-// atof_native.h. The C power table declares one final zero-initialized row.
+// Exact power-of-10 float64, decimal shift, and 128-bit Eisel-Lemire mantissa
+// tables (including one final zero-initialized sentinel row).
 var cParityPowersOfTen = [...]float64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22}
 
 var cParityDecimalPowTable = [...]int32{1, 3, 6, 9, 13, 16, 19, 23, 26}

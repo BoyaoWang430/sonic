@@ -417,7 +417,14 @@ BenchmarkLoadNode_Parallel/Interface()_Sonic-16                35767 ns/op      
 
 ## 工作原理
 
-请参阅 [INTRODUCTION_ZH_CN.md](./docs/INTRODUCTION_ZH_CN.md).
+Sonic 在 **AMD64**、**ARM64** 与 **RISC-V（`rva22u64` / `rva23u64`）** 上均采用纯原生多架构加速设计，无需代码生成、不依赖运行期 JIT，且彻底清零 `//go:linkname`：
+
+- **手写跨架构 Plan9 SIMD 汇编内核**（`internal/native/kernels`）：在 x86-64（AVX2 / SSSE3 / SSE2）、ARM64（NEON）和 RISC-V（Zbb / RVV 1.0）上提供向量化的空白跳过、字符串转义与反转义、HTML 转义、结构扫描与 UTF-8 校验。
+- **自适应多路径解码引擎**（`internal/decoder/optdec`）：根据目标 Schema 与输入特征自动在零中间分配 `flat` 结构体直解、稀疏字段 `schema_proj` 惰性投影、SIMD `Runs` 磁带扫描及 `>4MiB` 流式大包路径间择优路由。
+- **表驱动 VM 编码引擎**（`internal/encoder/vm`）：将 Go 类型预编译为紧凑的 `OP_struct_fields` 与稠密字段描述符，结合短字符串内联 SWAR 快路径、Map 基数排序快路径与 per-P 缓冲池复用。
+- **惰性与流式 AST 引擎**（`ast`）：提供原生 Go + SIMD 快速跳过、对象键索引保留、预编译 `PathPlan` 查询与 `PatchByPath` 原地路径修改。
+
+架构演进与兼容性说明详见 [INTRODUCTION_ZH_CN.md](./docs/INTRODUCTION_ZH_CN.md) 与 [COMPATIBILITY.md](./COMPATIBILITY.md)。
 
 ## 使用方式
 
@@ -712,7 +719,7 @@ Sonic **不**确保支持所有环境，由于开发高性能代码的困难。�
 
 ### 预热
 
-由于 Sonic 使用 [golang-asm](https://github.com/twitchyliquid64/golang-asm) 作为 JIT 汇编器，这个库并不适用于运行时编译，第一次运行一个大型模式可能会导致请求超时甚至进程内存溢出。为了更好地稳定性，我们建议在运行大型模式或在延迟敏感的应用中，在使用 `Marshal()/Unmarshal()` 前运行 `PretouchMany()`。
+Sonic 会在首次遇到某个 Go 类型时将其 Schema 编译并缓存为编码 VM 指令与解码字段计划。虽然该编译过程非常轻量（已移除重型 `golang-asm` 运行时 JIT），在超大型嵌套结构体或对首请求尾延迟极其敏感的服务中，仍可在启动阶段调用 `Pretouch()` 或 `PretouchMany()` 提前完成计划构建：
 
 ```go
 import (
@@ -725,12 +732,9 @@ func init() {
     var v1 HugeStruct1
     var v2 HugeStruct2
 
-    // For most large types (nesting depth <= option.DefaultMaxInlineDepth)
+    // 在接收流量前预先构建并缓存类型的编解码计划。
     sonic.PretouchMany([]reflect.Type{reflect.TypeOf(v1), reflect.TypeOf(v2)},
-        // If the type is too deep nesting (nesting depth > option.DefaultMaxInlineDepth),
-        // you can set more recursive loops in Pretouch for fully sufficient JIT.
         option.WithCompileRecursiveDepth(loop),
-        // For a large struct, try to set a smaller depth to reduce compiling time.
         option.WithCompileMaxInlineDepth(depth),
     )
 }
@@ -742,7 +746,7 @@ func init() {
 
 ### 传递字符串还是字节数组？
 
-为了和 `encoding/json` 保持一致，我们提供了传递 `[]byte` 作为参数的 API ，但考虑到安全性，字符串到字节的复制是同时进行的，这在原始 JSON 非常大时可能会导致性能损失。因此，你可以使用 `UnmarshalString()` 和 `GetFromString()` 来传递字符串，只要你的原始数据是字符串，或**零拷贝类型转换**对于你的字节数组是安全的。我们也提供了 `MarshalString()` 的 API ，以便对编码的 JSON 字节数组进行**零拷贝类型转换**，因为 sonic 输出的字节始终是重复并且唯一的，所以这样是安全的。
+`Unmarshal([]byte, &v)` 现已支持直接对输入切片零拷贝扫描（无需整包前置拷贝；若开启 `CopyString`，解码出的字符串会独立分配拷贝；调用方需保证在 `Unmarshal` 执行期间以及持有零拷贝结果字符串期间不并发修改输入 `[]byte`）。当原始数据本身是 `string` 时，可直接调用 `UnmarshalString()` 与 `GetFromString()`；编码侧同样提供 `MarshalString()` 将新生成的 JSON 字节缓冲零拷贝返回为 `string`。
 
 ### 加速 `encoding.TextMarshaler`
 
@@ -797,7 +801,7 @@ Sonic在许多地方使用内存池，如`encoder.Encode`, `ast.Node.MarshalJSON
 
 ### 更快的 JSON Skip
 
-为了安全起见，在跳过原始JSON 时，sonic decoder 默认使用[FSM](native/skip_one.c)算法扫描来跳过同时校验 JSON。它相比[SIMD-searching-pair](native/skip_one_fast.c)算法跳过要慢得多(1~10倍)。如果用户有很多冗余的JSON值，并且不需要严格验证JSON的正确性，你可以启用以下选项:
+为了安全起见，在跳过原始 JSON（如 `json.RawMessage`）或校验 `json.Marshaler` 输出时，Sonic 默认使用完整语法状态机扫描并校验 JSON，开销高于仅做括号配对的快速 SIMD 跳过。如果输入包含大量冗余 JSON 子树且无需严格校验被跳过部分的语法，可按需启用以下选项：
 
 - `Config.NoValidateSkipJSON`: 用于在解码时更快地跳过JSON，例如未知字段，`json.RawMessage`，不匹配的值和冗余的数组元素等
 - `Config.NoValidateJSONMarshaler`: 编码JSON时避免验证JSON。封送拆收器

@@ -52,18 +52,6 @@ string_masks_store:
 	MOVW X16, control+24(FP)
 	RET
 
-// func cParityMove32(dst, src unsafe.Pointer)
-// Load all 32 bytes before storing any, matching C's value semantics when the
-// output trails the input by fewer than 32 bytes.
-TEXT ·cParityMove32(SB), NOSPLIT, $0-16
-	MOV dst+0(FP), X10
-	MOV src+8(FP), X11
-	MOV $32, X12
-	VSETVLI X12, E8, M2, TA, MA, X0
-	VLE8V (X11), V8
-	VSE8V V8, (X10)
-	RET
-
 // func cParityNumberMasks16(src unsafe.Pointer) (decimal, exponent, sign, valid uint32)
 // The C raw-number scanner classifies one sixteen-byte block. Valid bytes are
 // ASCII digits plus the decimal point, both exponent letters and both signs.

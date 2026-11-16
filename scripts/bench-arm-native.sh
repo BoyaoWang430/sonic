@@ -74,7 +74,7 @@ groups = {
     "encoder": ("./encoder", "^BenchmarkEncoder_(Generic|Binding)_Sonic$", 2, "^TestEncoder_(Generic|Binding)$", 2),
     "ast": ("./ast", "^Benchmark(GetOne|GetFull|ParseSeven|SetOne)_Sonic$", 4, "^TestSearcher_GetByPath$", 1),
 }
-fixture = "arm64_framework_bench_test.go"
+fixture = "native_framework_bench_test.go"
 if a.measure_only:
     metadata = json.loads((out / "metadata.json").read_text())
     if not metadata.get("prepared") or metadata.get("measurements_complete"):
@@ -165,7 +165,7 @@ if a.build_only:
 
 metadata.update(cpu=a.cpu, count=a.count, benchtime=a.benchtime,
     run_env={k: env.get(k, "<unset>") for k in ("GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GODEBUG",
-        "SONIC_NO_ASYNC_GC", "SONIC_USE_OPTDEC", "SONIC_USE_FASTMAP", "SONIC_ENCODER_USE_VM")})
+        "SONIC_NO_ASYNC_GC", "SONIC_MODE")})
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 for repeat in range(a.count):
     # Alternate old/new order between repeats, and run all processes serially.

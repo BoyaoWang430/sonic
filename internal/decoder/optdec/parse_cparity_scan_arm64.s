@@ -90,15 +90,6 @@ string_masks_done:
 	MOVW R4, control+24(FP)
 	RET
 
-// Snapshot both input vectors before writing either output vector. This matches
-// C's v256 value semantics even when output trails input by fewer than 32 bytes.
-TEXT ·cParityMove32(SB), NOSPLIT, $0-16
-	MOVD dst+0(FP), R0
-	MOVD src+8(FP), R1
-	FLDPQ (R1), (F0, F1)
-	FSTPQ (F0, F1), (R0)
-	RET
-
 // The raw-number C scanner asks for four masks from one sixteen-byte block.
 // Digit subtraction plus unsigned min rejects all bytes outside ASCII 0..9,
 // including high bytes (the same outcome as the C signed SSE comparisons).

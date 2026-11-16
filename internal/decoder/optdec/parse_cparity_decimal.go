@@ -21,8 +21,8 @@ import (
 	"github.com/bytedance/sonic/internal/rt"
 )
 
-// cParityDecimal follows native/atof_native.h's decimal buffer, binary shifts,
-// and rounding. It uses the caller's existing scratch capacity, as C does.
+// cParityDecimal implements high-precision decimal buffering, binary shifts,
+// and round-to-even fallback using the caller's scratch capacity.
 type cParityDecimal struct {
 	digits     unsafe.Pointer
 	capacity   int

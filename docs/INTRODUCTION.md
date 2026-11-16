@@ -36,16 +36,9 @@ C/Clang is an ideal compilation tool (internal integration LLVM). But the key is
 We also found that [gjson](https://github.com/tidwall/gjson) has a huge advantage in single-key lookup scenarios. This is because its lookup is implemented by a **lazy-load mechanism**, which subtly skips passing-by values and effectively reduces a lot of unnecessary parsing. Practical application has proved that making good use of this feature in product can indeed bring benefits. But when it comes to multi-key lookup, Gjson does worse event than std,  which is a side effect of its skipping mechanism - **searching for the same path leads to repeated parsing** (skip is also a lightweight parsing). Therefore, the accurate adaptation of practical scenarios is the key.
 
 ## Design
-Based on the above questions, our design is easy to implement:
+Based on the above questions, Sonic's current multi-architecture design combines four pillars without `//go:linkname` or runtime JIT dependencies:
 
-1. Aiming at the function-call overhead cost by the codec dynamic-assembly, **`JIT` tech is used to assemble opcodes (asm) corresponding to the schema at runtime**, which is finally cached into the off-heap memory in the form of Golang functions.
-2. For practical scenarios where big data and small data coexist, we **use pre-conditional judgment** (string size, floating precision, etc.) **to combine `SIMD` with scalar instructions** to achieve the best adaptation.
-3. As for insufficiency in compiling optimization of go language, we decided to **use `C/Clang` to write and compile core computational functions**, and **developed a set of [asm2asm](https://github.com/chenzhuoyu/asm2asm) tools to translate the fully optimized x86 assembly into plan9** and finally load it into Golang runtime.
-4. Giving the big speed gap between parsing and skipping, the **`lazy-load` mechanism** is certainly used in our AST parser, but in **a more adaptive and efficient way to reduce the overhead of multiple-key queries**.
-![design](./imgs/introduction-2.png)
-
-In detail,  we conducted some further optimization:
-1. Since the native-asm functions cannot be inlined in Golang, we found that its cost even exceeded the improvement brought by the optimization of the C compiler. So we reimplemented a set of lightweight function-calls in JIT:
-    - `Global-function-table + static offset` for calling instruction
-    - **Pass parameters using registers**
-2. `Sync.Map` was used to cache the codecs at first, but for our **quasi-static** (read far more than write), **fewer elements** (usually no more than a few dozen) scenarios, its performance is not optimal, so we reimplement a high-performance and concurrent-safe cache with `open-addressing-hash + RCU` tech.
+1. **Schema-compiled VM & direct fast paths (`internal/encoder/vm`, `internal/decoder/optdec`)**: Instead of per-field reflection or fragile runtime JIT code generation, Sonic compiles Go types once into compact, cache-friendly execution plans (table-driven `OP_struct_fields`, dense struct descriptors, flat direct struct decoders, and sparse schema-projection plans) cached in a concurrent RCU-style type map.
+2. **Adaptive small/large hybrid execution**: Short strings and scalar fields use inline word-level SWAR fast paths with zero ABI call overhead, while longer strings, structural tapes, HTML escaping, and UTF-8 validation transition seamlessly into vectorized SIMD loops.
+3. **Handwritten multi-architecture Plan9 SIMD kernels (`internal/native/kernels`, `internal/decoder/optdec`)**: Core hot kernels (`SkipSpace`, `Quote`, `HTMLEscape`, `Unquote`, `ValidUTF8`, and the `Runs` structural/number/string tape scanner) are implemented directly in native Go Plan9 assembly across **AMD64** (AVX2 / SSSE3 / SSE2), **ARM64** (NEON), and **RISC-V** (`rva22u64` scalar + Zbb and `rva23u64` RVV 1.0 vector kernels), eliminating C/Clang cross-translation toolchains and private Go runtime hooks.
+4. **Lazy & streaming AST engine (`ast`)**: `ast.Node`, `Searcher`, `PathPlan`, and `PatchByPath` combine SIMD structural skipping with on-demand materialization, retained object key indices, and single-pass raw subtree streaming so both single-key lookups and multi-key mutations stay fast across payload sizes.

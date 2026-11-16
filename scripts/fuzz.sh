@@ -63,18 +63,8 @@ init_corpus() {
 }
 
 run_fuzz() {
-    log_info "Running basic fuzz test..."
+    log_info "Running fuzz test..."
     export SONIC_FUZZ_MEM_LIMIT=2
-    export GOMAXPROCS=2
-    cd "${FUZZ_DIR}" && go test -fuzz="${TEST_NAME}" -v -fuzztime 15m 
-}
-
-run_optimized_fuzz() {
-    log_info "Running optimized fuzz test..."
-    export SONIC_FUZZ_MEM_LIMIT=2
-    export SONIC_USE_OPTDEC=1
-    export SONIC_USE_FASTMAP=1 
-    export SONIC_ENCODER_USE_VM=1
     export GOMAXPROCS=2
     cd "${FUZZ_DIR}" && go test -fuzz="${TEST_NAME}" -v -fuzztime 15m 
 }
@@ -82,7 +72,7 @@ run_optimized_fuzz() {
 cleanup() {
     log_info "Cleaning up..."
     rm -vrf "${CORPUS_DIR:?}"/
-    rm -vrf "{FUZZ_DIR}/testdata/"
+    rm -vrf "${FUZZ_DIR}/testdata/"
 }
 
 main() {
@@ -90,11 +80,8 @@ main() {
         fuzz)
             init_corpus
             ;;
-        run)
+        run|runopt)
             run_fuzz
-            ;;
-        runopt)
-            run_optimized_fuzz
             ;;
         clean)
             cleanup

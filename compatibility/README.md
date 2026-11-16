@@ -28,12 +28,7 @@ env -u GOROOT GOTOOLCHAIN=go1.27rc2 \
   go test ./compatibility/ -count=1
 
 # Go 1.27 legacy encoding/json backend
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOEXPERIMENT=nojsonv2 \
-  go test ./compatibility/ -count=1
-
-# Sonic optimized decoder, FastMap, and encoder VM
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 \
-  SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
+env -u GOROOT GOTOOLCHAIN=go1.27.0 GOEXPERIMENT=nojsonv2 \
   go test ./compatibility/ -count=1
 ```
 

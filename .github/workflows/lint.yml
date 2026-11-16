@@ -11,7 +11,7 @@ jobs:
         uses: codespell-project/actions-codespell@v2
         with:
           ignore_words_file: .github/workflows/.ignore_words
-          skip: "./.git,./native,./testdata,./tools,./skills"
+          skip: "./.git,./testdata,./skills"
 
   static-and-fallback:
     runs-on: ubuntu-latest
@@ -25,7 +25,7 @@ jobs:
       - name: Check gofmt on core and non-legacy packages
         run: |
           unformatted=$(find . -name '*.go' \
-            -not -path './tools/*' -not -path './skills/*' \
+            -not -path './skills/*' \
             -not -path './testdata/*' -not -path './issue_test/*' \
             -not -path './examples/*' -not -path './fuzz/*' \
             -not -path './generic_test/*' -not -path './external_jsonlib_test/*' \
@@ -37,7 +37,7 @@ jobs:
           fi
       - name: Check zero go:linkname
         run: |
-          if grep -rn '//go:linkname' --include='*.go' --exclude-dir=tools --exclude-dir=skills .; then
+          if grep -rn '//go:linkname' --include='*.go' --exclude-dir=skills .; then
             echo "Unexpected //go:linkname directive found"
             exit 1
           fi

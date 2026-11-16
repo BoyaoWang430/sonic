@@ -3,21 +3,16 @@
 package optdec
 
 import (
-	"math/bits"
 	"unsafe"
 )
 
-// This experimental scanner follows parse_with_padding.c, including its padded
-// reads and malformed-input ordering. Callers provide the same 64-byte suffix.
+// cParityNonspaceBlock caches a 64-byte non-whitespace bitmask for padded scanners.
+// Callers provide a readable 64-byte trailing sentinel after the logical input.
 type cParityNonspaceBlock struct {
 	// offPlus64 stores (blockOffset + 64) relative to rawBase so the zero
 	// value represents an uninitialized block at rawBase - 64.
 	offPlus64 uint64
 	bits      uint64
-}
-
-func cParityIsSpace(c byte) bool {
-	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
 }
 
 func cParityAtFirst(first, second uint32) bool {
@@ -27,24 +22,6 @@ func cParityAtFirst(first, second uint32) bool {
 var cParityEscaped = [256]byte{
 	'"': '"', '/': '/', '\\': '\\', 'b': '\b',
 	'f': '\f', 'n': '\n', 'r': '\r', 't': '\t',
-}
-
-// cParityHex16Valid and cParityHex16 preserve the C four-byte SWAR operations,
-// rather than introducing a byte-at-a-time decoder or different error cursor.
-func cParityHex16Valid(p unsafe.Pointer) bool {
-	v := *(*uint32)(p)
-	less := (v - 0x01010101*'0') &^ v & 0x80808080
-	more := ((v + 0x01010101*(127-'f')) | v) & 0x80808080
-	between9A := (0x01010101*(127+'A') - (v & 0x7f7f7f7f)) &^ v & ((v & 0x7f7f7f7f) + 0x01010101*(127-'9')) & 0x80808080
-	betweenFa := (0x01010101*(127+'a') - (v & 0x7f7f7f7f)) &^ v & ((v & 0x7f7f7f7f) + 0x01010101*(127-'F')) & 0x80808080
-	return less|more|between9A|betweenFa == 0
-}
-
-func cParityHex16(p unsafe.Pointer) uint32 {
-	a := bits.ReverseBytes32(*(*uint32)(p))
-	b := 9*((^a&0x10101010)>>4) + (a & 0x0f0f0f0f)
-	c := (b >> 4) | b
-	return ((c >> 8) & 0xff00) | (c & 0x00ff)
 }
 
 // Bit 4 distinguishes valid hex digits from the zero-initialized invalid
@@ -66,36 +43,10 @@ func cParityReadHex16(p unsafe.Pointer) (uint32, bool) {
 	return (a << 12) + (b << 8) + (c << 4) + d - 0x11110, a&b&c&d&0x10 != 0
 }
 
-func cParityUnicodeReplacement(dst *unsafe.Pointer) {
-	p := *dst
-	*(*byte)(p) = 0xef
-	*(*byte)(unsafe.Add(p, 1)) = 0xbf
-	*(*byte)(unsafe.Add(p, 2)) = 0xbd
-	*dst = unsafe.Add(p, 3)
-}
-
-// This follows handle_unicode, which always replaces unpaired surrogates and
-// does not consult F_DIS_URC. A bad second escape keeps the cursor at that escape.
-func cParityHandleUnicode(src, dst *unsafe.Pointer) int {
-	s, d, code := cParityDecodeUnicodeOpt(*src, *dst, false, false)
-	*src, *dst = s, d
-	return code
-}
-
-func cParityHandleUnicodeOpt(src, dst *unsafe.Pointer, strictURC bool) int {
-	s, d, code := cParityDecodeUnicodeOpt(*src, *dst, false, strictURC)
-	*src, *dst = s, d
-	return code
-}
-
-// DecodeUnicode keeps cursors local while converting one escape operation or
-// an entire adjacent run. Passing cursors by value avoids publishing pointers
+// cParityDecodeUnicodeOpt keeps cursors local while converting one escape operation
+// or an entire adjacent run. Passing cursors by value avoids publishing pointers
 // and their write-barrier checks for every code point. The caller owns the
 // padded input and publishes both cursors once, including on malformed input.
-func cParityDecodeUnicode(src, dst unsafe.Pointer, consecutive bool) (unsafe.Pointer, unsafe.Pointer, int) {
-	return cParityDecodeUnicodeOpt(src, dst, consecutive, false)
-}
-
 func cParityDecodeUnicodeOpt(src, dst unsafe.Pointer, consecutive bool, strictURC bool) (unsafe.Pointer, unsafe.Pointer, int) {
 	for {
 		r0, valid := cParityReadHex16(unsafe.Add(src, 2))

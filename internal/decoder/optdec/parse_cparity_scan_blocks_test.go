@@ -7,48 +7,32 @@ import (
 	"unsafe"
 )
 
-// cParitySkipSpace consumes and returns the first nonspace byte. Scalar probes
-// leave the cached block intact, matching skip_space_impl's cursor contract.
-func cParitySkipSpace(base unsafe.Pointer, block *cParityNonspaceBlock, cur *unsafe.Pointer) byte {
-	p := *cur
-	c := *(*byte)(p)
-	p = unsafe.Add(p, 1)
-	if !cParityIsSpace(c) {
-		*cur = p
-		return c
-	}
-	c = *(*byte)(p)
-	p = unsafe.Add(p, 1)
-	if !cParityIsSpace(c) {
-		*cur = p
-		return c
-	}
+// cParityHex16Valid and cParityHex16 preserve the reference four-byte SWAR
+// hex operations used by the unicode escape equivalence tests.
+func cParityHex16Valid(p unsafe.Pointer) bool {
+	v := *(*uint32)(p)
+	less := (v - 0x01010101*'0') &^ v & 0x80808080
+	more := ((v + 0x01010101*(127-'f')) | v) & 0x80808080
+	between9A := (0x01010101*(127+'A') - (v & 0x7f7f7f7f)) &^ v & ((v & 0x7f7f7f7f) + 0x01010101*(127-'9')) & 0x80808080
+	betweenFa := (0x01010101*(127+'a') - (v & 0x7f7f7f7f)) &^ v & ((v & 0x7f7f7f7f) + 0x01010101*(127-'F')) & 0x80808080
+	return less|more|between9A|betweenFa == 0
+}
 
-	if block.offPlus64 != 0 {
-		blockPtr := unsafe.Add(base, int(block.offPlus64)-64)
-		offset := uintptr(p) - uintptr(blockPtr)
-		if offset < 64 {
-			mask := block.bits & (^uint64(0) << offset)
-			if mask != 0 {
-				at := unsafe.Add(blockPtr, bits.TrailingZeros64(mask))
-				*cur = unsafe.Add(at, 1)
-				return *(*byte)(at)
-			}
-			p = unsafe.Add(blockPtr, 64)
-		}
-	}
-	for {
-		// The fixed-width SIMD leaf implements the C shuffle table:
-		// only space/tab/LF/CR match. NUL and all high bytes are nonspace.
-		mask := cParityNonspace64(p)
-		if mask != 0 {
-			block.bits, block.offPlus64 = mask, uint64(uintptr(p)-uintptr(base)+64)
-			at := unsafe.Add(p, bits.TrailingZeros64(mask))
-			*cur = unsafe.Add(at, 1)
-			return *(*byte)(at)
-		}
-		p = unsafe.Add(p, 64)
-	}
+func cParityHex16(p unsafe.Pointer) uint32 {
+	a := bits.ReverseBytes32(*(*uint32)(p))
+	b := 9*((^a&0x10101010)>>4) + (a & 0x0f0f0f0f)
+	c := (b >> 4) | b
+	return ((c >> 8) & 0xff00) | (c & 0x00ff)
+}
+
+func cParityHandleUnicodeOpt(src, dst *unsafe.Pointer, strictURC bool) int {
+	s, d, code := cParityDecodeUnicodeOpt(*src, *dst, false, strictURC)
+	*src, *dst = s, d
+	return code
+}
+
+func cParityDecodeUnicode(src, dst unsafe.Pointer, consecutive bool) (unsafe.Pointer, unsafe.Pointer, int) {
+	return cParityDecodeUnicodeOpt(src, dst, consecutive, false)
 }
 
 // cParityParseString starts after the opening quote. Success consumes its closing
@@ -271,9 +255,10 @@ findAndMove:
 			}
 		}
 	}
-	// Both vector loads precede either store, including overlapping in-place
-	// contraction. This explicit leaf replaces C's v256 load/store pair.
-	cParityMove32(dst, p)
+	// Snapshot all 32 bytes before writing dst so overlapping in-place contraction
+	// preserves exact value semantics.
+	block32 := *(*[32]byte)(p)
+	*(*[32]byte)(dst) = block32
 	p = unsafe.Add(p, 32)
 	dst = unsafe.Add(dst, 32)
 	goto findAndMove

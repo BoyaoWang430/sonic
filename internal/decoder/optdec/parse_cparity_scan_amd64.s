@@ -168,23 +168,6 @@ string_masks_sse_done:
 	MOVL R8, control+24(FP)
 	RET
 
-// func cParityMove32(dst, src unsafe.Pointer)
-TEXT ·cParityMove32(SB), NOSPLIT, $0-16
-	MOVQ dst+0(FP), DI
-	MOVQ src+8(FP), SI
-	CMPB ·hasAVX2(SB), $0
-	JE   move32_sse
-	VMOVDQU 0(SI), Y0
-	VMOVDQU Y0, 0(DI)
-	VZEROUPPER
-	RET
-move32_sse:
-	MOVOU 0(SI), X0
-	MOVOU 16(SI), X1
-	MOVOU X0, 0(DI)
-	MOVOU X1, 16(DI)
-	RET
-
 // func cParityNumberMasks16(src unsafe.Pointer) (decimal, exponent, sign, valid uint32)
 // < 32B (16B): uses only X0~X9, no VZEROUPPER needed.
 TEXT ·cParityNumberMasks16(SB), NOSPLIT, $0-24
