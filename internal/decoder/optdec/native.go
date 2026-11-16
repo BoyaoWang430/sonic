@@ -1,8 +1,9 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
 import (
+	"math/bits"
 	"strings"
 	"sync"
 	"unsafe"
@@ -131,20 +132,29 @@ type Parser struct {
 
 	// Per-decode typed pointer slabs for optional *Scalar / *string struct fields.
 	// Placed after ctx so assembly-referenced Parser offsets remain unchanged.
-	hasProjHints   bool
-	strictURC      bool
-	keepUseNumber  bool
-	strictRawNum   bool
-	scalarSlab     []uint64
-	scalarSlabOff  int
-	scalarSlabNext int
-	strPtrSlab     []string
-	strPtrSlabOff  int
-	strPtrSlabNext int
-	ptrStructSlabs [4]ptrStructSlabSlot
-	lazyPadded     bool
-	unescBuf       []byte
-	tailBuf        [320]byte
+	hasProjHints        bool
+	strictURC           bool
+	keepUseNumber       bool
+	strictRawNum        bool
+	scalarSlab          []uint64
+	scalarSlabOff       int
+	scalarSlabNext      int
+	strPtrSlab          []string
+	strPtrSlabOff       int
+	strPtrSlabNext      int
+	ptrStructSlabs      [4]ptrStructSlabSlot
+	lazyPadded          bool
+	deferFloatOverflow  bool
+	hasDeferredFloatInf bool
+	strAnyMask          uint32
+	strAnyCache         [32]strAnySlot
+	unescBuf            []byte
+	tailBuf             [320]byte
+}
+
+type strAnySlot struct {
+	s string
+	v any
 }
 
 type ptrStructSlabSlot struct {
@@ -215,6 +225,13 @@ const (
 	maxPtrSlabCap  = 64
 )
 
+func (p *Parser) clearStrAnyCache() {
+	for m := p.strAnyMask; m != 0; m &= m - 1 {
+		p.strAnyCache[bits.TrailingZeros32(m)] = strAnySlot{}
+	}
+	p.strAnyMask = 0
+}
+
 func (p *Parser) resetSlabs() {
 	p.strSlab = nil
 	p.strSlabOff = 0
@@ -227,6 +244,9 @@ func (p *Parser) resetSlabs() {
 	p.strPtrSlabNext = 0
 	if p.ptrStructSlabs[0].sd != nil {
 		p.ptrStructSlabs = [4]ptrStructSlabSlot{}
+	}
+	if p.strAnyMask != 0 {
+		p.clearStrAnyCache()
 	}
 }
 
@@ -361,7 +381,11 @@ func (p *Parser) allocStrSlab(n int) []byte {
 	nextCap := p.strSlabNext
 	if nextCap == 0 {
 		if p.options&(1<<_F_copy_string) == 0 {
-			nextCap = 128
+			if jsonLen > 1024 {
+				nextCap = 512
+			} else {
+				nextCap = 128
+			}
 		} else if p.isEface {
 			nextCap = jsonLen / 2
 			if nextCap < minStrSlabCap {
@@ -420,7 +444,10 @@ func (p *Parser) strRefEscaped(off int, val uint64) string {
 
 // strEscaped returns a heap-copied string of a decoded escaped JSON string token.
 func (p *Parser) strEscaped(off int, val uint64) string {
-	b := p.bytesEscaped(off, val)
+	return p.strEscapedBytes(p.bytesEscaped(off, val))
+}
+
+func (p *Parser) strEscapedBytes(b []byte) string {
 	n := len(b)
 	if n == 0 {
 		return ""
@@ -491,19 +518,31 @@ func looksLikeJSONLPrefix(s string) bool {
 }
 
 // maxPresizeNodesOne caps the initial up-front node reservation before any
-// scan runs, so pathological inputs (e.g. multi-MiB unclosed '[') fail at
-// MAX_RECURSE instead of pre-allocating millions of nodes up front.
+// scan runs, so pathological inputs (e.g. multi-MiB unclosed '[' or small
+// containers followed by huge trailing whitespace) never pre-allocate millions
+// of nodes up front before actual scanning/depth checks run.
 const maxPresizeNodesOne = 1 << 18
+
+func cappedInitialNodesCap(src string, start, divisor int) int {
+	if start < 0 || start >= len(src) {
+		return 1024
+	}
+	if start+1 < len(src) && ((src[start] == '{' && src[start+1] == '}') || (src[start] == '[' && src[start+1] == ']')) {
+		return 16
+	}
+	estNodes := (len(src)-start)/divisor + 1024
+	if estNodes > maxPresizeNodesOne {
+		return maxPresizeNodesOne
+	}
+	return estNodes
+}
 
 func (p *Parser) presizeNodesOne() {
 	start := firstContainerStart(p.Json)
 	if start < 0 {
 		return
 	}
-	estNodes := (len(p.Json)-start)/11 + 1024
-	if estNodes > maxPresizeNodesOne {
-		estNodes = maxPresizeNodesOne
-	}
+	estNodes := cappedInitialNodesCap(p.Json, start, 11)
 	if estNodes <= cap(p.nodes) {
 		return
 	}
@@ -545,6 +584,11 @@ func (p *Parser) reset() {
 	p.keepUseNumber = false
 	p.strictRawNum = false
 	p.lazyPadded = false
+	p.deferFloatOverflow = false
+	p.hasDeferredFloatInf = false
+	if p.strAnyMask != 0 {
+		p.clearStrAnyCache()
+	}
 	p.sessionPadded = nil
 	p.unesc = nil
 	if cap(p.unescBuf) > maxPooledUnescCap {

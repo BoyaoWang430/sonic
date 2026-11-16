@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -70,27 +70,28 @@ func FreeStreamSession(s *StreamSession) {
 // multi-chunk value are never rescanned on refill, and raw input coordinates
 // remain decoupled from unescaped string scratch (p.unesc).
 type StreamSession struct {
-	p            *Parser
-	ctx          Context
-	unesc        []byte
-	lastPtrType  reflect.Type
-	lastElemType reflect.Type
-	lastDec      decFunc
-	cur          int
-	nodeLen      int
-	tokStart     int
-	strScanOff   int
-	strFirstEsc  int
-	utf8Checked  int
-	phase        uint8
-	active       bool
-	utf8Invalid  bool
-	useNumber    bool
-	validateStr  bool
-	lastIsNamed  bool
-	lastIsEface  bool
-	unquoteFlags uint64
-	trav         streamTraversalBlock
+	p                  *Parser
+	ctx                Context
+	unesc              []byte
+	lastPtrType        reflect.Type
+	lastElemType       reflect.Type
+	lastDec            decFunc
+	cur                int
+	nodeLen            int
+	tokStart           int
+	strScanOff         int
+	strFirstEsc        int
+	utf8Checked        int
+	phase              uint8
+	active             bool
+	utf8Invalid        bool
+	useNumber          bool
+	deferFloatOverflow bool
+	validateStr        bool
+	lastIsNamed        bool
+	lastIsEface        bool
+	unquoteFlags       uint64
+	trav               streamTraversalBlock
 }
 
 type streamTraversalBlock struct {
@@ -167,6 +168,7 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 	p.resetSlabs()
 	p.Utf8Inv = false
 	p.isEface = isEface
+	p.hasDeferredFloatInf = false
 	s.cur = 0
 	s.nodeLen = 0
 	s.tokStart = 0
@@ -177,6 +179,7 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 	s.active = true
 	s.utf8Invalid = false
 	s.useNumber = (opts & (1 << _F_use_number)) != 0
+	s.deferFloatOverflow = !s.useNumber
 	s.validateStr = (opts & (1 << _F_validate_string)) != 0
 	if opts&(1<<_F_disable_urc) != 0 {
 		s.unquoteFlags = 0
@@ -687,6 +690,13 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 					}
 				}
 			finishNum:
+				if code == SONIC_FLOAT_INF && s.deferFloatOverflow {
+					p.hasDeferredFloatInf = true
+					s.cur = end
+					s.emitNode(KRawNumber|uint64(pos)<<PosBits, uint64(end-pos))
+					p.nbuf.stat.number++
+					goto afterValue
+				}
 				if code != SONIC_OK {
 					s.cur = end
 					return scanStopSyntaxError, code
@@ -968,7 +978,7 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 			} else {
 				sess.ctx.sliceArena = nil
 			}
-			merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
+			merr := decodeRootFromDom(vp, dec, &sess.ctx)
 			sess.ctx.Parser = nil
 			sess.ctx.sliceArena = nil
 			p.Json = ""
@@ -1155,7 +1165,7 @@ func (s *StreamSession) beginGiant(opts uint64, isEface bool, src string, single
 		pos := s.trav.skipSpace(src, 0)
 		s.cur = pos
 		if pos < len(src) && (src[pos] == '{' || src[pos] == '[') {
-			estNodes := (len(src)-pos)/12 + 1024
+			estNodes := cappedInitialNodesCap(src, pos, 12)
 			if estNodes > len(p.nodes) {
 				if uintptr(estNodes) > maxPooledNodesCap && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
 					p.backup = p.nodes
@@ -1523,6 +1533,11 @@ scanValue:
 			}
 		}
 	finishGiantNum:
+		if code == SONIC_FLOAT_INF && s.deferFloatOverflow {
+			p.hasDeferredFloatInf = true
+			num = cParityNum{typ: KRawNumber, val: uint64(end - pos)}
+			code = SONIC_OK
+		}
 		if code != SONIC_OK {
 			s.cur = end
 			s.nodeLen = nlen
@@ -1793,7 +1808,7 @@ func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Poin
 	} else {
 		sess.ctx.sliceArena = nil
 	}
-	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
+	merr := decodeRootFromDom(vp, dec, &sess.ctx)
 	sess.ctx.Parser = nil
 	sess.ctx.sliceArena = nil
 	err := fix_error(s, 0, merr)
@@ -1849,7 +1864,7 @@ func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Typ
 	} else {
 		sess.ctx.sliceArena = nil
 	}
-	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
+	merr := decodeRootFromDom(vp, dec, &sess.ctx)
 	sess.ctx.Parser = nil
 	sess.ctx.sliceArena = nil
 	err := fix_error(*s, origPos, merr)

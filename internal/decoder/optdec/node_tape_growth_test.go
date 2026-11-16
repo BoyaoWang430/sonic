@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -88,5 +88,55 @@ func TestParseUnclosedArrayRunBoundedGrowth(t *testing.T) {
 	}
 	if got := after.TotalAlloc - before.TotalAlloc; got > 48<<20 {
 		t.Fatalf("parsing a 16 MiB unclosed array run allocated %d MiB (want <= 48 MiB)", got>>20)
+	}
+}
+
+func TestPublicDecodeOneGiantPresizeBounded(t *testing.T) {
+	var before, after runtime.MemStats
+
+	// 1. Public DecodeOne (>4 MiB -> Giant route) on 16 MiB unclosed '[' must stop
+	// at MAX_RECURSE without allocating an uncapped ~21 MiB+ initial tape.
+	hugeUnclosed := strings.Repeat("[", 16<<20)
+	var dstAny any
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, _, err := DecodeOne(hugeUnclosed, 0, &dstAny)
+	runtime.ReadMemStats(&after)
+	if err == nil {
+		t.Fatal("expected syntax error for 16 MiB unclosed '[' via public DecodeOne")
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 12<<20 {
+		t.Fatalf("public DecodeOne on 16 MiB unclosed '[' allocated %d MiB (want <= 12 MiB)", got>>20)
+	}
+
+	// 2. Public DecodeOne on empty root object + 16 MiB trailing spaces must not
+	// allocate a proportional multi-MiB node tape.
+	emptyPlusSpaces := "{}" + strings.Repeat(" ", 16<<20)
+	var dstStruct struct {
+		A int `json:"a"`
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, _, err = DecodeOne(emptyPlusSpaces, 0, &dstStruct)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("unexpected error on '{}' + 16 MiB spaces: %v", err)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 512<<10 {
+		t.Fatalf("public DecodeOne on '{}' + 16 MiB spaces allocated %d KiB (want <= 512 KiB)", got>>10)
+	}
+
+	// 3. Public DecodeOne on small non-empty object + 16 MiB trailing spaces is
+	// capped by maxPresizeNodesOne (4 MiB).
+	smallPlusSpaces := `{"a":42}` + strings.Repeat(" ", 16<<20)
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, _, err = DecodeOne(smallPlusSpaces, 0, &dstStruct)
+	runtime.ReadMemStats(&after)
+	if err != nil || dstStruct.A != 42 {
+		t.Fatalf("unexpected result on small object + 16 MiB spaces: err=%v dst=%+v", err, dstStruct)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 8<<20 {
+		t.Fatalf("public DecodeOne on small object + 16 MiB spaces allocated %d MiB (want <= 8 MiB)", got>>20)
 	}
 }

@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -213,17 +213,13 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 
 	ctx, err := newContextOnParserWithPlan(p, f, etp, activeProj)
 	if err == errGiantStreamFallback {
-		gf := f
-		if activeProj != nil && activeProj.kind == projRaw {
-			gf |= 1 << _F_use_number
-		}
-		return decodeGiantOneCompiled(s, gf, etp, vp, dec)
+		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
 	if p.Utf8Inv {
 		s = p.Json
 	}
 	if err == nil {
-		err = dec.FromDom(vp, ctx.Root(), ctx)
+		err = decodeRootFromDom(vp, dec, ctx)
 	}
 	err = fix_error(s, 0, err)
 	endPos := p.Pos()
@@ -285,11 +281,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, activeProj)
 	if err == errGiantStreamFallback {
 		*i = origPos
-		gf := f
-		if activeProj != nil && activeProj.kind == projRaw {
-			gf |= 1 << _F_use_number
-		}
-		return decodeGiantWithSessionCompiled(s, i, gf, etp, vp, dec, sessPtr)
+		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
 	if p.Utf8Inv {
 		*s = parserCorrectedSource(p, *s, origPos)
@@ -300,7 +292,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		}
 		goto fix_error
 	}
-	err = dec.FromDom(vp, ctx.Root(), ctx)
+	err = decodeRootFromDom(vp, dec, ctx)
 
 fix_error:
 	err = fix_error(*s, origPos, err)

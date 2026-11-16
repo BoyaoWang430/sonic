@@ -1,4 +1,4 @@
-//go:build ((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
+//go:build sonic_compat || (((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64))
 
 /**
  * Copyright 2024 ByteDance Inc.

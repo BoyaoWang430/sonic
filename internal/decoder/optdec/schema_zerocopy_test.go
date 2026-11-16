@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -117,7 +117,6 @@ func TestFlatStructAdaptiveBackoff(t *testing.T) {
 		t.Fatalf("expected flatSD for backoffFlat, err=%v", err)
 	}
 	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
-	atomic.StoreUint32(&flatSD.flatProbeTick, 0)
 
 	escapedJSON := `{"id":7,"name":"hello\nworld","note":"line1\tline2"}`
 	for i := 0; i < int(flatBackoffThreshold)+2; i++ {
@@ -133,9 +132,9 @@ func TestFlatStructAdaptiveBackoff(t *testing.T) {
 		t.Fatalf("expected flatFailStreak >= %d after repeated escaped failures, got %d", flatBackoffThreshold, streak)
 	}
 
-	// Clean inputs should eventually hit the 1-in-256 probe and reset flatFailStreak to 0.
+	// Clean inputs should eventually hit the ~1-in-256 Weyl probe (worst-case gap <= 377) and reset flatFailStreak to 0.
 	cleanJSON := `{"id":99,"name":"plain-ascii","note":"ok"}`
-	for i := 0; i < 300; i++ {
+	for i := 0; i < 400; i++ {
 		if _, _, err := DecodeOne(cleanJSON, 0, &dst); err != nil {
 			t.Fatalf("clean iter %d failed: %v", i, err)
 		}
@@ -715,7 +714,6 @@ func BenchmarkDecoder_Binding_ShouldUseCalibration(b *testing.B) {
 			dst := newDst()
 			if _, _, _, proj, _, err := unpackAndCompileRoot(dst); err == nil && proj != nil {
 				atomic.StoreUint32(&proj.denseStreak, 0)
-				atomic.StoreUint32(&proj.probeTick, 0)
 			}
 			for w := 0; w < 4; w++ {
 				if reset != nil {

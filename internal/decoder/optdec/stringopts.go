@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -268,12 +268,12 @@ func (d *f32StringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	ret, err := ParseF64(s)
-	if err != nil || math.IsNaN(ret) || float32Overflows(ret) {
+	ret, ok := parseExactFloat32Slice(s)
+	if !ok {
 		return error_mismatch(node, ctx, float32Type)
 	}
 
-	*(*float32)(vp) = float32(ret)
+	*(*float32)(vp) = ret
 	return nil
 }
 

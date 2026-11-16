@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"sync"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/envs"
@@ -74,6 +75,8 @@ func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj 
 	p.strictURC = (opts & (1 << _F_disable_urc)) != 0
 	p.keepUseNumber = (opts & (1 << _F_use_number)) != 0
 	p.strictRawNum = true
+	p.deferFloatOverflow = !p.keepUseNumber
+	p.hasDeferredFloatInf = false
 
 	var ecode ErrorCode
 	if proj != nil {
@@ -415,6 +418,21 @@ func (val Node) AsF64(ctx *Context) (float64, bool) {
 	case KRawNumber:
 		f, err := val.Number(ctx).Float64()
 		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func (val Node) AsF32(ctx *Context) (float32, bool) {
+	switch val.Type() {
+	case KUint:
+		return float32(val.U64()), true
+	case KSint:
+		return sintToFloat32(val.I64()), true
+	case KReal:
+		return realBitsToFloat32(val.ptr.val, ctx.Parser.Json, val.Position())
+	case KRawNumber:
+		return parseExactFloat32Slice(val.Raw(ctx))
 	default:
 		return 0, false
 	}
@@ -1090,8 +1108,8 @@ func (node *Node) AsSliceF32(ctx *Context, vp unsafe.Pointer) error {
 	var gerr error
 	for i := 0; i < size; i++ {
 		val := NewNode(next)
-		ret, ok := val.AsF64(ctx)
-		if !ok || float32Overflows(ret) {
+		ret, ok := val.AsF32(ctx)
+		if !ok {
 			if val.IsNull() {
 				next = PtrOffset(val.ptr, 1)
 				continue
@@ -1101,7 +1119,7 @@ func (node *Node) AsSliceF32(ctx *Context, vp unsafe.Pointer) error {
 			}
 			next = val.Next()
 		} else {
-			s[i] = float32(ret)
+			s[i] = ret
 			next = PtrOffset(val.ptr, 1)
 		}
 	}
@@ -1201,8 +1219,8 @@ func (val *Node) AsSliceBytesInto(ctx *Context, vp unsafe.Pointer, sliceType, el
 }
 
 const (
-	smallUintAnyLimit = 4096
-	smallNegIntLimit  = 128
+	smallUintAnyLimit = 1024
+	smallNegIntLimit  = 64
 )
 
 var (
@@ -1210,14 +1228,15 @@ var (
 	emptyStringAny      any = ""
 	smallFloat64Any     [smallUintAnyLimit]any
 	smallNegFloat64Any  [smallNegIntLimit + 1]any
-	smallInt64Any       [smallUintAnyLimit]any
 	smallASCIIStringAny [128]any
+
+	smallInt64Once sync.Once
+	smallInt64Any  *[smallUintAnyLimit]any
 )
 
 func init() {
 	for i := 0; i < smallUintAnyLimit; i++ {
 		smallFloat64Any[i] = float64(i)
-		smallInt64Any[i] = int64(i)
 	}
 	smallNegFloat64Any[0] = math.Copysign(0, -1)
 	for i := 1; i <= smallNegIntLimit; i++ {
@@ -1250,22 +1269,84 @@ func sintToFloat64Any(v int64) any {
 
 func uintToInt64Any(v uint64) any {
 	if v < smallUintAnyLimit {
+		smallInt64Once.Do(func() {
+			var tbl [smallUintAnyLimit]any
+			for i := 0; i < smallUintAnyLimit; i++ {
+				tbl[i] = int64(i)
+			}
+			smallInt64Any = &tbl
+		})
 		return smallInt64Any[v]
 	}
 	return int64(v)
 }
 
-func strCommonAny(p *Parser, off, length int, copyStr bool) any {
+func strAnySlotIdx(s string) uint32 {
+	n := len(s)
+	return ((uint32(n) * 2654435761) ^
+		(uint32(s[0]) * 2246822519) ^
+		(uint32(s[n-1]) * 3266489917) ^
+		(uint32(s[n>>1]) * 668265263)) >> 27
+}
+
+func strCommonAnyRaw(p *Parser, jsonStr string, off, length int, copyStr bool) any {
 	if length == 0 {
 		return emptyStringAny
 	}
-	if copyStr && length == 1 {
-		b := p.Json[off]
+	if !copyStr {
+		return jsonStr[off : off+length]
+	}
+	if length == 1 {
+		b := jsonStr[off]
 		if b < 0x80 {
 			return smallASCIIStringAny[b]
 		}
 	}
-	return p.strCommon(off, length, copyStr)
+	raw := jsonStr[off : off+length]
+	if length <= 128 {
+		h := strAnySlotIdx(raw)
+		slot := &p.strAnyCache[h]
+		if len(slot.s) == length && slot.s == raw {
+			return slot.v
+		}
+		out := p.copyArenaString(raw)
+		boxed := any(out)
+		slot.s = out
+		slot.v = boxed
+		p.strAnyMask |= uint32(1) << h
+		return boxed
+	}
+	return p.copyArenaString(raw)
+}
+
+func strCommonAny(p *Parser, off, length int, copyStr bool) any {
+	return strCommonAnyRaw(p, p.Json, off, length, copyStr)
+}
+
+func strEscapedAny(p *Parser, off int, val uint64) any {
+	b := p.bytesEscaped(off, val)
+	n := len(b)
+	if n == 0 {
+		return emptyStringAny
+	}
+	if n == 1 && b[0] < 0x80 {
+		return smallASCIIStringAny[b[0]]
+	}
+	if n <= 256 {
+		tmp := rt.Mem2Str(b)
+		h := strAnySlotIdx(tmp)
+		slot := &p.strAnyCache[h]
+		if len(slot.s) == n && slot.s == tmp {
+			return slot.v
+		}
+		copied := p.strEscapedBytes(b)
+		boxed := any(copied)
+		slot.s = copied
+		slot.v = boxed
+		p.strAnyMask |= uint32(1) << h
+		return boxed
+	}
+	return p.strEscapedBytes(b)
 }
 
 // AsEface will always ok, because we have parse in native.
@@ -1281,17 +1362,198 @@ func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
 	opts := p.options
 	copyStr := opts&(1<<_F_copy_string) != 0
 	numSpecial := opts&((1<<_F_use_number)|(1<<_F_use_int64)) != 0
+	if !copyStr && !numSpecial {
+		val, next, err := decodeEfaceAtFastNoCopy(node.ptr, p, ctx, p.Json)
+		node.ptr = next
+		return val, err
+	}
 	val, next, err := decodeEfaceAt(node.ptr, p, ctx, opts, copyStr, numSpecial)
 	node.ptr = next
 	return val, err
+}
+
+func decodeEfaceAtFastNoCopy(cur *node, p *Parser, ctx *Context, jsonStr string) (interface{}, *node, error) {
+	switch uint8(cur.typ) {
+	case KObject:
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return make(map[string]interface{}), next, nil
+		}
+		m := make(map[string]interface{}, size)
+		cur = next
+		var gerr, err error
+		for i := 0; i < size; i++ {
+			knode := cur
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				off := int(knode.typ >> PosBits)
+				key = jsonStr[off : off+int(knode.val)]
+			} else {
+				key = p.strEscaped(int(knode.typ>>PosBits), knode.val)
+			}
+			vptr := PtrOffset(cur, 1)
+			vnode := vptr
+			switch uint8(vnode.typ) {
+			case KNull:
+				m[key] = nil
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KTrue:
+				m[key] = true
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KFalse:
+				m[key] = false
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringCommon:
+				off := int(vnode.typ >> PosBits)
+				n := int(vnode.val)
+				if n == 0 {
+					m[key] = emptyStringAny
+				} else {
+					m[key] = jsonStr[off : off+n]
+				}
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringEscaped:
+				m[key] = strEscapedAny(p, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KUint:
+				m[key] = uintToFloat64Any(vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KSint:
+				m[key] = sintToFloat64Any(int64(vnode.val))
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KReal:
+				m[key] = math.Float64frombits(vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					m[key] = emptyEfaceSliceAny
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
+			}
+			m[key], cur, err = decodeEfaceAtFastNoCopy(vptr, p, ctx, jsonStr)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+		}
+		return m, cur, gerr
+	case KArray:
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return emptyEfaceSliceAny, next, nil
+		}
+		var a []interface{}
+		if ctx.sliceArena != nil {
+			a = ctx.allocEfaceSlice(size)
+		} else {
+			a = make([]interface{}, size)
+		}
+		cur = next
+		var gerr, err error
+		for i := 0; i < size; i++ {
+			vnode := cur
+			switch uint8(vnode.typ) {
+			case KNull:
+				cur = PtrOffset(cur, 1)
+				continue
+			case KTrue:
+				a[i] = true
+				cur = PtrOffset(cur, 1)
+				continue
+			case KFalse:
+				a[i] = false
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringCommon:
+				off := int(vnode.typ >> PosBits)
+				n := int(vnode.val)
+				if n == 0 {
+					a[i] = emptyStringAny
+				} else {
+					a[i] = jsonStr[off : off+n]
+				}
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringEscaped:
+				a[i] = strEscapedAny(p, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KUint:
+				a[i] = uintToFloat64Any(vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KSint:
+				a[i] = sintToFloat64Any(int64(vnode.val))
+				cur = PtrOffset(cur, 1)
+				continue
+			case KReal:
+				a[i] = math.Float64frombits(vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					a[i] = emptyEfaceSliceAny
+					cur = PtrOffset(cur, 1)
+					continue
+				}
+			}
+			a[i], cur, err = decodeEfaceAtFastNoCopy(cur, p, ctx, jsonStr)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+		}
+		return a, cur, gerr
+	case KStringCommon:
+		off := int(cur.typ >> PosBits)
+		n := int(cur.val)
+		if n == 0 {
+			return emptyStringAny, PtrOffset(cur, 1), nil
+		}
+		return jsonStr[off : off+n], PtrOffset(cur, 1), nil
+	case KStringEscaped:
+		return strEscapedAny(p, int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
+	case KTrue:
+		return true, PtrOffset(cur, 1), nil
+	case KFalse:
+		return false, PtrOffset(cur, 1), nil
+	case KNull:
+		return nil, PtrOffset(cur, 1), nil
+	case KUint:
+		return uintToFloat64Any(cur.val), PtrOffset(cur, 1), nil
+	case KSint:
+		return sintToFloat64Any(int64(cur.val)), PtrOffset(cur, 1), nil
+	case KReal:
+		return math.Float64frombits(cur.val), PtrOffset(cur, 1), nil
+	default:
+		nd := Node{ptr: cur}
+		num, ok := nd.AsF64(ctx)
+		if !ok {
+			return nil, nd.Next(), newUnmatched(nd.Position(), float64Type)
+		}
+		return num, PtrOffset(cur, 1), nil
+	}
 }
 
 func decodeEfaceAt(cur *node, p *Parser, ctx *Context, opts uint64, copyStr bool, numSpecial bool) (interface{}, *node, error) {
 	switch uint8(cur.typ) {
 	case KObject:
 		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return make(map[string]interface{}), next, nil
+		}
 		m := make(map[string]interface{}, size)
-		cur = PtrOffset(cur, 1)
+		cur = next
 		var gerr, err error
 		for i := 0; i < size; i++ {
 			knode := cur
@@ -1322,7 +1584,7 @@ func decodeEfaceAt(cur *node, p *Parser, ctx *Context, opts uint64, copyStr bool
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KStringEscaped:
-					m[key] = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+					m[key] = strEscapedAny(p, int(vnode.typ>>PosBits), vnode.val)
 					cur = PtrOffset(vptr, 1)
 					continue
 				case KUint:
@@ -1385,7 +1647,7 @@ func decodeEfaceAt(cur *node, p *Parser, ctx *Context, opts uint64, copyStr bool
 					cur = PtrOffset(cur, 1)
 					continue
 				case KStringEscaped:
-					a[i] = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+					a[i] = strEscapedAny(p, int(vnode.typ>>PosBits), vnode.val)
 					cur = PtrOffset(cur, 1)
 					continue
 				case KUint:
@@ -1417,7 +1679,7 @@ func decodeEfaceAt(cur *node, p *Parser, ctx *Context, opts uint64, copyStr bool
 	case KStringCommon:
 		return strCommonAny(p, int(cur.typ>>PosBits), int(cur.val), copyStr), PtrOffset(cur, 1), nil
 	case KStringEscaped:
-		return p.strEscaped(int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
+		return strEscapedAny(p, int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
 	case KTrue:
 		return true, PtrOffset(cur, 1), nil
 	case KFalse:

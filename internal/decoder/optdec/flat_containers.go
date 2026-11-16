@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -43,6 +43,83 @@ func isFlatScalarSliceKind(kind uint8) bool {
 	default:
 		return false
 	}
+}
+
+func flatSliceBackingRange(elem unsafe.Pointer, lf *flatLeaf, plan *flatStructPlan) (uintptr, uintptr, bool) {
+	switch lf.kind {
+	case fieldKindSliceInt:
+		s := *(*[]int)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*unsafe.Sizeof(int(0)), true
+		}
+	case fieldKindSliceI64:
+		s := *(*[]int64)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*8, true
+		}
+	case fieldKindSliceI32:
+		s := *(*[]int32)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*4, true
+		}
+	case fieldKindSliceUint:
+		s := *(*[]uint)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*unsafe.Sizeof(uint(0)), true
+		}
+	case fieldKindSliceU64:
+		s := *(*[]uint64)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*8, true
+		}
+	case fieldKindSliceU32:
+		s := *(*[]uint32)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*4, true
+		}
+	case fieldKindSliceF64:
+		s := *(*[]float64)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*8, true
+		}
+	case fieldKindSliceF32:
+		s := *(*[]float32)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*4, true
+		}
+	case fieldKindSliceBool:
+		s := *(*[]bool)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c), true
+		}
+	case fieldKindSliceString:
+		s := *(*[]string)(elem)
+		if c := cap(s); c > 0 {
+			p := uintptr(unsafe.Pointer(unsafe.SliceData(s)))
+			return p, p + uintptr(c)*unsafe.Sizeof(""), true
+		}
+	case fieldKindSlice:
+		meta := &plan.structSlices[lf.elemKind]
+		rv := reflect.NewAt(meta.sliceType, elem).Elem()
+		if c := rv.Cap(); c > 0 {
+			p := rv.Pointer()
+			es := meta.elemSize
+			if es == 0 {
+				es = 1
+			}
+			return p, p + uintptr(c)*es, true
+		}
+	}
+	return 0, 0, false
 }
 
 func flatScalarElementKind(dec decFunc) (uint8, bool) {
@@ -782,14 +859,23 @@ func flatStageFloatArray(
 			return 0, 0, 0, false
 		}
 		if ec != 'n' {
+			tokStart := pos - 1
 			fv, nextPos, ok := flatParseFloat(strPtr, ec, pos, end)
 			if !ok {
 				return 0, 0, 0, false
 			}
 			if is32 {
-				fv32 := float32(fv)
-				if math.IsInf(float64(fv32), 0) && !math.IsInf(fv, 0) {
-					return 0, 0, 0, false
+				var fv32 float32
+				if needsExactFloat32(math.Float64bits(fv)) {
+					fv32, ok = parseExactFloat32Slice(s[tokStart:nextPos])
+					if !ok {
+						return 0, 0, 0, false
+					}
+				} else {
+					fv32 = float32(fv)
+					if math.IsInf(float64(fv32), 0) {
+						return 0, 0, 0, false
+					}
 				}
 				cs.elemPool[pIdx] = uint64(math.Float32bits(fv32))
 			} else {

@@ -9,9 +9,6 @@ jobs:
         matrix:
           mode: [run, runopt]
           os: [ubuntu-latest, ubuntu-24.04-arm]
-          exclude:
-            - os: ubuntu-24.04-arm
-              mode: runopt
 
     runs-on: ${{ matrix.os }}
     steps:

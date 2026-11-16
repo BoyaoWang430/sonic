@@ -78,11 +78,24 @@ type Stack struct {
 	ValPtr    unsafe.Pointer
 }
 
+type EncExecCtx struct {
+	Buf  []byte
+	Stk  Stack
+	Tick uint32
+}
+
 var (
 	bytesPool = sync.Pool{}
 	stackPool = sync.Pool{
 		New: func() interface{} {
 			return &Stack{}
+		},
+	}
+	execCtxPool = sync.Pool{
+		New: func() interface{} {
+			return &EncExecCtx{
+				Buf: make([]byte, 0, option.DefaultEncoderBufferSize),
+			}
 		},
 	}
 	bufferPool      = sync.Pool{}
@@ -129,6 +142,54 @@ func NewStack() *Stack {
 	ret.kvStrSp = 0
 	ret.kvU64Sp = 0
 	return ret
+}
+
+func GetExecCtx() *EncExecCtx {
+	ctx := execCtxPool.Get().(*EncExecCtx)
+	ctx.Stk.sp = 0
+	ctx.Stk.ptrSp = 0
+	ctx.Stk.kvSp = 0
+	ctx.Stk.kvOrderSp = 0
+	ctx.Stk.kvStrSp = 0
+	ctx.Stk.kvU64Sp = 0
+	return ctx
+}
+
+func FreeExecCtx(ctx *EncExecCtx, usedStack bool) {
+	if usedStack {
+		p := &ctx.Stk
+		limit := p.sp
+		if limit > inlineStackCap {
+			limit = inlineStackCap
+		}
+		for i := 0; i < limit; i++ {
+			p.sb[i] = State{}
+		}
+		p.releaseExtra()
+		p.sp = 0
+		p.ptrSp = 0
+		p.kvStrSp = 0
+		p.kvU64Sp = 0
+		p.ValPtr = nil
+		if cap(p.KVBuf) > maxPooledMapKV {
+			p.KVBuf = nil
+		}
+		if cap(p.KVOrder) > maxPooledMapKV {
+			p.KVOrder = nil
+		}
+		if cap(p.KVStr) > maxPooledMapKV {
+			p.KVStr = nil
+		}
+		if cap(p.KVScalar) > maxPooledMapKV {
+			p.KVScalar = nil
+		}
+	}
+	if rt.CanSizeResue(cap(ctx.Buf)) {
+		ctx.Buf = ctx.Buf[:0]
+	} else {
+		ctx.Buf = make([]byte, 0, option.DefaultEncoderBufferSize)
+	}
+	execCtxPool.Put(ctx)
 }
 
 func ResetStack(p *Stack) {

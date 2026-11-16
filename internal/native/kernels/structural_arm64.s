@@ -1,4 +1,4 @@
-//go:build arm64 && go1.20 && !go1.28
+//go:build !sonic_compat && arm64 && go1.20 && !go1.28
 
 #include "textflag.h"
 

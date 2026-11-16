@@ -7,7 +7,8 @@ Sonic is a Go JSON library accelerated by handwritten Plan9 SIMD assembly kernel
 ## Build, Test, and Development Commands
 
 - `go test ./...`: run the main module tests.
-- `SONIC_MODE=noavx2 go test ./...` / `SONIC_MODE=nossse3 go test ./...` (on `amd64`) or `SONIC_MODE=fallback go test ./...` (on `arm64`/`riscv64`): exercise scalar/lower-ISA fallback paths.
+- `SONIC_MODE=noavx2 go test ./...` / `SONIC_MODE=nossse3 go test ./...` (on `amd64`): exercise lower-ISA SIMD/scalar fallback paths.
+- `go test -tags=sonic_compat . ./ast ./decoder ./encoder`: force and verify the pure-Go `encoding/json` compatibility backend on any platform.
 - `go test ./issue_test` and `go test ./generic_test`: run regression and compatibility suites from the workspace.
 - `go test ./compatibility`: run the Go 1.27 `encoding/json` semantic drift catalog (see `docs/sonic-go127-compatibility.md`).
 - `./scripts/test_race.sh`: run the expected race-detection regression check.
@@ -20,7 +21,7 @@ Use `gofmt` for all Go files and follow Go Code Review Comments. Do not introduc
 
 ## Testing Guidelines
 
-Add focused package tests beside changed Go code. For parser, encoder, or SIMD kernel changes, verify native and scalar/lower-ISA modes (`SONIC_MODE`) as well as cross-architecture `go vet`. For user-reported behavior fixes, add or update an `issue_test` case. For fuzz-sensitive parsing changes, run `FuzzFiveWayDifferential` in `./internal/decoder/optdec` and seed `fuzz/corpus/` or `fuzz/testdata/` when useful.
+Add focused package tests beside changed Go code. For parser, encoder, or SIMD kernel changes, verify native, lower-ISA (`SONIC_MODE` on `amd64`), and compatibility (`-tags=sonic_compat`) builds as well as cross-architecture `go vet`. For user-reported behavior fixes, add or update an `issue_test` case. For fuzz-sensitive parsing changes, run `FuzzSixWayDifferential` in `./internal/decoder/optdec` and seed `fuzz/corpus/` or `fuzz/testdata/` when useful.
 
 ## Commit & Pull Request Guidelines
 

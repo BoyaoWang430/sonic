@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -41,22 +41,38 @@ type projPlan struct {
 	fields         []*projPlan
 	_              [64]byte
 	denseStreak    uint32
-	probeTick      uint32
 }
 
-// backoffProbeStripes shards 1-in-256 backoff recovery ticks across 128
-// cache-line-isolated counters indexed by target pointer address, avoiding
-// multi-core LOCK XADD contention and false sharing on projPlan/structDecoder
-// while remaining deterministic within <=256 calls on a single target variable.
-var backoffProbeStripes [128]struct {
+const probeWeylStep uint32 = 0x9e3779b9
+
+type backoffProbeStripe struct {
 	tick uint32
 	_    [60]byte
 }
 
-func hitBackoffProbe(seed uintptr, localTick *uint32) bool {
-	idx := (uint64(seed) * 0x9e3779b97f4a7c15) >> 57
-	v := atomic.AddUint32(&backoffProbeStripes[idx].tick, 1) + atomic.LoadUint32(localTick)
-	return (v & 255) == 0
+// schemaProbeStripes and flatProbeStripes shard ~1-in-256 backoff recovery
+// probes across independent 128-entry cache-line-isolated tables. Mixing both
+// the target address and the plan/decoder pointer into the stripe index and
+// advancing by an odd golden-ratio Weyl step (checking the top 8 bits) avoids
+// false sharing, LOCK XADD hot spots, and periodic parity lock when multiple
+// fast paths or struct types alternate on the same target variable.
+var (
+	schemaProbeStripes [128]backoffProbeStripe
+	flatProbeStripes   [128]backoffProbeStripe
+)
+
+func hitSchemaBackoffProbe(seed uintptr, plan *projPlan) bool {
+	mixed := (uint64(seed) ^ (uint64(uintptr(unsafe.Pointer(plan))) * 0x517cc1b727220a95)) * 0x9e3779b97f4a7c15
+	idx := mixed >> 57
+	v := atomic.AddUint32(&schemaProbeStripes[idx].tick, probeWeylStep)
+	return (v >> 24) == 0
+}
+
+func hitFlatBackoffProbe(seed uintptr, sd *structDecoder) bool {
+	mixed := (uint64(seed) ^ (uint64(uintptr(unsafe.Pointer(sd))) * 0x517cc1b727220a95)) * 0x9e3779b97f4a7c15
+	idx := mixed >> 57
+	v := atomic.AddUint32(&flatProbeStripes[idx].tick, probeWeylStep)
+	return (v >> 24) == 0
 }
 
 func (p *projPlan) recordDense() {
@@ -282,6 +298,27 @@ func (p *projPlan) shouldUse(jsonLen int) bool {
 	return p.shouldUseSeededOpts(jsonLen, 0, uintptr(unsafe.Pointer(p)))
 }
 
+// Schema-projection admission thresholds:
+//   - schemaMinJSONBytes (256 B): tiny payloads are cheaper to scan in one linear
+//     Runs pass (or Flat when eligible) than initializing projection state.
+//   - schemaBoundedBytesPerField (24 B/field): bounded structs pay off once the
+//     JSON exceeds roughly one compact key-value pair per declared field.
+//   - schemaWideStructFieldThreshold (40 fields) & schemaWideStructBytesPerField
+//     (512 B/field): on Linux/Windows (where AVX2/NEON/RVV Runs processes dense
+//     wide objects at multi-GB/s in a single linear pass), per-key schema dispatch
+//     and strict unknown-field validation win only when skipped payload strongly
+//     dominates declared fields (unless NoValidateJSONSkip enables O(1) container
+//     skipping).
+const (
+	schemaMinJSONBytes             = 256
+	schemaBoundedBytesPerField     = 24
+	schemaWideStructFieldThreshold = 40
+	schemaWideStructBytesPerField  = 512
+	schemaUnboundedMinJSONBytes    = 384
+	schemaUnboundedMaxStructWidth  = 32
+	schemaUnboundedMaxTotalFields  = 64
+)
+
 func (p *projPlan) shouldUseSeededOpts(jsonLen int, f uint64, seed uintptr) bool {
 	if p == nil || p.kind == projFull || p.kind == projScalar || p.kind == projBytes {
 		return false
@@ -292,19 +329,22 @@ func (p *projPlan) shouldUseSeededOpts(jsonLen int, f uint64, seed uintptr) bool
 	if p.hasRawSubtree {
 		return jsonLen > 0
 	}
-	if jsonLen < 256 {
+	if jsonLen < schemaMinJSONBytes {
 		return false
 	}
 	if atomic.LoadUint32(&p.denseStreak) >= 2 {
-		if !hitBackoffProbe(seed, &p.probeTick) {
+		if !hitSchemaBackoffProbe(seed, p) {
 			return false
 		}
 	}
 	if p.isBounded {
-		if runtime.GOOS != "darwin" && f&(1<<_F_no_validate_json) == 0 && p.maxStructWidth >= 40 {
-			return jsonLen >= p.totalFields*512
+		if runtime.GOOS != "darwin" && f&(1<<_F_no_validate_json) == 0 && p.maxStructWidth >= schemaWideStructFieldThreshold {
+			return jsonLen >= p.totalFields*schemaWideStructBytesPerField
 		}
-		return jsonLen >= p.totalFields*24
+		return jsonLen >= p.totalFields*schemaBoundedBytesPerField
 	}
-	return jsonLen >= 384 && p.maxStructWidth > 0 && p.maxStructWidth <= 32 && p.totalFields <= 64
+	return jsonLen >= schemaUnboundedMinJSONBytes &&
+		p.maxStructWidth > 0 &&
+		p.maxStructWidth <= schemaUnboundedMaxStructWidth &&
+		p.totalFields <= schemaUnboundedMaxTotalFields
 }

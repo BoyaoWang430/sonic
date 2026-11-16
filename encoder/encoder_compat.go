@@ -1,4 +1,4 @@
-//go:build ((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
+//go:build sonic_compat || (((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64))
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -211,7 +211,7 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	}
 	*buf = w.Bytes()
 	l := len(*buf)
-	if l > 0 && (opts&NoEncoderNewline != 0) && (*buf)[l-1] == '\n' {
+	if l > origLen && (*buf)[l-1] == '\n' {
 		*buf = (*buf)[:l-1]
 	}
 	return nil

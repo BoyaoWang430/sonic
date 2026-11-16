@@ -25,6 +25,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/sonic/decoder"
+	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -237,4 +239,32 @@ func TestUnmarshalJSONSuite(t *testing.T) {
 			assert.Equal(t, jerr != nil, serr != nil, "json: %v, sonic: %v", jerr, serr)
 		})
 	}
+}
+
+func TestCompatEncodeIntoAndMultiValueDecoder(t *testing.T) {
+	// 1. EncodeInto must preserve existing prefix and never append a trailing newline.
+	buf := []byte("prefix:")
+	require.NoError(t, encoder.EncodeInto(&buf, map[string]string{"k": "<v>"}, encoder.EscapeHTML))
+	require.Equal(t, `prefix:{"k":"\u003cv\u003e"}`, string(buf))
+
+	// 2. Multi-value string decoder.NewDecoder must advance Pos() across calls and error at end.
+	dec := decoder.NewDecoder("{\"a\":1}\n{\"a\":2} ")
+	type item struct {
+		A int `json:"a"`
+	}
+	var it1, it2, it3 item
+	require.NoError(t, dec.Decode(&it1))
+	require.Equal(t, 1, it1.A)
+	require.Greater(t, dec.Pos(), 0)
+	require.NoError(t, dec.Decode(&it2))
+	require.Equal(t, 2, it2.A)
+	require.Error(t, dec.Decode(&it3))
+
+	// 3. StreamDecoder returns io.EOF after consuming all values.
+	sdec := ConfigDefault.NewDecoder(bytes.NewBufferString("{\"a\":3}\n{\"a\":4} "))
+	var sit1, sit2, sit3 item
+	require.NoError(t, sdec.Decode(&sit1))
+	require.NoError(t, sdec.Decode(&sit2))
+	require.Equal(t, 4, sit2.A)
+	require.Equal(t, io.EOF, sdec.Decode(&sit3))
 }

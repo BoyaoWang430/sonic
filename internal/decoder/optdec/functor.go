@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"strconv"
 	"sync/atomic"
 	"unsafe"
 
@@ -217,12 +218,12 @@ func (d *f32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 		return nil
 	}
 
-	ret, ok := node.AsF64(ctx)
-	if !ok || float32Overflows(ret) {
+	ret, ok := node.AsF32(ctx)
+	if !ok {
 		return error_mismatch(node, ctx, d.typ)
 	}
 
-	*(*float32)(vp) = float32(ret)
+	*(*float32)(vp) = ret
 	return nil
 }
 
@@ -336,4 +337,48 @@ func (d *unsupportedTypeDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *cont
 // values that round to +/-Inf are rejected.
 func float32Overflows(v float64) bool {
 	return math.IsInf(float64(float32(v)), 0)
+}
+
+// needsExactFloat32 reports whether rounding math.Float64frombits(bits) to
+// float32 could suffer decimal->float64->float32 double rounding:
+//  1. bits' low 29 mantissa bits lie within +/-2 float64 ULPs of the exact
+//     halfway point 0x10000000 between adjacent float32 values (including the
+//     MaxFloat32/+Inf threshold), or
+//  2. 0 < |v| < 2^-124 (the float32 subnormal and normal/subnormal boundary
+//     region where the effective rounding bit shifts left).
+func needsExactFloat32(bits uint64) bool {
+	if (uint32(bits)&0x1fffffff)-0x0ffffffe <= 4 {
+		return true
+	}
+	absBits := bits & 0x7fffffffffffffff
+	return absBits != 0 && (absBits>>52) <= 1023-125
+}
+
+//go:noinline
+func parseExactFloat32Slice(raw string) (float32, bool) {
+	f, err := strconv.ParseFloat(raw, 32)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return float32(f), true
+}
+
+//go:noinline
+func parseExactFloat32Token(jsonStr string, pos int) (float32, bool) {
+	end, ok := SkipNumberFast(jsonStr, pos)
+	if !ok {
+		return 0, false
+	}
+	return parseExactFloat32Slice(jsonStr[pos:end])
+}
+
+func realBitsToFloat32(bits uint64, jsonStr string, pos int) (float32, bool) {
+	if needsExactFloat32(bits) {
+		return parseExactFloat32Token(jsonStr, pos)
+	}
+	f32 := float32(math.Float64frombits(bits))
+	if math.IsInf(float64(f32), 0) {
+		return 0, false
+	}
+	return f32, true
 }

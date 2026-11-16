@@ -1,4 +1,4 @@
-//go:build go1.26 && !go1.28 && riscv64.rva22u64
+//go:build !sonic_compat && go1.26 && !go1.28 && riscv64.rva22u64
 
 package unquote
 

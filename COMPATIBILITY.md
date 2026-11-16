@@ -9,7 +9,7 @@ This document summarizes the platform matrix, runtime architecture changes, and 
 | `amd64` (Linux / macOS / Windows) | Go 1.20 – 1.27 | Native `OptDec` + `VM` encoder + handwritten AVX2 / SSSE3 / SSE2 kernels |
 | `arm64` (Linux / macOS / Windows) | Go 1.20 – 1.27 | Native `OptDec` + `VM` encoder + handwritten NEON kernels |
 | `riscv64` (`GORISCV64=rva22u64` / `rva23u64`) | Go 1.26 – 1.27 | Native `OptDec` + `VM` encoder + handwritten RVA22 scalar / RVV kernels |
-| Other platforms (`ppc64le`, `s390x`, `wasm`, `386`, `riscv64 rva20u64`, Go >= 1.28) | Go 1.20+ | Automatic `encoding/json` compatibility fallback (`sonic.APIKind == sonic.UseStdJSON`) |
+| Other platforms (`ppc64le`, `s390x`, `wasm`, `386`, `riscv64 rva20u64`, Go >= 1.28, or `-tags=sonic_compat`) | Go 1.20+ | Automatic `encoding/json` compatibility fallback (`sonic.APIKind == sonic.UseStdJSON`) |
 
 - **Minimum Go version is Go 1.20** (Go 1.18 and 1.19 are no longer supported).
 - **Zero `//go:linkname` and zero JIT**: All `//go:linkname` bindings into private Go runtime symbols, the `loader` module, and dynamic machine-code JIT execution (`golang-asm`, `cpuid`, `base64x`) have been removed. Sonic no longer requires executable heap pages (`W^X` / hardened containers) or Go runtime internal struct layout coupling.
@@ -29,11 +29,11 @@ This document summarizes the platform matrix, runtime architecture changes, and 
 
 1. **Unified `OptDec` + `VM` semantics across `amd64`, `arm64`, and `riscv64`**:
    - `amd64` now uses the same `OptDec` decoder and `VM` encoder as `arm64` and `riscv64` instead of a separate JIT pipeline.
-2. **`float32` boundary rounding matches `encoding/json`**:
-   - Decoding into `float32` targets accepts decimal literals that round to `±math.MaxFloat32` (for example `3.402823469e+38` and `3.4028235e+38`) and rejects only literals that round to `±Inf`, matching `strconv.ParseFloat(s, 32)` in `encoding/json`.
+2. **`float32` single-step rounding and boundary alignment with `encoding/json`**:
+   - Decoding into `float32` targets (scalars, struct fields, pointers, slices, maps, and `,string` fields) performs exact IEEE-754 single-step rounding matching `strconv.ParseFloat(s, 32)` (avoiding `decimal -> float64 -> float32` midpoint double rounding, accepting decimal literals that round to `±math.MaxFloat32`, and rejecting only literals that round to `±Inf`).
 3. **Raw JSON subtrees (`json.RawMessage`, `NoCopyRawMessage`, `json.Unmarshaler`)**:
    - Raw subtrees are always syntactically validated even when `NoValidateJSONSkip` is enabled (`NoValidateJSONSkip` relaxes only skipped unknown values).
-   - Valid RFC 8259 decimal numbers whose exponent exceeds `float64` range (for example `[1.5e+9999]`) are accepted inside `json.RawMessage` / raw subtrees, matching `encoding/json` and `sonic.Valid`.
+   - Valid RFC 8259 decimal numbers whose exponent exceeds `float64` range (for example `[1.5e+9999]`) are accepted inside `json.RawMessage`, `NoCopyRawMessage`, `json.Unmarshaler`, and `json.Number` targets across all decode paths (`schema`, full `runs`, `giant`, and `io.Reader` `StreamDecoder`) without altering `interface{}` number types, while still rejecting float64 overflow in non-raw targets and skipped unknown struct fields.
 4. **`,string` struct tag numeric parsing (`STRING-GONUM` / `STRING-GONUM-PLUS`)**:
    - Quoted numeric fields (`json:",string"`) delegate to Go's `strconv` numeric parsers (accepting zero-padded integers, Go hex/underscore floats, `+` prefixes, and `.5` leading decimal points while rejecting `NaN` and `±Inf`), matching `OptDec` and Go 1.27's `jsonv2`-backed `encoding/json` behavior rather than the legacy `amd64` JIT scanner.
 5. **Duplicate container keys**:

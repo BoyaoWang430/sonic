@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -6,6 +6,7 @@ import (
 	"encoding"
 	"math"
 	"reflect"
+	"strconv"
 	"sync"
 	"unsafe"
 
@@ -373,8 +374,8 @@ func (d *mapStrF32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		knode := NewNode(next)
 		key, _ := knode.AsStr(ctx)
 		val := NewNode(PtrOffset(next, 1))
-		ret, ok := val.AsF64(ctx)
-		if !ok || float32Overflows(ret) {
+		ret, ok := val.AsF32(ctx)
+		if !ok {
 			m[key] = 0
 			if val.IsNull() {
 				next = PtrOffset(val.ptr, 1)
@@ -385,7 +386,7 @@ func (d *mapStrF32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 			}
 			next = val.Next()
 		} else {
-			m[key] = float32(ret)
+			m[key] = ret
 			next = PtrOffset(val.ptr, 1)
 		}
 	}
@@ -1060,11 +1061,14 @@ func decodeFloat32Key(dec *mapDecoder, raw string, kv reflect.Value) error {
 	if err != nil {
 		return err
 	}
-	ret, err := ParseF64(key)
+	ret, err := strconv.ParseFloat(key, 32)
 	if err != nil {
+		if ne, ok := err.(*strconv.NumError); ok && ne.Err == strconv.ErrRange {
+			return error_value(key, dec.keyType)
+		}
 		return err
 	}
-	if float32Overflows(ret) {
+	if math.IsNaN(ret) || math.IsInf(ret, 0) {
 		return error_value(key, dec.keyType)
 	}
 	kv.SetFloat(ret)

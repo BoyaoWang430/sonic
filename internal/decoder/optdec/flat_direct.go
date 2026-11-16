@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -48,6 +48,7 @@ type flatStructPlan struct {
 	slots         []int16 // >= 0: leaf index (0..31); < 0: -childGroupIdx into groups
 	structSlices  []flatStructSliceMeta
 	ptrMask       uint32
+	sliceMask     uint32
 	hasContainers bool
 }
 
@@ -312,6 +313,7 @@ func buildFlatPlanGroup(plan *flatStructPlan, sd *structDecoder, baseOffset uint
 				offset: uint32(totalOff),
 				kind:   fe.kind,
 			})
+			plan.sliceMask |= uint32(1) << uint(leafIdx)
 			plan.hasContainers = true
 			plan.slots[slotStart+i] = int16(leafIdx)
 			continue
@@ -340,6 +342,7 @@ func buildFlatPlanGroup(plan *flatStructPlan, sd *structDecoder, baseOffset uint
 					elemKind: uint8(metaIdx),
 					arrLen:   uint8(len(d.structDec.fields)),
 				})
+				plan.sliceMask |= uint32(1) << uint(leafIdx)
 				plan.hasContainers = true
 				plan.slots[slotStart+i] = int16(leafIdx)
 				continue
@@ -363,6 +366,111 @@ func buildFlatPlanGroup(plan *flatStructPlan, sd *structDecoder, baseOffset uint
 	plan.groups[groupIdx].pureASCIIKeys = pureASCII
 	if pureASCII {
 		plan.groups[groupIdx].keyPrefixes = buildFlatKeyPrefixes(sd.fields)
+	}
+	return true
+}
+
+const flatMaxTrackedAliasRanges = 8
+
+func flatPtrTargetSize(kind uint8) uintptr {
+	switch kind {
+	case fieldKindPtrString:
+		return unsafe.Sizeof("")
+	case fieldKindPtrI64, fieldKindPtrInt, fieldKindPtrU64, fieldKindPtrUint, fieldKindPtrF64:
+		return 8
+	case fieldKindPtrI32, fieldKindPtrU32, fieldKindPtrF32:
+		return 4
+	case fieldKindPtrI16, fieldKindPtrU16:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func flatAddDisjointRange(ranges *[flatMaxTrackedAliasRanges][2]uintptr, n *int, start, end, rootStart, rootEnd uintptr) bool {
+	if end <= start {
+		end = start + 1
+	}
+	if start < rootEnd && rootStart < end {
+		return false
+	}
+	cnt := *n
+	if cnt >= flatMaxTrackedAliasRanges {
+		return false
+	}
+	for i := 0; i < cnt; i++ {
+		if start < ranges[i][1] && ranges[i][0] < end {
+			return false
+		}
+	}
+	ranges[cnt] = [2]uintptr{start, end}
+	*n = cnt + 1
+	return true
+}
+
+// flatTargetAliasSafe verifies that pre-populated pointer fields and reusable
+// slice backing arrays in vp are disjoint from vp itself and from each other.
+// Because flat commits staged leaves in field-index order rather than JSON key
+// order, overlapping pre-populated targets must fall back to sequential tape
+// materialization without penalizing flatFailStreak.
+func flatTargetAliasSafe(vp unsafe.Pointer, sd *structDecoder) bool {
+	plan := sd.flatPlan
+	if plan == nil {
+		m := sd.flatPtrMask
+		if m == 0 {
+			return true
+		}
+		rootStart := uintptr(vp)
+		rootEnd := rootStart + sd.elemSize
+		var ranges [flatMaxTrackedAliasRanges][2]uintptr
+		nRanges := 0
+		fields := sd.fields
+		for ; m != 0; m &= m - 1 {
+			fi := bits.TrailingZeros32(m)
+			fe := &fields[fi]
+			p := *(*unsafe.Pointer)(unsafe.Add(vp, uintptr(fe.offset)))
+			if p == nil {
+				continue
+			}
+			pStart := uintptr(p)
+			if !flatAddDisjointRange(&ranges, &nRanges, pStart, pStart+flatPtrTargetSize(fe.kind), rootStart, rootEnd) {
+				return false
+			}
+		}
+		return true
+	}
+	checkMask := plan.ptrMask | plan.sliceMask
+	if checkMask == 0 {
+		return true
+	}
+	rootStart := uintptr(vp)
+	rootEnd := rootStart + sd.elemSize
+	var ranges [flatMaxTrackedAliasRanges][2]uintptr
+	nRanges := 0
+	leaves := plan.leaves
+	for m := checkMask; m != 0; m &= m - 1 {
+		fi := bits.TrailingZeros32(m)
+		lf := &leaves[fi]
+		elem := unsafe.Add(vp, uintptr(lf.offset))
+		bit := uint32(1) << uint(fi)
+		if plan.ptrMask&bit != 0 {
+			p := *(*unsafe.Pointer)(elem)
+			if p == nil {
+				continue
+			}
+			pStart := uintptr(p)
+			if !flatAddDisjointRange(&ranges, &nRanges, pStart, pStart+flatPtrTargetSize(lf.kind), rootStart, rootEnd) {
+				return false
+			}
+		} else {
+			sStart, sEnd, hasBacking := flatSliceBackingRange(elem, lf, plan)
+			if !hasBacking {
+				continue
+			}
+			if !flatAddDisjointRange(&ranges, &nRanges, sStart, sEnd, rootStart, rootEnd) {
+				return false
+			}
+		}
 	}
 	return true
 }
@@ -395,9 +503,12 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 		startPos = 0
 		end = rem
 	}
+	if !flatTargetAliasSafe(vp, sd) {
+		return 0, false
+	}
 	streak := atomic.LoadUint32(&sd.flatFailStreak)
 	if streak >= flatBackoffThreshold {
-		if !hitBackoffProbe(uintptr(vp), &sd.flatProbeTick) {
+		if !hitFlatBackoffProbe(uintptr(vp), sd) {
 			return 0, false
 		}
 	}
@@ -422,6 +533,28 @@ func tryDecodeFlatStruct(s string, startPos int, f uint64, vp unsafe.Pointer, sd
 		atomic.AddUint32(&sd.flatFailStreak, 1)
 	}
 	return 0, false
+}
+
+func tryDecodeFlatStructForced(s string, startPos int, f uint64, vp unsafe.Pointer, sd *structDecoder, utf8Prechecked, checkTrailing bool) (int, bool) {
+	end := len(s)
+	if startPos < 0 || startPos >= end || f&flatUnsupportedOpts != 0 {
+		return 0, false
+	}
+	if checkTrailing {
+		if end-startPos > flatSingleDocMaxLen || end > math.MaxUint32 {
+			return 0, false
+		}
+	}
+	if !flatTargetAliasSafe(vp, sd) {
+		return 0, false
+	}
+	if sd.flatPlan != nil {
+		if sd.flatPlan.hasContainers {
+			return tryDecodeFlatContainerPlanBody(s, startPos, end, f, vp, sd.flatPlan, utf8Prechecked, checkTrailing)
+		}
+		return tryDecodeFlatPlanBody(s, startPos, end, f, vp, sd.flatPlan, utf8Prechecked, checkTrailing)
+	}
+	return tryDecodeFlatStructBody(s, startPos, end, f, vp, sd, utf8Prechecked, checkTrailing)
 }
 
 func tryDecodeFlatStructBody(s string, startPos, end int, f uint64, vp unsafe.Pointer, sd *structDecoder, utf8Prechecked, checkTrailing bool) (int, bool) {
@@ -1050,11 +1183,24 @@ func flatStageLeafValue(
 		return nextPos, false, true
 
 	case fieldKindF32, fieldKindPtrF32:
+		tokStart := pos - 1
 		fv, nextPos, ok := flatParseFloat(strPtr, vc, pos, end)
-		if !ok || float32Overflows(fv) {
+		if !ok {
 			return 0, false, false
 		}
-		dst.val = uint64(math.Float32bits(float32(fv)))
+		var f32 float32
+		if needsExactFloat32(math.Float64bits(fv)) {
+			f32, ok = parseExactFloat32Slice(s[tokStart:nextPos])
+			if !ok {
+				return 0, false, false
+			}
+		} else {
+			f32 = float32(fv)
+			if math.IsInf(float64(f32), 0) {
+				return 0, false, false
+			}
+		}
+		dst.val = uint64(math.Float32bits(f32))
 		return nextPos, false, true
 
 	default:

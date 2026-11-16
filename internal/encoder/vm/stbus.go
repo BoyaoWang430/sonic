@@ -77,10 +77,10 @@ type rootEncPlan struct {
 	inDirectUse    atomic.Uint32
 }
 
-var encConcStripes [64]struct {
-	tick uint32
-	_    [60]byte
-}
+const (
+	encConcCooldownTicks   = 4
+	encConcDecaySampleMask = 4095
+)
 
 func (p *rootEncPlan) tryAcquireDirectSingle() bool {
 	if p.concCooldown.Load() > 0 {
@@ -89,14 +89,14 @@ func (p *rootEncPlan) tryAcquireDirectSingle() bool {
 	if p.inDirectUse.CompareAndSwap(0, 1) {
 		return true
 	}
-	p.concCooldown.Store(1024)
+	p.concCooldown.Store(encConcCooldownTicks)
 	return false
 }
 
-func (p *rootEncPlan) decayConcCooldown(bufSeed uintptr) {
-	if cd := p.concCooldown.Load(); cd > 0 {
-		idx := (uint64(bufSeed) * 0x9e3779b97f4a7c15) >> 58
-		if (atomic.AddUint32(&encConcStripes[idx].tick, 1) & 1023) == 0 {
+func (p *rootEncPlan) decayConcCooldownLocal(localTick *uint32) {
+	*localTick++
+	if (*localTick & encConcDecaySampleMask) == 0 {
+		if cd := p.concCooldown.Load(); cd > 0 {
 			p.concCooldown.CompareAndSwap(cd, cd-1)
 		}
 	}
@@ -904,50 +904,48 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 		}
 	}
 
-	buf := vars.NewBytes()
-	plan.decayConcCooldown(uintptr(unsafe.Pointer(buf)))
-	origBuf := (*buf)[:0]
+	execCtx := vars.GetExecCtx()
+	plan.decayConcCooldownLocal(&execCtx.Tick)
+	origBuf := execCtx.Buf[:0]
+	execCtx.Buf = origBuf
+	needStk := !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs
 	var stk *vars.Stack
-	if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {
-		stk = vars.NewStack()
+	if needStk {
+		stk = &execCtx.Stk
 	}
-	err = encodeWithRootPlan(buf, rv, plan, stk, fv)
+	err = encodeWithRootPlan(&execCtx.Buf, rv, plan, stk, fv)
 	if err != nil {
-		if stk != nil {
+		if needStk {
 			vars.ResetStack(stk)
-			vars.FreeStack(stk)
 		}
-		if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
-			*buf = origBuf
+		if !rt.CanSizeResue(cap(execCtx.Buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			execCtx.Buf = origBuf
 		}
-		vars.FreeBytes(buf)
+		vars.FreeExecCtx(execCtx, false)
 		runtime.KeepAlive(val)
 		return nil, true, err
-	}
-	if stk != nil {
-		vars.FreeStack(stk)
 	}
 	runtime.KeepAlive(val)
 
 	if plan.allowSizeHint {
 		hint := int(plan.sizeHint.Load())
-		if (len(*buf) >= minDirectRootHint && hint == 0) || len(*buf) > cap(origBuf) || (hint > 0 && len(*buf)*2 < hint) {
-			plan.sizeHint.Store(clampRootSizeHint(len(*buf)))
+		if (len(execCtx.Buf) >= minDirectRootHint && hint == 0) || len(execCtx.Buf) > cap(origBuf) || (hint > 0 && len(execCtx.Buf)*2 < hint) {
+			plan.sizeHint.Store(clampRootSizeHint(len(execCtx.Buf)))
 		}
 	}
 
 	var ret []byte
-	if rt.CanSizeResue(cap(*buf)) {
-		ret = rt.CloneBytesNoZero(*buf)
-		vars.FreeBytes(buf)
+	if rt.CanSizeResue(cap(execCtx.Buf)) {
+		ret = rt.CloneBytesNoZero(execCtx.Buf)
+		vars.FreeExecCtx(execCtx, needStk)
 	} else {
-		ret = *buf
+		ret = execCtx.Buf
 		if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
-			*buf = origBuf
-			vars.FreeBytes(buf)
+			execCtx.Buf = origBuf
 		} else {
-			*buf = nil
+			execCtx.Buf = nil
 		}
+		vars.FreeExecCtx(execCtx, needStk)
 	}
 	return ret, true, nil
 }

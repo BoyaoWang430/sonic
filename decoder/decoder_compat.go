@@ -1,4 +1,4 @@
-//go:build ((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64)
+//go:build sonic_compat || (((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64))
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -19,10 +19,10 @@
 package decoder
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/compat"
@@ -114,7 +114,12 @@ func (self *Decoder) CheckTrailings() error {
 // Decode parses the JSON-encoded data from current position and stores the result
 // in the value pointed to by val.
 func (self *Decoder) Decode(val interface{}) error {
-	r := bytes.NewBufferString(self.s)
+	if self.i < 0 {
+		self.i = 0
+	} else if self.i > len(self.s) {
+		self.i = len(self.s)
+	}
+	r := strings.NewReader(self.s[self.i:])
 	dec := json.NewDecoder(r)
 	if (self.f & uint64(OptionUseNumber)) != 0 {
 		dec.UseNumber()
@@ -122,7 +127,9 @@ func (self *Decoder) Decode(val interface{}) error {
 	if (self.f & uint64(OptionDisableUnknown)) != 0 {
 		dec.DisallowUnknownFields()
 	}
-	return dec.Decode(val)
+	err := dec.Decode(val)
+	self.i += int(dec.InputOffset())
+	return err
 }
 
 // UseInt64 indicates the Decoder to unmarshal an integer into an interface{} as an

@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 //go:generate go run gen_structs_obj.go
 
@@ -255,7 +255,6 @@ type structDecoder struct {
 	flatKeyPrefixes   []flatKeyPrefix
 	_                 [64]byte
 	flatFailStreak    uint32
-	flatProbeTick     uint32
 }
 
 func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {
@@ -586,15 +585,14 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 		}
 	case fieldKindPtrF32:
 		if vtyp == KReal {
-			fv := math.Float64frombits(vnode.val)
-			if !float32Overflows(fv) {
+			if f32, ok := realBitsToFloat32(vnode.val, jsonStr, int(vnode.typ>>PosBits)); ok {
 				pp := (**float32)(elem)
 				dst := *pp
 				if dst == nil {
 					dst = (*float32)(p.allocScalarPtr(int(d.ptrScalarHint)))
 					*pp = dst
 				}
-				*dst = float32(fv)
+				*dst = f32
 				return true
 			}
 		} else if vtyp == KUint {

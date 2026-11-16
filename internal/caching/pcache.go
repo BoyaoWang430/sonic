@@ -22,17 +22,45 @@ import (
 	"sync/atomic"
 )
 
+const maxInlinePrograms = 8
+
+type ProgramBatchItem struct {
+	Vt reflect.Type
+	Fn interface{}
+}
+
 type _ProgramMap struct {
-	m map[reflect.Type]interface{}
+	inlineLen int
+	inline    [maxInlinePrograms]ProgramBatchItem
+	m         map[reflect.Type]interface{}
 }
 
 func newProgramMap() *_ProgramMap {
 	return &_ProgramMap{
-		m: make(map[reflect.Type]interface{}, 64),
+		m: make(map[reflect.Type]interface{}, 16),
+	}
+}
+
+func (self *_ProgramMap) populateInline() {
+	if n := len(self.m); n > 0 && n <= maxInlinePrograms {
+		idx := 0
+		for k, v := range self.m {
+			self.inline[idx] = ProgramBatchItem{Vt: k, Fn: v}
+			idx++
+		}
+		self.inlineLen = idx
 	}
 }
 
 func (self *_ProgramMap) get(vt reflect.Type) interface{} {
+	if n := self.inlineLen; n > 0 {
+		for i := 0; i < n; i++ {
+			if self.inline[i].Vt == vt {
+				return self.inline[i].Fn
+			}
+		}
+		return nil
+	}
 	return self.m[vt]
 }
 
@@ -44,12 +72,8 @@ func (self *_ProgramMap) add(vt reflect.Type, fn interface{}) *_ProgramMap {
 		fork.m[k] = v
 	}
 	fork.m[vt] = fn
+	fork.populateInline()
 	return fork
-}
-
-type ProgramBatchItem struct {
-	Vt reflect.Type
-	Fn interface{}
 }
 
 func (self *_ProgramMap) addMany(items []ProgramBatchItem) *_ProgramMap {
@@ -74,6 +98,7 @@ func (self *_ProgramMap) addMany(items []ProgramBatchItem) *_ProgramMap {
 			fork.m[vt] = items[i].Fn
 		}
 	}
+	fork.populateInline()
 	return fork
 }
 
@@ -130,15 +155,22 @@ func (self *ProgramCache) Reset() {
 }
 
 func (self *ProgramCache) Get(vt reflect.Type) (val interface{}) {
-	if val = self.p.Load().m[vt]; val == nil {
-		val = self.getSlow(vt)
+	snap := self.p.Load()
+	if n := snap.inlineLen; n > 0 {
+		for i := 0; i < n; i++ {
+			if snap.inline[i].Vt == vt {
+				return snap.inline[i].Fn
+			}
+		}
+	} else if val = snap.m[vt]; val != nil {
+		return val
 	}
-	return
+	return self.getSlow(vt)
 }
 
 func (self *ProgramCache) getSlow(vt reflect.Type) interface{} {
 	if !self.hasStaging.Load() {
-		return self.p.Load().m[vt]
+		return self.p.Load().get(vt)
 	}
 	return self.getFromStaging(vt)
 }
@@ -188,6 +220,7 @@ func (self *ProgramCache) promoteStagingLocked() {
 			merged.m[k] = v
 		}
 	}
+	merged.populateInline()
 	self.p.Store(merged)
 	self.staging = nil
 	self.stagingHits = 0
@@ -312,6 +345,7 @@ func (self *ProgramCache) PutMany(items []ProgramBatchItem) {
 			fork.m[vt] = items[i].Fn
 		}
 	}
+	fork.populateInline()
 	self.p.Store(fork)
 	self.staging = nil
 	self.stagingHits = 0

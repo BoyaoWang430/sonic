@@ -11,9 +11,6 @@ CORPUS_DIR="${FUZZ_DIR}/go-fuzz-corpus"
 FUZZ_CORPUS_REPO="https://github.com/dvyukov/go-fuzz-corpus.git"
 FILE2FUZZ_VERSION="v0.10.0"
 
-source "$(dirname "$0")/../scripts/go_flags.sh"
-compile_flag=$(get_go_linkname_flag || echo "")
-
 log_info() {
     echo -e "\033[34m[INFO]\033[0m $1"
 }
@@ -69,6 +66,12 @@ run_fuzz() {
     cd "${FUZZ_DIR}" && go test -fuzz="${TEST_NAME}" -v -fuzztime 15m 
 }
 
+run_diff_fuzz() {
+    log_info "Running 6-way forced-path differential fuzz test..."
+    export GOMAXPROCS=2
+    go test -fuzz="^FuzzSixWayDifferential$" -v -fuzztime "${FUZZ_TIME:-5m}" ./internal/decoder/optdec
+}
+
 cleanup() {
     log_info "Cleaning up..."
     rm -vrf "${CORPUS_DIR:?}"/
@@ -80,14 +83,17 @@ main() {
         fuzz)
             init_corpus
             ;;
-        run|runopt)
+        run)
             run_fuzz
+            ;;
+        runopt|diff)
+            run_diff_fuzz
             ;;
         clean)
             cleanup
             ;;
         *)
-            echo "Usage: $0 {fuzz|run|runopt|clean}"
+            echo "Usage: $0 {fuzz|run|runopt|diff|clean}"
             exit 1
             ;;
     esac

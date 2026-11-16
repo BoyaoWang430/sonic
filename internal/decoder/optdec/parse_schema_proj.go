@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -100,13 +100,6 @@ func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 	if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
 		return errCodeGiantStreamFallback
 	}
-	if plan.kind == projRaw {
-		oldOpts := p.options
-		p.options |= 1 << _F_use_number
-		code := resetAndRunFullParse(p, mutated)
-		p.options = oldOpts
-		return code
-	}
 	return resetAndRunFullParse(p, mutated)
 }
 
@@ -131,6 +124,7 @@ func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
 	if p.unescBuf != nil {
 		p.unescBuf = p.unescBuf[:0]
 	}
+	p.hasDeferredFloatInf = false
 	p.pos = 0
 	p.end = len(p.Json)
 	p._nbk = _nospaceBlock{}

@@ -1,4 +1,4 @@
-//go:build (amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64)
+//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
@@ -174,6 +174,27 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 	} else {
 		// On failure the preceding successful number deliberately survives.
 		cur, state.num, code = cParityParseNumberValue(cur, state.num, negative, p.dbuf)
+		if code == SONIC_FLOAT_INF && p.deferFloatOverflow {
+			cur = startCur
+			remain := p.end - p.pos
+			if !negative {
+				remain++
+			}
+			length := cParitySkipPositive(&cur, remain)
+			if length < 0 {
+				code = ErrorCode(-length)
+			} else if negative && length == 0 && p.strictRawNum {
+				code = SONIC_INVALID_NUM
+			} else {
+				value := uint64(length)
+				if negative {
+					value++
+				}
+				state.num = cParityNum{typ: KRawNumber, val: value}
+				p.hasDeferredFloatInf = true
+				code = SONIC_OK
+			}
+		}
 		// Every successful parse sets KUint, KSint or KReal. Only an error
 		// can leave an invalid prior type, which C skips instead of emitting.
 		if code != SONIC_OK {
