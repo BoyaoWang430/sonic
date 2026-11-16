@@ -238,11 +238,14 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 	enc.SetEscapeHTML((opts & EscapeHTML) != 0)
 	enc.SetIndent(prefix, indent)
 	err := enc.Encode(val)
+	if err != nil {
+		return nil, err
+	}
 	out := w.Bytes()
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
-	return out, err
+	return out, nil
 }
 
 // Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in

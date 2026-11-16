@@ -168,7 +168,6 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 	p.resetSlabs()
 	p.Utf8Inv = false
 	p.isEface = isEface
-	p.hasDeferredFloatInf = false
 	s.cur = 0
 	s.nodeLen = 0
 	s.tokStart = 0
@@ -691,7 +690,6 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				}
 			finishNum:
 				if code == SONIC_FLOAT_INF && s.deferFloatOverflow {
-					p.hasDeferredFloatInf = true
 					s.cur = end
 					s.emitNode(KRawNumber|uint64(pos)<<PosBits, uint64(end-pos))
 					p.nbuf.stat.number++
@@ -978,7 +976,7 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 			} else {
 				sess.ctx.sliceArena = nil
 			}
-			merr := decodeRootFromDom(vp, dec, &sess.ctx)
+			merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
 			sess.ctx.Parser = nil
 			sess.ctx.sliceArena = nil
 			p.Json = ""
@@ -1534,7 +1532,6 @@ scanValue:
 		}
 	finishGiantNum:
 		if code == SONIC_FLOAT_INF && s.deferFloatOverflow {
-			p.hasDeferredFloatInf = true
 			num = cParityNum{typ: KRawNumber, val: uint64(end - pos)}
 			code = SONIC_OK
 		}
@@ -1808,7 +1805,7 @@ func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Poin
 	} else {
 		sess.ctx.sliceArena = nil
 	}
-	merr := decodeRootFromDom(vp, dec, &sess.ctx)
+	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
 	sess.ctx.Parser = nil
 	sess.ctx.sliceArena = nil
 	err := fix_error(s, 0, merr)
@@ -1864,7 +1861,7 @@ func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Typ
 	} else {
 		sess.ctx.sliceArena = nil
 	}
-	merr := decodeRootFromDom(vp, dec, &sess.ctx)
+	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
 	sess.ctx.Parser = nil
 	sess.ctx.sliceArena = nil
 	err := fix_error(*s, origPos, merr)

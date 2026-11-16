@@ -219,7 +219,7 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 		s = p.Json
 	}
 	if err == nil {
-		err = decodeRootFromDom(vp, dec, ctx)
+		err = dec.FromDom(vp, ctx.Root(), ctx)
 	}
 	err = fix_error(s, 0, err)
 	endPos := p.Pos()
@@ -292,7 +292,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		}
 		goto fix_error
 	}
-	err = decodeRootFromDom(vp, dec, ctx)
+	err = dec.FromDom(vp, ctx.Root(), ctx)
 
 fix_error:
 	err = fix_error(*s, origPos, err)

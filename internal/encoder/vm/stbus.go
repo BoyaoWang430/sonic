@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
@@ -56,50 +57,81 @@ const (
 )
 
 type rootEncPlan struct {
-	prog           *ir.Program
-	boxPool        *sync.Pool
-	pureSpecs      []ir.StructFieldSpec
-	denseSpecs     []ir.StructFieldSpec
-	elemSize       uintptr
-	builtinMapKind int
-	sizeHint       atomic.Uint32
-	isDirectPtr    bool
-	isDirectMap    bool
-	hasPureSpecs   bool
-	hasDenseSpecs  bool
-	isPureSlice    bool
-	isPurePtrSlice bool
-	allowSizeHint  bool
-	boxHasPtrs     bool
-	_              [64]byte
-	concCooldown   atomic.Uint32
-	_              [60]byte
-	inDirectUse    atomic.Uint32
+	prog              *ir.Program
+	boxPool           *sync.Pool
+	pureSpecs         []ir.StructFieldSpec
+	denseSpecs        []ir.StructFieldSpec
+	elemSize          uintptr
+	builtinMapKind    int
+	sizeHint          atomic.Uint32
+	isDirectPtr       bool
+	isDirectMap       bool
+	hasPureSpecs      bool
+	hasDenseSpecs     bool
+	isPureSlice       bool
+	isPurePtrSlice    bool
+	allowSizeHint     bool
+	boxHasPtrs        bool
+	_                 [64]byte
+	cooldownUntilNano atomic.Int64
+	_                 [56]byte
+	inDirectUse       atomic.Uint32
 }
 
-const (
-	encConcCooldownTicks   = 4
-	encConcDecaySampleMask = 4095
-)
+const encConcCooldownWindow = int64(2 * time.Millisecond)
+
+var encMonoEpoch = time.Now().Add(-time.Second)
+
+func encMonoNowNano() int64 {
+	d := int64(time.Since(encMonoEpoch))
+	if d <= 0 {
+		return 1
+	}
+	return d
+}
 
 func (p *rootEncPlan) tryAcquireDirectSingle() bool {
-	if p.concCooldown.Load() > 0 {
-		return false
+	if until := p.cooldownUntilNano.Load(); until != 0 {
+		now := encMonoNowNano()
+		if now < until {
+			return false
+		}
+		p.cooldownUntilNano.CompareAndSwap(until, 0)
 	}
 	if p.inDirectUse.CompareAndSwap(0, 1) {
 		return true
 	}
-	p.concCooldown.Store(encConcCooldownTicks)
+	now := encMonoNowNano()
+	p.cooldownUntilNano.Store(now + encConcCooldownWindow)
 	return false
 }
 
-func (p *rootEncPlan) decayConcCooldownLocal(localTick *uint32) {
-	*localTick++
-	if (*localTick & encConcDecaySampleMask) == 0 {
-		if cd := p.concCooldown.Load(); cd > 0 {
-			p.concCooldown.CompareAndSwap(cd, cd-1)
-		}
+// RootPlanCooldownUntilForTest reports the current cooldownUntilNano timestamp
+// for a cached rootEncPlan (used by end-to-end contention recovery tests).
+func RootPlanCooldownUntilForTest(vt reflect.Type) (int64, bool) {
+	cached := vars.GetRootPlan(vt)
+	if cached == nil {
+		return 0, false
 	}
+	plan, ok := cached.(*rootEncPlan)
+	if !ok || plan == nil {
+		return 0, false
+	}
+	return plan.cooldownUntilNano.Load(), true
+}
+
+func (p *rootEncPlan) tryAcquireDirectSingleAt(now int64) bool {
+	if until := p.cooldownUntilNano.Load(); until != 0 {
+		if now < until {
+			return false
+		}
+		p.cooldownUntilNano.CompareAndSwap(until, 0)
+	}
+	if p.inDirectUse.CompareAndSwap(0, 1) {
+		return true
+	}
+	p.cooldownUntilNano.Store(now + encConcCooldownWindow)
+	return false
 }
 
 func typeHasPointers(vt reflect.Type) bool {
@@ -905,7 +937,6 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	}
 
 	execCtx := vars.GetExecCtx()
-	plan.decayConcCooldownLocal(&execCtx.Tick)
 	origBuf := execCtx.Buf[:0]
 	execCtx.Buf = origBuf
 	needStk := !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs

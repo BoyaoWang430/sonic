@@ -46,7 +46,7 @@ func TestIssue772_SkipIfaceType(t *testing.T) {
 		},
 	} {
 		t.Run(tt.cas.name, func(t *testing.T) {
-			if stdUsesJSONV2 {
+			if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 				wantJSON := `{"name":"name","id":null}`
 				if tt.cas.name == "should skip non-ptr iface type" {
 					wantJSON = `{"name":"name","id":{"id":null}}`

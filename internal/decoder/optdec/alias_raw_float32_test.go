@@ -26,12 +26,28 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 	}
 	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
 
+	// Zero-init and disjoint pre-populated targets MUST hit Flat fast path.
+	var zeroHit SharedPtrStruct
+	if _, ok := tryDecodeFlatStructForced(`{"b":2,"a":1}`, 0, diffStdOpts, unsafe.Pointer(&zeroHit), flatSD, false, true); !ok {
+		t.Fatal("expected zero-initialized SharedPtrStruct to hit Flat fast path")
+	}
+	disjointA, disjointB := 10, 20
+	disjointHit := SharedPtrStruct{A: &disjointA, B: &disjointB}
+	if _, ok := tryDecodeFlatStructForced(`{"b":2,"a":1}`, 0, diffStdOpts, unsafe.Pointer(&disjointHit), flatSD, false, true); !ok {
+		t.Fatal("expected disjoint pre-populated SharedPtrStruct to hit Flat Reuse fast path")
+	}
+
 	for _, src := range []string{
 		`{"b":2,"a":1}`,
 		`{"a":1,"b":2}`,
 		`{"b":2,"a":null}`,
 		`{"a":null,"b":2}`,
 	} {
+		xForced := 99
+		forcedAlias := SharedPtrStruct{A: &xForced, B: &xForced}
+		if _, ok := tryDecodeFlatStructForced(src, 0, diffStdOpts, unsafe.Pointer(&forcedAlias), flatSD, false, true); ok {
+			t.Fatalf("expected forced Flat alias guard to reject shared pointer on %s", src)
+		}
 		xGot, xStd := 99, 99
 		got := SharedPtrStruct{A: &xGot, B: &xGot}
 		want := SharedPtrStruct{A: &xStd, B: &xStd}
@@ -54,7 +70,14 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		A *int `json:"a"`
 		B int  `json:"b"`
 	}
+	_, selfFlatSD := mustCompileFlatSD[SelfPtrStruct](t)
+	atomic.StoreUint32(&selfFlatSD.flatFailStreak, 0)
 	for _, src := range []string{`{"b":20,"a":10}`, `{"a":10,"b":20}`} {
+		var forcedSelf SelfPtrStruct
+		forcedSelf.A = &forcedSelf.B
+		if _, ok := tryDecodeFlatStructForced(src, 0, diffStdOpts, unsafe.Pointer(&forcedSelf), selfFlatSD, false, true); ok {
+			t.Fatalf("expected forced Flat alias guard to reject self-referential pointer on %s", src)
+		}
 		var got, want SelfPtrStruct
 		got.B, want.B = 7, 7
 		got.A = &got.B
@@ -70,6 +93,9 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 			t.Fatalf("self ptr mismatch on %s: got.B=%d want.B=%d", src, got.B, want.B)
 		}
 	}
+	if streak := atomic.LoadUint32(&selfFlatSD.flatFailStreak); streak != 0 {
+		t.Fatalf("self-ptr alias bailout incremented flatFailStreak: %d", streak)
+	}
 
 	// 3. Shared backing array across two slice fields + pointer into slice backing array.
 	type SharedSliceStruct struct {
@@ -77,12 +103,19 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		X []int `json:"x"`
 		Y []int `json:"y"`
 	}
+	_, sliceFlatSD := mustCompileFlatSD[SharedSliceStruct](t)
+	atomic.StoreUint32(&sliceFlatSD.flatFailStreak, 0)
 	for _, src := range []string{
 		`{"y":[9,8],"x":[1,2]}`,
 		`{"x":[1,2],"y":[9,8]}`,
 		`{"p":77,"x":[1,2,3]}`,
 		`{"x":[1,2,3],"p":77}`,
 	} {
+		bForced := []int{5, 6, 7, 8}
+		forcedShared := SharedSliceStruct{P: &bForced[1], X: bForced[:2:4], Y: bForced[:2:4]}
+		if _, ok := tryDecodeFlatStructForced(src, 0, diffStdOpts, unsafe.Pointer(&forcedShared), sliceFlatSD, false, true); ok {
+			t.Fatalf("expected forced Flat alias guard to reject overlapping slice/ptr backing on %s", src)
+		}
 		bGot := []int{5, 6, 7, 8}
 		bStd := []int{5, 6, 7, 8}
 		got := SharedSliceStruct{P: &bGot[1], X: bGot[:2:4], Y: bGot[:2:4]}
@@ -97,6 +130,9 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		if !reflect.DeepEqual(bGot, bStd) || !reflect.DeepEqual(got.X, want.X) || !reflect.DeepEqual(got.Y, want.Y) || *got.P != *want.P {
 			t.Fatalf("shared slice/ptr backing mismatch on %s:\n  bGot=%v bStd=%v\n  got=%+v want=%+v", src, bGot, bStd, got, want)
 		}
+	}
+	if streak := atomic.LoadUint32(&sliceFlatSD.flatFailStreak); streak != 0 {
+		t.Fatalf("shared-slice alias bailout incremented flatFailStreak: %d", streak)
 	}
 }
 
@@ -142,26 +178,59 @@ func TestRawMessageHugeExponentAllPaths(t *testing.T) {
 		t.Fatalf("MixedEnvelope sibling any field changed type: got %#v (%T), want float64(1.5)", env.Val, env.Val)
 	}
 
-	// Sibling any field with 1e999 (without UseNumber) must fail BEFORE Guard.UnmarshalJSON runs (SYN-PREMUT).
-	var badEnv MixedEnvelope
-	badAnySrc := `{"guard":{"ok":1},"raw":[1e999],"val":1e999}`
-	_, _, err = DecodeOne(badAnySrc, diffStdOpts, &badEnv)
-	if err == nil {
-		t.Fatal("expected float infinity error for sibling any=1e999 without UseNumber")
+	// Explicit Schema hit (<=64 levels) vs Schema -> Runs fallback (65 levels).
+	shallow32 := strings.Repeat("[", 32) + "1e999" + strings.Repeat("]", 32)
+	gotShallowSchema, usedShallowSchema, err := decodeViaSchemaOrFullWithInit[MixedEnvelope](
+		`{"guard":{"ok":1e999},"raw":`+shallow32+`,"val":1.5}`, diffStdOpts, nil)
+	if err != nil || !usedShallowSchema || string(gotShallowSchema.Raw) != shallow32 {
+		t.Fatalf("expected <=64-deep RawMessage to hit Schema directly: usedSchema=%v err=%v", usedShallowSchema, err)
 	}
-	if badEnv.Guard.called {
-		t.Fatal("Guard.UnmarshalJSON was called before rejecting sibling any=1e999")
+	gotDeepSchema, usedDeepSchema, err := decodeViaSchemaOrFullWithInit[MixedEnvelope](envSrc, diffStdOpts, nil)
+	if err != nil || usedDeepSchema || string(gotDeepSchema.Raw) != deep65 {
+		t.Fatalf("expected 65-deep RawMessage to fall back from Schema to Runs cleanly: usedSchema=%v err=%v", usedDeepSchema, err)
 	}
 
-	// Skipped unknown field with 1e999 on a fallback-forced struct must ALSO preserve SYN-PREMUT.
-	var badSkipEnv MixedEnvelope
-	badSkipSrc := `{"guard":{"ok":1},"raw":` + deep65 + `,"unknown_inf":1e999}`
-	_, _, err = DecodeOne(badSkipSrc, diffStdOpts, &badSkipEnv)
-	if err == nil {
-		t.Fatal("expected float infinity error for skipped unknown field 1e999")
+	// Category 3 (numeric range mismatch during FromDom): fails on bare any=1e999, while matching
+	// encoding/json sequential field execution on earlier valid fields and leaving Val == nil.
+	var badEnv, stdBadEnv MixedEnvelope
+	badAnySrc := `{"guard":{"ok":1},"raw":[1e999],"val":1e999}`
+	_, _, err = DecodeOne(badAnySrc, diffStdOpts, &badEnv)
+	stdBadErr := json.Unmarshal([]byte(badAnySrc), &stdBadEnv)
+	if err == nil || stdBadErr == nil {
+		t.Fatalf("expected range mismatch error for sibling any=1e999: got=%v std=%v", err, stdBadErr)
 	}
-	if badSkipEnv.Guard.called {
-		t.Fatal("Guard.UnmarshalJSON was called before rejecting unknown_inf=1e999")
+	if badEnv.Guard.called != stdBadEnv.Guard.called || badEnv.Val != nil {
+		t.Fatalf("range mismatch side-effect diverged from std: gotCalled=%v stdCalled=%v val=%#v",
+			badEnv.Guard.called, stdBadEnv.Guard.called, badEnv.Val)
+	}
+
+	// Category 1 (JSON syntax error within single value): rejected at scan time BEFORE any UnmarshalJSON runs.
+	for _, badSynSrc := range []string{
+		`{"guard":{"ok":1},"raw":[1e999],"val":1e+}`,
+		`{"guard":{"ok":1},"raw":[1e999],"val":1e999x}`,
+	} {
+		var synEnv MixedEnvelope
+		_, _, err = DecodeOne(badSynSrc, diffStdOpts, &synEnv)
+		if err == nil {
+			t.Fatalf("expected syntax error on %s", badSynSrc)
+		}
+		if synEnv.Guard.called {
+			t.Fatalf("Guard.UnmarshalJSON was called before rejecting syntax error on %s", badSynSrc)
+		}
+	}
+
+	// Skipped unknown field with 1e999 aligns with encoding/json and succeeds across all paths.
+	skipSrc := `{"guard":{"ok":1},"raw":` + deep65 + `,"unknown_inf":1e999,"unknown_nested":{"x":-1e999}}`
+	var skipEnv, stdSkipEnv MixedEnvelope
+	_, end, err = DecodeOne(skipSrc, diffStdOpts, &skipEnv)
+	if err := checkSingleDocEnd(skipSrc, end, err); err != nil {
+		t.Fatalf("expected skipped unknown field 1e999 to succeed, got %v", err)
+	}
+	if err := json.Unmarshal([]byte(skipSrc), &stdSkipEnv); err != nil {
+		t.Fatalf("std failed on skipped unknown field 1e999: %v", err)
+	}
+	if !skipEnv.Guard.called || string(skipEnv.Raw) != deep65 {
+		t.Fatalf("skipped unknown 1e999 result mismatch: guardCalled=%v rawLen=%d", skipEnv.Guard.called, len(skipEnv.Raw))
 	}
 
 	// 3. Giant (>4 MiB) MixedEnvelope with 65-deep 1e999 RawMessage.
@@ -357,4 +426,198 @@ func mustCompileFlatSD[T any](t *testing.T) (T, *structDecoder) {
 		t.Fatalf("expected flatSD for %T, err=%v", zero, err)
 	}
 	return zero, flatSD
+}
+
+type siblingMutatorHook struct {
+	target *any
+	raw    *json.RawMessage
+}
+
+func (h *siblingMutatorHook) UnmarshalJSON(_ []byte) error {
+	if h.target != nil && h.raw != nil {
+		*h.target = h.raw
+	}
+	return nil
+}
+
+func TestDynamicTargetReuseAndScanNumberBoundaries(t *testing.T) {
+	// 1. Review 2.1: Pre-populated slice element interface holding *json.RawMessage.
+	type Item struct {
+		Value any `json:"value"`
+	}
+	const itemSrc = `[{"value":1e999}]`
+	var rawRouter, rawRuns, rawGiant, rawStream, rawStd json.RawMessage
+	dstRouter := []Item{{Value: &rawRouter}}
+	_, end, err := DecodeOne(itemSrc, diffStdOpts, &dstRouter)
+	if err := checkSingleDocEnd(itemSrc, end, err); err != nil {
+		t.Fatalf("Router []Item{{Value:&raw}} failed: %v", err)
+	}
+	_, errRuns := decodeViaRunsWithInit[[]Item](itemSrc, diffStdOpts, func(d *[]Item) { *d = []Item{{Value: &rawRuns}} })
+	_, errGiant := decodeViaGiantWithInit[[]Item](itemSrc, diffStdOpts, func(d *[]Item) { *d = []Item{{Value: &rawGiant}} })
+	_, errStream := decodeViaChunkedStreamWithInit[[]Item](itemSrc, diffStdOpts, 4, func(d *[]Item) { *d = []Item{{Value: &rawStream}} })
+	dstStd := []Item{{Value: &rawStd}}
+	if err := json.Unmarshal([]byte(itemSrc), &dstStd); err != nil {
+		t.Fatal(err)
+	}
+	if errRuns != nil || errGiant != nil || errStream != nil {
+		t.Fatalf("[]Item{{Value:&raw}} path errors: runs=%v giant=%v stream=%v", errRuns, errGiant, errStream)
+	}
+	for name, r := range map[string]json.RawMessage{
+		"router": rawRouter,
+		"runs":   rawRuns,
+		"giant":  rawGiant,
+		"stream": rawStream,
+	} {
+		if !bytes.Equal(r, rawStd) || string(r) != "1e999" {
+			t.Fatalf("%s raw mismatch: got=%q want=%q", name, string(r), string(rawStd))
+		}
+	}
+
+	// 2. []any{&raw} (len=1, cap=1) and ([]any{&raw})[:0] (len=0, cap=1) at both root and struct fieldKindSliceEface.
+	type SliceEfaceHolder struct {
+		Anys []any `json:"anys"`
+	}
+	for _, resliced := range []bool{false, true} {
+		var rRoot, rField, rSchema, rStd json.RawMessage
+		initSlice := func(r *json.RawMessage) []any {
+			s := []any{r}
+			if resliced {
+				return s[:0]
+			}
+			return s
+		}
+		rootTarget := initSlice(&rRoot)
+		_, end, err := DecodeOne(`[1e999]`, diffStdOpts, &rootTarget)
+		if err := checkSingleDocEnd(`[1e999]`, end, err); err != nil {
+			t.Fatalf("root []any (resliced=%v) failed: %v", resliced, err)
+		}
+		fieldHolder := SliceEfaceHolder{Anys: initSlice(&rField)}
+		_, end, err = DecodeOne(`{"anys":[-1e999]}`, diffStdOpts, &fieldHolder)
+		if err := checkSingleDocEnd(`{"anys":[-1e999]}`, end, err); err != nil {
+			t.Fatalf("field []any (resliced=%v) failed: %v", resliced, err)
+		}
+		_, usedSchema, errSchema := decodeViaSchemaOrFullWithInit[SliceEfaceHolder](`{"anys":[-1e999]}`, diffStdOpts, func(h *SliceEfaceHolder) {
+			h.Anys = initSlice(&rSchema)
+		})
+		if errSchema != nil || !usedSchema {
+			t.Fatalf("Schema SliceEfaceHolder (resliced=%v) failed: usedSchema=%v err=%v", resliced, usedSchema, errSchema)
+		}
+		stdHolder := SliceEfaceHolder{Anys: initSlice(&rStd)}
+		if err := json.Unmarshal([]byte(`{"anys":[-1e999]}`), &stdHolder); err != nil {
+			t.Fatal(err)
+		}
+		if string(rRoot) != "1e999" || string(rField) != string(rStd) || string(rSchema) != "-1e999" {
+			t.Fatalf("[]any backing reuse mismatch (resliced=%v): root=%q field=%q schema=%q std=%q",
+				resliced, string(rRoot), string(rField), string(rSchema), string(rStd))
+		}
+	}
+
+	// 3. Review 2.2: Duplicate-key target mutation: {"value":null,"value":1e999} on pre-populated Value=&raw MUST fail!
+	type Holder struct {
+		Value any `json:"value"`
+	}
+	const dupNullThenInf = `{"value":null,"value":1e999}`
+	for _, pathName := range []string{"router", "runs", "schema", "giant", "stream"} {
+		raw := json.RawMessage("untouched")
+		var errPath error
+		var finalVal any
+		switch pathName {
+		case "router":
+			h := Holder{Value: &raw}
+			_, end, e := DecodeOne(dupNullThenInf, diffStdOpts, &h)
+			errPath = checkSingleDocEnd(dupNullThenInf, end, e)
+			finalVal = h.Value
+		case "runs":
+			h, e := decodeViaRunsWithInit[Holder](dupNullThenInf, diffStdOpts, func(d *Holder) { d.Value = &raw })
+			errPath, finalVal = e, h.Value
+		case "schema":
+			h, used, e := decodeViaSchemaOrFullWithInit[Holder](dupNullThenInf, diffStdOpts, func(d *Holder) { d.Value = &raw })
+			if !used {
+				t.Fatal("expected Holder to hit Schema path")
+			}
+			errPath, finalVal = e, h.Value
+		case "giant":
+			h, e := decodeViaGiantWithInit[Holder](dupNullThenInf, diffStdOpts, func(d *Holder) { d.Value = &raw })
+			errPath, finalVal = e, h.Value
+		case "stream":
+			h, e := decodeViaChunkedStreamWithInit[Holder](dupNullThenInf, diffStdOpts, 5, func(d *Holder) { d.Value = &raw })
+			errPath, finalVal = e, h.Value
+		}
+		stdRaw := json.RawMessage("untouched")
+		stdH := Holder{Value: &stdRaw}
+		stdErr := json.Unmarshal([]byte(dupNullThenInf), &stdH)
+		if errPath == nil || stdErr == nil {
+			t.Fatalf("%s failed to reject %s after null reset: got=%v std=%v", pathName, dupNullThenInf, errPath, stdErr)
+		}
+		if finalVal != nil || string(raw) != "untouched" {
+			t.Fatalf("%s unexpected post-error state: finalVal=%#v raw=%q", pathName, finalVal, string(raw))
+		}
+	}
+
+	// Custom Unmarshaler mutating sibling target from nil -> &raw before sibling 1e999 field is decoded.
+	type MutatingSibling struct {
+		Setup siblingMutatorHook `json:"setup"`
+		Next  any                `json:"next"`
+	}
+	var dynRaw, stdDynRaw json.RawMessage
+	var mutGot, mutStd MutatingSibling
+	mutGot.Setup = siblingMutatorHook{target: &mutGot.Next, raw: &dynRaw}
+	mutStd.Setup = siblingMutatorHook{target: &mutStd.Next, raw: &stdDynRaw}
+	const mutSrc = `{"setup":1,"next":1e999}`
+	_, end, err = DecodeOne(mutSrc, diffStdOpts, &mutGot)
+	if err := checkSingleDocEnd(mutSrc, end, err); err != nil {
+		t.Fatalf("MutatingSibling failed: %v", err)
+	}
+	if err := json.Unmarshal([]byte(mutSrc), &mutStd); err != nil {
+		t.Fatal(err)
+	}
+	if string(dynRaw) != "1e999" || string(dynRaw) != string(stdDynRaw) {
+		t.Fatalf("MutatingSibling raw mismatch: got=%q std=%q", string(dynRaw), string(stdDynRaw))
+	}
+
+	// 4. Stage 1.1: scanNumberScalar & root/container number token boundary matrix.
+	type NumBoundaryEnv struct {
+		Raw json.RawMessage `json:"raw"`
+		F64 float64         `json:"f64"`
+	}
+	// Underflow literals must follow normal IEEE-754 underflow (+0.0 / -0.0), not KRawNumber error.
+	for _, uf := range []struct {
+		lit     string
+		negZero bool
+	}{
+		{lit: "1e-999", negZero: false},
+		{lit: "-1e-999", negZero: true},
+	} {
+		doc := fmt.Sprintf(`{"raw":%s,"f64":%s}`, uf.lit, uf.lit)
+		gotS, usedS, errS := decodeViaSchemaOrFullWithInit[NumBoundaryEnv](doc, diffStdOpts, nil)
+		if errS != nil || !usedS {
+			t.Fatalf("Schema underflow %s failed: used=%v err=%v", uf.lit, usedS, errS)
+		}
+		if gotS.F64 != 0 || math.Signbit(gotS.F64) != uf.negZero || string(gotS.Raw) != uf.lit {
+			t.Fatalf("underflow %s mismatch: f64=%v signbit=%v raw=%q",
+				uf.lit, gotS.F64, math.Signbit(gotS.F64), string(gotS.Raw))
+		}
+	}
+
+	// Malformed number boundaries must be rejected at scan time even when targeting json.RawMessage or skipped unknown fields!
+	for _, badTok := range []string{"1e999x", "1e999.2", "01", "-01", "1e+", "-"} {
+		for _, doc := range []string{
+			badTok,
+			`{"raw":` + badTok + `}`,
+			`{"unknown":` + badTok + `}`,
+			`[` + badTok + `]`,
+		} {
+			var r json.RawMessage
+			_, end, e := DecodeOne(doc, diffStdOpts, &r)
+			if checkSingleDocEnd(doc, end, e) == nil {
+				t.Fatalf("DecodeOne accepted invalid number token %q in %q", badTok, doc)
+			}
+			if _, _, eSchema := decodeViaSchemaOrFullWithInit[NumBoundaryEnv](doc, diffStdOpts, nil); eSchema == nil {
+				t.Fatalf("Schema accepted invalid number token %q in %q", badTok, doc)
+			}
+			if _, eStream := decodeViaChunkedStreamWithInit[json.RawMessage](doc, diffStdOpts, 2, nil); eStream == nil {
+				t.Fatalf("Stream accepted invalid number token %q in %q", badTok, doc)
+			}
+		}
+	}
 }

@@ -5,8 +5,11 @@ package optdec
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 	"unsafe"
@@ -47,11 +50,72 @@ type diffRichStruct struct {
 	StrInt int               `json:"str_int,string"`
 }
 
+type diffRawItem struct {
+	Value any `json:"value"`
+}
+
 type diffRawEnvelope struct {
-	ID   int             `json:"id"`
-	Raw  json.RawMessage `json:"raw"`
-	Note string          `json:"note"`
-	Val  any             `json:"val"`
+	ID    int             `json:"id"`
+	Raw   json.RawMessage `json:"raw"`
+	Note  string          `json:"note"`
+	Val   any             `json:"val"`
+	Items []diffRawItem   `json:"items"`
+	Anys  []any           `json:"anys"`
+}
+
+var (
+	diffStatsExecs          atomic.Uint64
+	diffStatsSchemaHit      atomic.Uint64
+	diffStatsSchemaFallback atomic.Uint64
+	diffStatsFlatHit        atomic.Uint64
+	diffStatsFlatBailout    atomic.Uint64
+)
+
+func resetDiffPathStats() {
+	diffStatsExecs.Store(0)
+	diffStatsSchemaHit.Store(0)
+	diffStatsSchemaFallback.Store(0)
+	diffStatsFlatHit.Store(0)
+	diffStatsFlatBailout.Store(0)
+}
+
+// hasOver800DigitNumber guards only documented F64-LONG-OVF (>800-digit mantissa truncation vs Go 1.27).
+func hasOver800DigitNumber(s string) bool {
+	if len(s) <= 800 {
+		return false
+	}
+	run := 0
+	inStr := false
+	esc := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if esc {
+				esc = false
+				continue
+			}
+			if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			run = 0
+			continue
+		}
+		if (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
+			run++
+			if run > 800 {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
 }
 
 const (
@@ -91,7 +155,7 @@ func decodeViaRunsWithInit[T any](s string, f uint64, initFn func(*T)) (T, error
 		s = p.Json
 	}
 	if err == nil {
-		err = decodeRootFromDom(vp, dec, ctx)
+		err = dec.FromDom(vp, ctx.Root(), ctx)
 	}
 	endPos := p.Pos()
 	if endPos > len(s) {
@@ -121,7 +185,6 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	p.keepUseNumber = (f & (1 << _F_use_number)) != 0
 	p.strictRawNum = true
 	p.deferFloatOverflow = !p.keepUseNumber
-	p.hasDeferredFloatInf = false
 	ok, mutated := parseSchemaRoot(p, proj)
 	if !ok {
 		code := resetAndRunFullParse(p, mutated)
@@ -134,7 +197,7 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	} else if p.Utf8Inv {
 		s = p.Json
 	}
-	err = decodeRootFromDom(vp, dec, ctx)
+	err = dec.FromDom(vp, ctx.Root(), ctx)
 	endPos := p.Pos()
 	if endPos > len(s) {
 		endPos = len(s)
@@ -213,17 +276,24 @@ func decodeViaChunkedStreamWithInit[T any](s string, f uint64, chunkSize int, in
 	return dst, checkSingleDocEnd(s, consumed, nil)
 }
 
-func decodeViaStdGenericWithInit[T any](s string, disUnknown bool, initFn func(*T)) (T, error) {
+func decodeViaStdGenericWithOptsAndInit[T any](s string, f uint64, initFn func(*T)) (T, error) {
 	var dst T
 	if initFn != nil {
 		initFn(&dst)
 	}
-	if !disUnknown {
+	disUnknown := (f & (1 << _F_disable_unknown)) != 0
+	useNum := (f & (1 << _F_use_number)) != 0
+	if !disUnknown && !useNum {
 		err := json.Unmarshal([]byte(s), &dst)
 		return dst, err
 	}
 	dec := json.NewDecoder(strings.NewReader(s))
-	dec.DisallowUnknownFields()
+	if disUnknown {
+		dec.DisallowUnknownFields()
+	}
+	if useNum {
+		dec.UseNumber()
+	}
 	if err := dec.Decode(&dst); err != nil {
 		return dst, err
 	}
@@ -236,6 +306,7 @@ func decodeViaStdGenericWithInit[T any](s string, disUnknown bool, initFn func(*
 
 func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkStd bool, withFlat bool, initFn func(*T)) {
 	t.Helper()
+	diffStatsExecs.Add(1)
 
 	var gotRouter T
 	if initFn != nil {
@@ -245,7 +316,12 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 	errRouter = checkSingleDocEnd(sRouter, endRouter, errRouter)
 
 	gotRuns, errRuns := decodeViaRunsWithInit[T](s, f, initFn)
-	gotSchema, _, errSchema := decodeViaSchemaOrFullWithInit[T](s, f, initFn)
+	gotSchema, usedSchema, errSchema := decodeViaSchemaOrFullWithInit[T](s, f, initFn)
+	if usedSchema {
+		diffStatsSchemaHit.Add(1)
+	} else {
+		diffStatsSchemaFallback.Add(1)
+	}
 	gotGiant, errGiant := decodeViaGiantWithInit[T](s, f, initFn)
 	gotStream, errStream := decodeViaChunkedStreamWithInit[T](s, f, 7, initFn)
 
@@ -263,7 +339,10 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 		var endFlat int
 		endFlat, okFlat = tryDecodeFlatStructForced(s, 0, f, unsafe.Pointer(vp), flatSD, false, true)
 		if okFlat {
+			diffStatsFlatHit.Add(1)
 			errFlat = checkSingleDocEnd(s, endFlat, nil)
+		} else {
+			diffStatsFlatBailout.Add(1)
 		}
 	}
 
@@ -310,12 +389,10 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 	}
 
 	if checkStd && utf8.ValidString(s) {
-		disUnknown := (f & (1 << _F_disable_unknown)) != 0
-		gotStd, errStd := decodeViaStdGenericWithInit[T](s, disUnknown, initFn)
-		// optdec intentionally rejects IEEE-754 float64 overflow in skipped unknown fields unless UseNumber is set.
-		if errRuns != nil && errStd == nil && strings.Contains(errRuns.Error(), "float infinity") {
+		if diffStdUsesJSONV2 && hasOver800DigitNumber(s) {
 			return
 		}
+		gotStd, errStd := decodeViaStdGenericWithOptsAndInit[T](s, f, initFn)
 		if (errRuns != nil) != (errStd != nil) {
 			t.Fatalf("%T runs vs encoding/json err mismatch (f=0x%x) on %q:\n  runs=%v\n  std=%v", gotRuns, f, s, errRuns, errStd)
 		}
@@ -425,18 +502,10 @@ func checkAnyFiveWay(t *testing.T, s string, f uint64) {
 		}
 	}
 	if (f == diffStdOpts || f == diffUseNumberOpts) && utf8.ValidString(s) {
-		var gotStd any
-		var errStd error
-		if f == diffUseNumberOpts {
-			dec := json.NewDecoder(strings.NewReader(s))
-			dec.UseNumber()
-			errStd = dec.Decode(&gotStd)
-			if errStd == nil && !json.Valid([]byte(s)) {
-				errStd = &json.SyntaxError{Offset: int64(len(s))}
-			}
-		} else {
-			errStd = json.Unmarshal([]byte(s), &gotStd)
+		if diffStdUsesJSONV2 && hasOver800DigitNumber(s) {
+			return
 		}
+		gotStd, errStd := decodeViaStdGenericWithOptsAndInit[any](s, f, nil)
 		if (errRuns != nil) != (errStd != nil) {
 			t.Fatalf("any vs std err mismatch (f=0x%x) on %q: runs=%v std=%v", f, s, errRuns, errStd)
 		}
@@ -446,15 +515,59 @@ func checkAnyFiveWay(t *testing.T, s string, f uint64) {
 	}
 }
 
-func checkRawEnvelopeFiveWay(t *testing.T, s string, f uint64) {
+func rawEnvelopeInitializerModes() []func(*diffRawEnvelope) {
+	return []func(*diffRawEnvelope){
+		nil,
+		// Dynamic *json.RawMessage inside interface{} field Val.
+		func(d *diffRawEnvelope) {
+			var raw json.RawMessage
+			d.Val = &raw
+		},
+		// Dynamic *json.RawMessage inside slice element struct interface{} (Review 2.1).
+		func(d *diffRawEnvelope) {
+			var raw json.RawMessage
+			d.Items = []diffRawItem{{Value: &raw}}
+		},
+		// Dynamic *json.RawMessage inside []any (len=1, cap=1).
+		func(d *diffRawEnvelope) {
+			var raw json.RawMessage
+			d.Anys = []any{&raw}
+		},
+		// Dynamic *json.RawMessage inside resliced ([]any{&raw})[:0] (len=0, cap=1).
+		func(d *diffRawEnvelope) {
+			var raw json.RawMessage
+			d.Anys = ([]any{&raw})[:0]
+		},
+	}
+}
+
+func equalRawEnvelope(a, b diffRawEnvelope) bool {
+	return a.ID == b.ID &&
+		a.Note == b.Note &&
+		bytes.Equal(a.Raw, b.Raw) &&
+		reflect.DeepEqual(a.Val, b.Val) &&
+		reflect.DeepEqual(a.Items, b.Items) &&
+		reflect.DeepEqual(a.Anys, b.Anys)
+}
+
+func checkRawEnvelopeFiveWayWithInit(t *testing.T, s string, f uint64, checkStd bool, initFn func(*diffRawEnvelope)) {
 	t.Helper()
+	diffStatsExecs.Add(1)
 	var gotRouter diffRawEnvelope
+	if initFn != nil {
+		initFn(&gotRouter)
+	}
 	sRouter, endRouter, errRouter := DecodeOne(s, f, &gotRouter)
 	errRouter = checkSingleDocEnd(sRouter, endRouter, errRouter)
-	gotRuns, errRuns := decodeViaRunsWithInit[diffRawEnvelope](s, f, nil)
-	gotSchema, _, errSchema := decodeViaSchemaOrFullWithInit[diffRawEnvelope](s, f, nil)
-	gotGiant, errGiant := decodeViaGiantWithInit[diffRawEnvelope](s, f, nil)
-	gotStream, errStream := decodeViaChunkedStreamWithInit[diffRawEnvelope](s, f, 7, nil)
+	gotRuns, errRuns := decodeViaRunsWithInit[diffRawEnvelope](s, f, initFn)
+	gotSchema, usedSchema, errSchema := decodeViaSchemaOrFullWithInit[diffRawEnvelope](s, f, initFn)
+	if usedSchema {
+		diffStatsSchemaHit.Add(1)
+	} else {
+		diffStatsSchemaFallback.Add(1)
+	}
+	gotGiant, errGiant := decodeViaGiantWithInit[diffRawEnvelope](s, f, initFn)
+	gotStream, errStream := decodeViaChunkedStreamWithInit[diffRawEnvelope](s, f, 7, initFn)
 
 	noValSkip := (f & (1 << _F_no_validate_json)) != 0
 	if !noValSkip {
@@ -478,10 +591,30 @@ func checkRawEnvelopeFiveWay(t *testing.T, s string, f uint64) {
 			"giant":  gotGiant,
 			"stream": gotStream,
 		} {
-			if g.ID != gotRuns.ID || g.Note != gotRuns.Note || !bytes.Equal(g.Raw, gotRuns.Raw) || !reflect.DeepEqual(g.Val, gotRuns.Val) {
-				t.Fatalf("raw %s vs runs mismatch on %q: %+v vs %+v", name, s, g, gotRuns)
+			if !equalRawEnvelope(g, gotRuns) {
+				t.Fatalf("raw %s vs runs mismatch on %q:\n  got=%#v\n  runs=%#v", name, s, g, gotRuns)
 			}
 		}
+	}
+	if checkStd && utf8.ValidString(s) {
+		if diffStdUsesJSONV2 && hasOver800DigitNumber(s) {
+			return
+		}
+		gotStd, errStd := decodeViaStdGenericWithOptsAndInit[diffRawEnvelope](s, f, initFn)
+		if (errRuns != nil) != (errStd != nil) {
+			t.Fatalf("raw envelope vs encoding/json err mismatch (f=0x%x) on %q:\n  runs=%v\n  std=%v", f, s, errRuns, errStd)
+		}
+		if errStd == nil && !equalRawEnvelope(gotRuns, gotStd) {
+			t.Fatalf("raw envelope vs encoding/json value mismatch (f=0x%x) on %q:\n  runs=%#v\n  std=%#v", f, s, gotRuns, gotStd)
+		}
+	}
+}
+
+func checkRawEnvelopeFiveWay(t *testing.T, s string, f uint64) {
+	t.Helper()
+	checkStd := f == diffStdOpts || f == diffStdDisUnknown || f == diffUseNumberOpts
+	for _, initFn := range rawEnvelopeInitializerModes() {
+		checkRawEnvelopeFiveWayWithInit(t, s, f, checkStd, initFn)
 	}
 }
 
@@ -511,6 +644,17 @@ func diffSeedCorpus() []string {
 		`{"id":1, "raw":{"big":1.5e+9999,"arr":[1,2,3]}, "note":"ok", "val":1.5}`,
 		`{"id":2, "raw":` + deep65 + `, "note":"deep", "val":2.5}`,
 		`{"id":3, "raw":[1], "note":"badval", "val":1e999}`,
+		`{"id":4, "raw":[1e999], "note":"dyn", "val":1e999, "items":[{"value":1e999}], "anys":[1e999]}`,
+		`{"id":5, "items":[], "items":[{"value":1e999}], "anys":[], "anys":[-1e999]}`,
+		`{"val":null, "val":1e999}`,
+		`{"id":6, "unknown_big":1e999, "unknown_nested":{"x":-1e999,"arr":[1e999]}}`,
+		`{"kids":[], "kids":[{"code":1}]}`,
+		`{"f64":1e-999}`,
+		`{"f64":-1e-999}`,
+		`1e999x`,
+		`1e999.2`,
+		`1e+`,
+		`01`,
 		`{"id":1, "raw":invalid, "note":"bad"}`,
 		`{"name":"bad\qescape"}`,
 		`{"name":"ctrl` + "\x01" + `"}`,
@@ -523,6 +667,7 @@ func diffSeedCorpus() []string {
 }
 
 func TestSixWayDifferentialCorpus(t *testing.T) {
+	resetDiffPathStats()
 	// Verify forced fast-path hit assertions on canonical eligible input before sweeping corpus.
 	cleanFlat := `{"id":42,"f32":1.0000000596046448,"name":"hit","ptr_int":7,"nums":[1,2]}`
 	var hitTarget diffFlatStruct
@@ -533,18 +678,27 @@ func TestSixWayDifferentialCorpus(t *testing.T) {
 	if _, ok := tryDecodeFlatStructForced(cleanFlat, 0, diffStdOpts, vpHit, flatSDHit, false, true); !ok {
 		t.Fatal("expected forced Flat fast path to hit on cleanFlat")
 	}
+	// Disjoint Reuse target must also hit Flat fast path.
+	var reuseHit diffFlatStruct
+	flatInitializerModes()[0](&reuseHit)
+	if _, ok := tryDecodeFlatStructForced(cleanFlat, 0, diffStdOpts, unsafe.Pointer(&reuseHit), flatSDHit, false, true); !ok {
+		t.Fatal("expected forced Flat fast path to hit on disjoint reuse target")
+	}
 	cleanSparse := `{"id":42,"name":"hit","skip_blob":"` + strings.Repeat("b", 400) + `"}`
 	if _, okSchema, err := decodeViaSchemaOrFullWithInit[diffFlatStruct](cleanSparse, diffStdOpts, nil); err != nil || !okSchema {
 		t.Fatalf("expected forced Schema fast path to hit on cleanSparse: ok=%v err=%v", okSchema, err)
 	}
 
 	corpus := diffSeedCorpus()
+	// Layer 1: Standard-compatible option presets compared against matching encoding/json.
+	// Layer 2: Sonic extension presets checked for 6-way internal equivalence + dedicated contract assertions below.
 	optSets := []struct {
 		f        uint64
 		checkStd bool
 	}{
 		{diffStdOpts, true},
 		{diffStdDisUnknown, true},
+		{diffUseNumberOpts, true},
 		{diffStrictURCOpts, false},
 		{diffCaseSensOpts, false},
 		{diffFastCopyOpts, false},
@@ -554,8 +708,8 @@ func TestSixWayDifferentialCorpus(t *testing.T) {
 	for idx, s := range corpus {
 		for _, os := range optSets {
 			checkGenericSixWay[diffFlatStruct](t, s, os.f, os.checkStd, true)
-			// diffRichStruct includes ,string which delegates to strconv (Go 1.27 jsonv2 STRING-GONUM-PLUS semantics).
-			checkGenericSixWay[diffRichStruct](t, s, os.f, false, false)
+			// diffRichStruct includes ,string which matches Go 1.27 jsonv2 on diffStdUsesJSONV2.
+			checkGenericSixWay[diffRichStruct](t, s, os.f, os.checkStd && diffStdUsesJSONV2 && !diffStdJSONV2Pre1273, false)
 		}
 		for _, initFn := range inits {
 			checkGenericSixWayWithInit[diffFlatStruct](t, s, diffStdOpts, true, true, initFn)
@@ -578,11 +732,73 @@ func TestSixWayDifferentialCorpus(t *testing.T) {
 			checkAnyFiveWay(t, s, af)
 		}
 		checkRawEnvelopeFiveWay(t, s, diffStdOpts)
-		checkRawEnvelopeFiveWay(t, s, diffNoValValidOpts)
+		checkRawEnvelopeFiveWay(t, s, diffStdDisUnknown)
+		checkRawEnvelopeFiveWay(t, s, diffUseNumberOpts)
+		if json.Valid([]byte(s)) {
+			checkRawEnvelopeFiveWay(t, s, diffNoValValidOpts)
+		}
+	}
+
+	if diffStatsSchemaHit.Load() == 0 || diffStatsSchemaFallback.Load() == 0 ||
+		diffStatsFlatHit.Load() == 0 || diffStatsFlatBailout.Load() == 0 {
+		t.Fatalf("expected all fast-path hit/fallback counters > 0, got schemaHit=%d schemaFallback=%d flatHit=%d flatBailout=%d",
+			diffStatsSchemaHit.Load(), diffStatsSchemaFallback.Load(),
+			diffStatsFlatHit.Load(), diffStatsFlatBailout.Load())
+	}
+	t.Logf("[corpus-stats] execs=%d schemaHit=%d schemaFallback=%d flatHit=%d flatBailout=%d",
+		diffStatsExecs.Load(), diffStatsSchemaHit.Load(), diffStatsSchemaFallback.Load(),
+		diffStatsFlatHit.Load(), diffStatsFlatBailout.Load())
+}
+
+func TestExtensionPresetsExplicitContracts(t *testing.T) {
+	// 1. OptionCaseSensitive: rejects case-folded field names while matching exact field names across all 6 paths.
+	csInput := `{"ID":10,"id":20,"NaMe":"folded"}`
+	checkGenericSixWay[diffFlatStruct](t, csInput, diffCaseSensOpts, false, true)
+	gotCS, err := decodeViaRunsWithInit[diffFlatStruct](csInput, diffCaseSensOpts, nil)
+	if err != nil || gotCS.ID != 20 || gotCS.Name != "" {
+		t.Fatalf("OptionCaseSensitive contract mismatch: err=%v got=%+v", err, gotCS)
+	}
+
+	// 2. UseInt64: decodes integers into int64, floats into float64, and rejects 1e999 into bare any.
+	i64Input := `[42, -9007199254740993, 1.5]`
+	checkAnyFiveWay(t, i64Input, diffUseInt64Opts)
+	gotI64, err := decodeViaRunsWithInit[any](i64Input, diffUseInt64Opts, nil)
+	if err != nil {
+		t.Fatalf("UseInt64 decode failed: %v", err)
+	}
+	arr := gotI64.([]any)
+	if arr[0] != int64(42) || arr[1] != int64(-9007199254740993) || arr[2] != float64(1.5) {
+		t.Fatalf("UseInt64 element types mismatch: %#v", arr)
+	}
+	checkAnyFiveWay(t, `[1e999]`, diffUseInt64Opts)
+	if _, err := decodeViaRunsWithInit[any](`[1e999]`, diffUseInt64Opts, nil); err == nil {
+		t.Fatal("expected UseInt64 to reject [1e999] into bare any")
+	}
+
+	// 3. OptionUseUnicodeErrors (_F_disable_urc): invalid UTF-16 surrogate escape sequences
+	// replace with U+FFFD under diffStdOpts, and error across all 6 paths under diffStrictURCOpts.
+	for _, badEsc := range []string{`{"name":"\uD800"}`, `{"name":"\uDFFF"}`, `{"name":"\uD800\u0041"}`} {
+		checkGenericSixWay[diffFlatStruct](t, badEsc, diffStdOpts, true, true)
+		checkGenericSixWay[diffFlatStruct](t, badEsc, diffStrictURCOpts, false, true)
+		if _, err := decodeViaRunsWithInit[diffFlatStruct](badEsc, diffStrictURCOpts, nil); err == nil {
+			t.Fatalf("expected _F_disable_urc error on %q", badEsc)
+		}
 	}
 }
 
 func FuzzSixWayDifferential(f *testing.F) {
+	resetDiffPathStats()
+	if os.Getenv("SONIC_FUZZ_STATS") == "1" {
+		f.Cleanup(func() {
+			fmt.Fprintf(os.Stderr, "[fuzz-stats pid=%d] execs=%d schemaHit=%d schemaFallback=%d flatHit=%d flatBailout=%d\n",
+				os.Getpid(),
+				diffStatsExecs.Load(),
+				diffStatsSchemaHit.Load(),
+				diffStatsSchemaFallback.Load(),
+				diffStatsFlatHit.Load(),
+				diffStatsFlatBailout.Load())
+		})
+	}
 	for idx, s := range diffSeedCorpus() {
 		f.Add([]byte(s), uint8(idx))
 	}
@@ -595,10 +811,10 @@ func FuzzSixWayDifferential(f *testing.F) {
 		switch mode % 7 {
 		case 0:
 			checkGenericSixWay[diffFlatStruct](t, s, diffStdOpts, true, true)
-			checkGenericSixWay[diffRichStruct](t, s, diffStdOpts, false, false)
+			checkGenericSixWay[diffRichStruct](t, s, diffStdOpts, diffStdUsesJSONV2 && !diffStdJSONV2Pre1273, false)
 		case 1:
 			checkGenericSixWay[diffFlatStruct](t, s, diffStdDisUnknown, true, true)
-			checkGenericSixWay[diffRichStruct](t, s, diffStdDisUnknown, false, false)
+			checkGenericSixWay[diffRichStruct](t, s, diffStdDisUnknown, diffStdUsesJSONV2 && !diffStdJSONV2Pre1273, false)
 		case 2:
 			checkGenericSixWay[diffFlatStruct](t, s, diffCaseSensOpts, false, true)
 			checkGenericSixWay[diffRichStruct](t, s, diffCaseSensOpts, false, false)
@@ -617,7 +833,10 @@ func FuzzSixWayDifferential(f *testing.F) {
 			checkAnyFiveWay(t, s, diffUseInt64Opts)
 		case 5:
 			checkRawEnvelopeFiveWay(t, s, diffStdOpts)
-			checkRawEnvelopeFiveWay(t, s, diffNoValValidOpts)
+			checkRawEnvelopeFiveWay(t, s, diffUseNumberOpts)
+			if json.Valid(data) {
+				checkRawEnvelopeFiveWay(t, s, diffNoValValidOpts)
+			}
 		case 6:
 			initFn := inits[int(mode>>3)%len(inits)]
 			checkGenericSixWayWithInit[diffFlatStruct](t, s, diffStdOpts, true, true, initFn)

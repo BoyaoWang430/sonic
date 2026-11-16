@@ -22,6 +22,7 @@ import (
     `strconv`
     `testing`
 
+    `github.com/bytedance/sonic`
     `github.com/bytedance/sonic/encoder`
     `github.com/stretchr/testify/require`
 )
@@ -69,6 +70,14 @@ func TestIssue115_MarshalMapWithSort(t *testing.T) {
 
     for _, tt := range testCases {
         out, err := encoder.Encode(tt.v, encoder.SortMapKeys)
+        if sonic.APIKind == sonic.UseStdJSON {
+            jout, jerr := json.Marshal(tt.v)
+            require.Equal(t, jerr != nil, err != nil)
+            if jerr == nil {
+                require.Equal(t, string(jout), string(out))
+            }
+            continue
+        }
         require.NoError(t, err)
         require.Equal(t, tt.want, string(out))
     }

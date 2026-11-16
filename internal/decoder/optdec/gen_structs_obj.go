@@ -412,7 +412,7 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 					}
 				}
 			case fieldKindSliceEface:
-				if vtyp == KArray && len(*(*[]interface{})(elem)) == 0 {
+				if vtyp == KArray && cap(*(*[]interface{})(elem)) == 0 {
 					if uint32(vnode.val) == 0 {
 						*(*[]interface{})(elem) = []interface{}{}
 						continue

@@ -76,7 +76,6 @@ func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj 
 	p.keepUseNumber = (opts & (1 << _F_use_number)) != 0
 	p.strictRawNum = true
 	p.deferFloatOverflow = !p.keepUseNumber
-	p.hasDeferredFloatInf = false
 
 	var ecode ErrorCode
 	if proj != nil {

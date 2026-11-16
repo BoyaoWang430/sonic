@@ -147,11 +147,11 @@ func TestIssue379(t *testing.T) {
 		sv := tt.newf()
 		serr := sonic.Unmarshal([]byte(tt.data), sv)
 		require.NoError(t, serr)
-		if stdUsesJSONV2 {
+		if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 			require.Equal(t, tt.wantf(), sv)
 			requireSonicValueSnapshot(t, sonic.ConfigDefault, sv, false, tt.wantJSON)
 		}
-		if !stdUsesJSONV2 {
+		if !stdUsesJSONV2 || sonic.APIKind == sonic.UseStdJSON {
 			jv := tt.newf()
 			jerr := json.Unmarshal([]byte(tt.data), jv)
 			require.Equal(t, jv, sv)
@@ -162,7 +162,7 @@ func TestIssue379(t *testing.T) {
 		serr = sonic.Unmarshal([]byte(tt.data), &sv)
 		require.NoError(t, serr)
 
-		if stdUsesJSONV2 {
+		if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 			require.Equal(t, tt.wantf(), sv)
 			requireSonicValueSnapshot(t, sonic.ConfigDefault, sv, false, tt.wantJSON)
 			continue

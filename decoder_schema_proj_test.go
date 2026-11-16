@@ -207,7 +207,7 @@ func TestBranch1SchemaProjection(t *testing.T) {
 	badPayloads := []string{
 		`{"guard":{"ok":1},"skip_pad":"` + strings.Repeat("a", 300) + `","bad_esc":"\q","id":1}`,
 		`{"guard":{"ok":1},"skip_pad":"` + strings.Repeat("a", 300) + `","bad_num":12.e,"id":1}`,
-		`{"guard":{"ok":1},"skip_pad":"` + strings.Repeat("a", 300) + `","bad_inf":1e309,"id":1}`,
+		`{"guard":{"ok":1},"skip_pad":"` + strings.Repeat("a", 300) + `","bad_exp":1e+,"id":1}`,
 		`{"guard":{"ok":1},"skip_pad":"` + strings.Repeat("a", 300) + `","bad_trunc":{"a":[1,2},"id":1}`,
 		`{"guard":{"ok":1},"skip_pad":"` + strings.Repeat("a", 300) + `","bad_ctrl":"hello` + "\x01" + `world","id":1}`,
 	}
@@ -222,11 +222,11 @@ func TestBranch1SchemaProjection(t *testing.T) {
 		}
 	}
 
-	// Valid 3-digit exponent float (< MaxFloat64) in skipped subtree succeeds via fallback
+	// Valid 3-digit and huge-exponent floats in skipped unknown subtrees succeed, matching encoding/json.
 	var okTarget wideProjectionTarget
-	bigValidExpJSON := `{"event_id":"ok","skip_big":1.79e308,"pad":"` + strings.Repeat("p", 300) + `","timestamp":9,"user_id":8,"latency_ms":0.5,"success":true}`
+	bigValidExpJSON := `{"event_id":"ok","skip_big":1.79e308,"skip_huge":1e999,"pad":"` + strings.Repeat("p", 300) + `","timestamp":9,"user_id":8,"latency_ms":0.5,"success":true}`
 	if err := sonic.ConfigDefault.UnmarshalFromString(bigValidExpJSON, &okTarget); err != nil || okTarget.EventID != "ok" {
-		t.Fatalf("valid 1.79e308 in skipped subtree failed: err=%v target=%+v", err, okTarget)
+		t.Fatalf("valid 1.79e308 / 1e999 in skipped subtree failed: err=%v target=%+v", err, okTarget)
 	}
 
 	// 5. Dense slice adaptive handoff parity

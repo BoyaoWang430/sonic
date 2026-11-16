@@ -209,8 +209,8 @@ func (d *sliceEfaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) 
 		return nil
 	}
 
-	/* if slice is empty, just call `AsSliceEface` */
-	if len(*(*[]interface{})(vp)) == 0 {
+	/* only take the fast path when no backing array elements can be reused */
+	if cap(*(*[]interface{})(vp)) == 0 {
 		return node.AsSliceEface(ctx, vp)
 	}
 

@@ -61,4 +61,4 @@ jobs:
           GORISCV64=rva20u64 GOOS=linux GOARCH=riscv64 go build ./...
       - name: Test sonic_compat fallback backend
         run: |
-          go test -tags=sonic_compat -count=1 . ./ast ./decoder ./encoder ./utf8
+          go test -tags=sonic_compat -count=1 . ./ast ./decoder ./encoder ./utf8 ./generic_test ./issue_test ./compatibility

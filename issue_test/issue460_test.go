@@ -49,7 +49,7 @@ func TestIssue460_UnmarshalMaxFloat32(t *testing.T) {
 		for i, data := range tests {
 			var f1, f2 float32
 			se := sonic.UnmarshalString(data, &f1)
-			if stdUsesJSONV2 {
+			if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 				require.Equal(t, i >= 2, se != nil, data, se)
 				want := float32(math.MaxFloat32)
 				if i >= 2 {
@@ -69,7 +69,7 @@ func TestIssue460_UnmarshalMaxFloat32(t *testing.T) {
 			data = string("-") + data
 			var f1, f2 float32
 			se := sonic.UnmarshalString(data, &f1)
-			if stdUsesJSONV2 {
+			if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 				require.Equal(t, i >= 2, se != nil, data, se)
 				want := -float32(math.MaxFloat32)
 				if i >= 2 {

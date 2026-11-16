@@ -317,7 +317,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					}
 				}
 			case fieldKindSliceEface:
-				if vtyp == KArray && len(*(*[]interface{})(elem)) == 0 {
+				if vtyp == KArray && cap(*(*[]interface{})(elem)) == 0 {
 					if uint32(vnode.val) == 0 {
 						*(*[]interface{})(elem) = []interface{}{}
 						continue
@@ -765,7 +765,7 @@ func (d *structDecoder) fromObjSlow(vp unsafe.Pointer, objPtr *node, p *Parser, 
 					}
 				}
 			case fieldKindSliceEface:
-				if vtyp == KArray && len(*(*[]interface{})(elem)) == 0 {
+				if vtyp == KArray && cap(*(*[]interface{})(elem)) == 0 {
 					if uint32(vnode.val) == 0 {
 						*(*[]interface{})(elem) = []interface{}{}
 						continue

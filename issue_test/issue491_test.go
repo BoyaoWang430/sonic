@@ -49,7 +49,7 @@ func TestIssue491_MarshalUnsupportedType(t *testing.T) {
 		{value: new(MockContext), wantJSON: `{}`},
 	}
 	for _, tt := range tests {
-		if stdUsesJSONV2 {
+		if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 			requireSonicMarshalSnapshot(t, sonic.ConfigDefault, tt.value, tt.wantErr, tt.wantJSON)
 			continue
 		}
@@ -129,7 +129,7 @@ func TestIssue491_UnmarshalUnsupported(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		if stdUsesJSONV2 {
+		if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 			value := requireSonicUnmarshalSnapshot(
 				t,
 				sonic.ConfigDefault,

@@ -17,6 +17,7 @@
 package issue_test
 
 import (
+    `encoding/json`
     . `github.com/bytedance/sonic`
     `testing`
 
@@ -31,8 +32,16 @@ type Issue83Struct struct {
 func TestIssue83_SurrogateHalfInDoubleQuotedString(t *testing.T) {
     var v Issue83Struct
     err := Unmarshal([]byte(`{"x":"\"\\ud800\\u1234\""}`), &v)
+    if stdUsesJSONV2 && APIKind == UseStdJSON {
+        var stdV Issue83Struct
+        stdErr := json.Unmarshal([]byte(`{"x":"\"\\ud800\\u1234\""}`), &stdV)
+        require.Equal(t, stdErr != nil, err != nil)
+        return
+    }
     if err != nil {
-        println(err.(decoder.SyntaxError).Description())
+        if se, ok := err.(decoder.SyntaxError); ok {
+            println(se.Description())
+        }
         require.NoError(t, err)
     }
     require.Equal(t, Issue83Struct{"\ufffd\u1234"}, v)

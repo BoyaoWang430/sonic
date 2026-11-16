@@ -2060,7 +2060,7 @@ valueEntry:
 		}
 		pos += 3
 	default:
-		pos, ok = skipNumberAt(strPtr, c, pos, end, true)
+		pos, ok = skipNumberAt(strPtr, c, pos, end, false)
 		if !ok {
 			return 0, false
 		}

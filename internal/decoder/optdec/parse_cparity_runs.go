@@ -191,7 +191,6 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 					value++
 				}
 				state.num = cParityNum{typ: KRawNumber, val: value}
-				p.hasDeferredFloatInf = true
 				code = SONIC_OK
 			}
 		}

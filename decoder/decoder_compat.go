@@ -23,11 +23,9 @@ import (
 	"io"
 	"reflect"
 	"strings"
-	"unsafe"
 
 	"github.com/bytedance/sonic/internal/compat"
 	"github.com/bytedance/sonic/internal/decoder/consts"
-	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -91,24 +89,14 @@ func (self *Decoder) Reset(s string) {
 	// self.f = 0
 }
 
-// NOTE: api fallback do nothing
+// CheckTrailings reports an error if non-whitespace bytes remain after the
+// last decoded JSON value.
 func (self *Decoder) CheckTrailings() error {
-	pos := self.i
-	buf := self.s
-	/* skip all the trailing spaces */
-	if pos != len(buf) {
-		for pos < len(buf) && (uint64(types.SPACE_MASK)&(uint64(1)<<buf[pos])) != 0 {
-			pos++
-		}
-	}
-
-	/* then it must be at EOF */
-	if pos == len(buf) {
+	pos, hasTrailing := compat.FindTrailingNonSpace(self.s, self.i)
+	if !hasTrailing {
 		return nil
 	}
-
-	/* junk after JSON value */
-	return nil
+	return SyntaxError(*compat.NewTrailingSyntaxError(self.s[pos], pos))
 }
 
 // Decode parses the JSON-encoded data from current position and stores the result
@@ -200,13 +188,23 @@ type SyntaxError json.SyntaxError
 
 // Description
 func (s SyntaxError) Description() string {
-	return (*json.SyntaxError)(unsafe.Pointer(&s)).Error()
+	return (*json.SyntaxError)(&s).Error()
 }
 
 // Error
 func (s SyntaxError) Error() string {
-	return (*json.SyntaxError)(unsafe.Pointer(&s)).Error()
+	return (*json.SyntaxError)(&s).Error()
 }
 
 // MismatchTypeError represents mismatching between json and object
 type MismatchTypeError json.UnmarshalTypeError
+
+// Description returns the error description.
+func (m MismatchTypeError) Description() string {
+	return (*json.UnmarshalTypeError)(&m).Error()
+}
+
+// Error implements the error interface.
+func (m MismatchTypeError) Error() string {
+	return (*json.UnmarshalTypeError)(&m).Error()
+}

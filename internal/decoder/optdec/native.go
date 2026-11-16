@@ -132,24 +132,23 @@ type Parser struct {
 
 	// Per-decode typed pointer slabs for optional *Scalar / *string struct fields.
 	// Placed after ctx so assembly-referenced Parser offsets remain unchanged.
-	hasProjHints        bool
-	strictURC           bool
-	keepUseNumber       bool
-	strictRawNum        bool
-	scalarSlab          []uint64
-	scalarSlabOff       int
-	scalarSlabNext      int
-	strPtrSlab          []string
-	strPtrSlabOff       int
-	strPtrSlabNext      int
-	ptrStructSlabs      [4]ptrStructSlabSlot
-	lazyPadded          bool
-	deferFloatOverflow  bool
-	hasDeferredFloatInf bool
-	strAnyMask          uint32
-	strAnyCache         [32]strAnySlot
-	unescBuf            []byte
-	tailBuf             [320]byte
+	hasProjHints       bool
+	strictURC          bool
+	keepUseNumber      bool
+	strictRawNum       bool
+	scalarSlab         []uint64
+	scalarSlabOff      int
+	scalarSlabNext     int
+	strPtrSlab         []string
+	strPtrSlabOff      int
+	strPtrSlabNext     int
+	ptrStructSlabs     [4]ptrStructSlabSlot
+	lazyPadded         bool
+	deferFloatOverflow bool
+	strAnyMask         uint32
+	strAnyCache        [32]strAnySlot
+	unescBuf           []byte
+	tailBuf            [320]byte
 }
 
 type strAnySlot struct {
@@ -585,7 +584,6 @@ func (p *Parser) reset() {
 	p.strictRawNum = false
 	p.lazyPadded = false
 	p.deferFloatOverflow = false
-	p.hasDeferredFloatInf = false
 	if p.strAnyMask != 0 {
 		p.clearStrAnyCache()
 	}

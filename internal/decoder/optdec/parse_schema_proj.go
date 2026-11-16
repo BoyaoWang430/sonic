@@ -124,7 +124,6 @@ func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
 	if p.unescBuf != nil {
 		p.unescBuf = p.unescBuf[:0]
 	}
-	p.hasDeferredFloatInf = false
 	p.pos = 0
 	p.end = len(p.Json)
 	p._nbk = _nospaceBlock{}
@@ -1235,7 +1234,7 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 	end := sc.end
 	if sc.opts&(1<<_F_use_number) != 0 {
 		numEnd, ok := skipNumberAt(strPtr, first, pos, end, false)
-		if !ok {
+		if !ok || numEnd > end || isNumberContByte(schemaByteAt(strPtr, numEnd, end)) {
 			return false
 		}
 		sc.pos = numEnd
@@ -1326,6 +1325,9 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 	if sc.strPtr == sc.tailPtr {
 		startPtr := unsafe.Add(strPtr, numBody)
 		nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+		if code == SONIC_FLOAT_INF && sc.p.deferFloatOverflow {
+			return sc.emitValidatedOverflowRawNumber(first, valStart)
+		}
 		if code != SONIC_OK {
 			return false
 		}
@@ -1337,6 +1339,9 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 	} else if numBody >= sc.tailStart {
 		startPtr := unsafe.Add(sc.tailPtr, numBody-sc.tailStart)
 		nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+		if code == SONIC_FLOAT_INF && sc.p.deferFloatOverflow {
+			return sc.emitValidatedOverflowRawNumber(first, valStart)
+		}
 		if code != SONIC_OK {
 			return false
 		}
@@ -1353,6 +1358,9 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 		if endCur <= sc.safe64 {
 			startPtr := unsafe.Add(strPtr, numBody)
 			nextCur, nv, code := cParityParseNumberValue(startPtr, sc.num, neg, sc.p.dbuf)
+			if code == SONIC_FLOAT_INF && sc.p.deferFloatOverflow {
+				return sc.emitValidatedOverflowRawNumber(first, valStart)
+			}
 			if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != endCur-numBody {
 				return false
 			}
@@ -1361,7 +1369,7 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 		} else {
 			var ok bool
 			numEnd, ok = skipNumberAt(strPtr, first, sc.pos, end, false)
-			if !ok {
+			if !ok || numEnd > end || isNumberContByte(schemaByteAt(strPtr, numEnd, end)) {
 				return false
 			}
 			p := sc.p
@@ -1374,6 +1382,13 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 			if p.unesc != nil {
 				p.unesc = p.unescBuf
 			}
+			if code == SONIC_FLOAT_INF && sc.p.deferFloatOverflow {
+				sc.pos = numEnd
+				sc.ensureNodes(2)
+				sc.p.nodes[sc.nIdx] = node{typ: KRawNumber | uint64(valStart)<<PosBits, val: uint64(numEnd - valStart)}
+				sc.nIdx++
+				return true
+			}
 			if code != SONIC_OK || int(uintptr(nextCur)-uintptr(startPtr)) != numEnd-numBody {
 				return false
 			}
@@ -1384,6 +1399,18 @@ func (sc *schemaScanner) scanNumberScalar(first byte, valStart int) bool {
 	sc.pos = numEnd
 	sc.ensureNodes(2)
 	sc.p.nodes[sc.nIdx] = node{typ: numVal.typ | uint64(valStart)<<PosBits, val: numVal.val}
+	sc.nIdx++
+	return true
+}
+
+func (sc *schemaScanner) emitValidatedOverflowRawNumber(first byte, valStart int) bool {
+	numEnd, ok := skipNumberAt(sc.strPtr, first, valStart+1, sc.end, false)
+	if !ok || numEnd > sc.end || isNumberContByte(schemaByteAt(sc.strPtr, numEnd, sc.end)) {
+		return false
+	}
+	sc.pos = numEnd
+	sc.ensureNodes(2)
+	sc.p.nodes[sc.nIdx] = node{typ: KRawNumber | uint64(valStart)<<PosBits, val: uint64(numEnd - valStart)}
 	sc.nIdx++
 	return true
 }
@@ -1497,6 +1524,9 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 			}
 		} else if c == '0' {
 			d := schemaByteAt(strPtr, pos, end)
+			if d >= '0' && d <= '9' {
+				return false
+			}
 			if d != '.' && (d|0x20) != 'e' {
 				if pos > end {
 					return false
@@ -1506,8 +1536,8 @@ func (sc *schemaScanner) skipValidateValue(c byte) bool {
 		} else if c != '-' {
 			return false
 		}
-		nextPos, ok := skipNumberAt(strPtr, c, pos, end, sc.opts&(1<<_F_use_number) == 0)
-		if !ok {
+		nextPos, ok := skipNumberAt(strPtr, c, pos, end, false)
+		if !ok || isNumberContByte(schemaByteAt(strPtr, nextPos, end)) {
 			return false
 		}
 		sc.pos = nextPos
@@ -1595,7 +1625,6 @@ func (sc *schemaScanner) skipValidateContainer(c byte) bool {
 	tailStart := sc.tailStart
 	opts := sc.opts
 	validateStr := sc.validateStr
-	checkFloatInf := opts&(1<<_F_use_number) == 0
 	nbkOffPlus64 := sc.nbkOffPlus64
 	nbkBits := sc.nbkBits
 
@@ -1720,7 +1749,7 @@ valueEntry:
 		} else if c != '-' {
 			return false
 		}
-		pos, ok = skipNumberAt(rawPtr, c, pos, end, checkFloatInf)
+		pos, ok = skipNumberAt(rawPtr, c, pos, end, false)
 		if !ok {
 			return false
 		}
@@ -1942,7 +1971,6 @@ func (sc *schemaScanner) skipValidateContainerTail(c byte, frameBits uint64, sp 
 	tailStart := sc.tailStart
 	opts := sc.opts
 	validateStr := sc.validateStr
-	checkFloatInf := opts&(1<<_F_use_number) == 0
 
 	var nc, vc, delim, colon byte
 	var nextPos int
@@ -2085,7 +2113,7 @@ valueEntry:
 		} else if c != '-' {
 			return false
 		}
-		pos, ok = skipNumberAt(strPtr, c, pos, end, checkFloatInf)
+		pos, ok = skipNumberAt(strPtr, c, pos, end, false)
 		if !ok {
 			return false
 		}
@@ -2474,6 +2502,9 @@ func skipNumberAt(strPtr unsafe.Pointer, first byte, pos, end int, checkFloatInf
 
 	intDigits := 0
 	if first == '0' {
+		if d0 := schemaByteAt(strPtr, pos, end); d0 >= '0' && d0 <= '9' {
+			return pos, false
+		}
 		intDigits = 1
 	} else if first >= '1' && first <= '9' {
 		intDigits = 1

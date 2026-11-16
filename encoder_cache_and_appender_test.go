@@ -11,9 +11,11 @@ import (
 	"io"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/bytedance/sonic/encoder"
@@ -21,6 +23,7 @@ import (
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/encoder/prim"
 	encvars "github.com/bytedance/sonic/internal/encoder/vars"
+	encvm "github.com/bytedance/sonic/internal/encoder/vm"
 	"github.com/bytedance/sonic/internal/resolver"
 	"github.com/bytedance/sonic/option"
 )
@@ -982,4 +985,304 @@ func TestReview_ConcurrentPretouchAndFirstRequestInterleaving(t *testing.T) {
 			t.Fatalf("round %d concurrent Pretouch + Marshal/Unmarshal error: %v", round, err)
 		}
 	}
+}
+
+type cooldownGateField struct {
+	gate *cooldownBarrier
+}
+
+type cooldownBarrier struct {
+	active    atomic.Bool
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+}
+
+func (g cooldownGateField) MarshalJSON() ([]byte, error) {
+	if g.gate != nil && g.gate.active.Load() {
+		g.gate.enterOnce.Do(func() {
+			close(g.gate.entered)
+			<-g.gate.release
+		})
+	}
+	return []byte(`"ok"`), nil
+}
+
+type cooldownE2EMediumA struct {
+	ID      int64             `json:"id"`
+	Title   string            `json:"title"`
+	Payload string            `json:"payload"`
+	Gate    cooldownGateField `json:"gate"`
+}
+
+type cooldownE2EMediumB struct {
+	Seq     int64  `json:"seq"`
+	Service string `json:"service"`
+	Body    string `json:"body"`
+	Active  bool   `json:"active"`
+}
+
+type cooldownE2ESmallC struct {
+	Code int    `json:"code"`
+	Name string `json:"name"`
+}
+
+func TestEncoderRootCooldownEndToEndRecovery(t *testing.T) {
+	barrier := &cooldownBarrier{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	medA := &cooldownE2EMediumA{
+		ID:      101,
+		Title:   "cooldown-e2e-medium-a",
+		Payload: strings.Repeat("a", 1024),
+		Gate:    cooldownGateField{gate: barrier},
+	}
+	medB := &cooldownE2EMediumB{
+		Seq:     202,
+		Service: "cooldown-e2e-medium-b",
+		Body:    strings.Repeat("b", 1024),
+		Active:  true,
+	}
+	smallC := &cooldownE2ESmallC{Code: 7, Name: "tiny"}
+
+	wantA, err := json.Marshal(medA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantB, err := json.Marshal(medB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantC, err := json.Marshal(smallC)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify public ConfigDefault.Marshal parity first, then invoke encvm.EncodeRoot
+	// directly so -race builds (where Encode() bypasses EncodeRoot via !raceEnabled)
+	// also genuinely race-test EncodeRoot + tryAcquireDirectSingle + cooldownUntilNano!
+	pubA, err := ConfigDefault.Marshal(medA)
+	if err != nil || !bytes.Equal(pubA, wantA) {
+		t.Fatalf("public Marshal(medA) error=%v", err)
+	}
+	encodeRoot := func(v interface{}) ([]byte, error) {
+		out, ok, err := encvm.EncodeRoot(v, 0)
+		if !ok {
+			return nil, fmt.Errorf("expected EncodeRoot handled=true for %T", v)
+		}
+		return out, err
+	}
+
+	// Prime root sizeHints on uncontended calls so direct single-flight fast path is active.
+	for i := 0; i < 3; i++ {
+		gotA, err := encodeRoot(medA)
+		if err != nil || !bytes.Equal(gotA, wantA) {
+			t.Fatalf("warmup medA error=%v", err)
+		}
+		gotB, err := encodeRoot(medB)
+		if err != nil || !bytes.Equal(gotB, wantB) {
+			t.Fatalf("warmup medB error=%v", err)
+		}
+	}
+
+	vtA := reflect.TypeOf(medA)
+	if until, ok := encvm.RootPlanCooldownUntilForTest(vtA); !ok || until != 0 {
+		t.Fatalf("expected initial medA cooldownUntil == 0, ok=%v until=%d", ok, until)
+	}
+
+	// Hold medA inside encodeRootDirectSingle on goroutine 1 while 16 workers contend on medA, medB, and smallC.
+	barrier.active.Store(true)
+	var holderWG sync.WaitGroup
+	holderWG.Add(1)
+	go func() {
+		defer holderWG.Done()
+		got, err := encodeRoot(medA)
+		if err != nil || !bytes.Equal(got, wantA) {
+			t.Errorf("holder EncodeRoot(medA) mismatch: err=%v", err)
+		}
+	}()
+	<-barrier.entered
+	barrier.active.Store(false)
+
+	var workersWG sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		workersWG.Add(1)
+		go func() {
+			defer workersWG.Done()
+			for i := 0; i < 32; i++ {
+				bA, err := encodeRoot(medA)
+				if err != nil || !bytes.Equal(bA, wantA) {
+					t.Errorf("contended medA mismatch: err=%v", err)
+					return
+				}
+				bB, err := encodeRoot(medB)
+				if err != nil || !bytes.Equal(bB, wantB) {
+					t.Errorf("contended medB mismatch: err=%v", err)
+					return
+				}
+				bC, err := encodeRoot(smallC)
+				if err != nil || !bytes.Equal(bC, wantC) {
+					t.Errorf("contended smallC mismatch: err=%v", err)
+					return
+				}
+			}
+		}()
+	}
+	workersWG.Wait()
+
+	if until, ok := encvm.RootPlanCooldownUntilForTest(vtA); !ok || until <= 0 {
+		close(barrier.release)
+		holderWG.Wait()
+		t.Fatalf("expected contention on medA to set cooldownUntil > 0, got ok=%v until=%d", ok, until)
+	}
+
+	close(barrier.release)
+	holderWG.Wait()
+
+	// Wait past the 2ms lease window while interleaving other types and GC cycles.
+	time.Sleep(4 * time.Millisecond)
+	for i := 0; i < 11; i++ {
+		_, _ = encodeRoot(medB)
+		_, _ = encodeRoot(smallC)
+	}
+
+	// Very first call on medA after the 2ms lease window must clear cooldownUntilNano and recover direct fast path.
+	gotRecovered, err := encodeRoot(medA)
+	if err != nil || !bytes.Equal(gotRecovered, wantA) {
+		t.Fatalf("recovered EncodeRoot(medA) failed: err=%v", err)
+	}
+	if until, ok := encvm.RootPlanCooldownUntilForTest(vtA); !ok || until != 0 {
+		t.Fatalf("expected medA cooldownUntil cleared to 0 on first call after lease window, got ok=%v until=%d", ok, until)
+	}
+}
+
+type benchCooldownTypeA struct {
+	ID      int64    `json:"id"`
+	Service string   `json:"service"`
+	Region  string   `json:"region"`
+	Payload string   `json:"payload"`
+	Tags    []string `json:"tags"`
+	Score   float64  `json:"score"`
+	Active  bool     `json:"active"`
+}
+
+type benchCooldownTypeB struct {
+	Seq     int64   `json:"seq"`
+	Author  string  `json:"author"`
+	Summary string  `json:"summary"`
+	Counts  []int64 `json:"counts"`
+	Lat     float64 `json:"lat"`
+}
+
+type benchCooldownTypeC struct {
+	Code int    `json:"code"`
+	Name string `json:"name"`
+	OK   bool   `json:"ok"`
+}
+
+func BenchmarkEncoderCooldownModes(b *testing.B) {
+	valA := &benchCooldownTypeA{
+		ID:      9001,
+		Service: "edge-gateway",
+		Region:  "ap-southeast-1",
+		Payload: strings.Repeat("x", 900),
+		Tags:    []string{"json", "simd", "native", "arm64", "amd64", "riscv64"},
+		Score:   99.875,
+		Active:  true,
+	}
+	valB := &benchCooldownTypeB{
+		Seq:     4200,
+		Author:  "sonic-bench",
+		Summary: strings.Repeat("y", 700),
+		Counts:  []int64{10, 20, 30, 40, 50, 60, 70, 80},
+		Lat:     1.2345,
+	}
+	valC := &benchCooldownTypeC{Code: 200, Name: "ok-small", OK: true}
+
+	for i := 0; i < 4; i++ {
+		_, _ = ConfigDefault.Marshal(valA)
+		_, _ = ConfigDefault.Marshal(valB)
+		_, _ = ConfigDefault.Marshal(valC)
+	}
+
+	b.Run("SingleTypeSteady", func(b *testing.B) {
+		time.Sleep(3 * time.Millisecond)
+		_, _ = ConfigDefault.Marshal(valA)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			out, err := ConfigDefault.Marshal(valA)
+			if err != nil || len(out) == 0 {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("MultiTypeInterleaved", func(b *testing.B) {
+		time.Sleep(3 * time.Millisecond)
+		_, _ = ConfigDefault.Marshal(valA)
+		_, _ = ConfigDefault.Marshal(valB)
+		_, _ = ConfigDefault.Marshal(valC)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			switch i % 3 {
+			case 0:
+				out, err := ConfigDefault.Marshal(valA)
+				if err != nil || len(out) == 0 {
+					b.Fatal(err)
+				}
+			case 1:
+				out, err := ConfigDefault.Marshal(valB)
+				if err != nil || len(out) == 0 {
+					b.Fatal(err)
+				}
+			default:
+				out, err := ConfigDefault.Marshal(valC)
+				if err != nil || len(out) == 0 {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+
+	b.Run("PostContentionRecovered", func(b *testing.B) {
+		var wg sync.WaitGroup
+		for g := 0; g < 16; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 256; j++ {
+					_, _ = ConfigDefault.Marshal(valA)
+				}
+			}()
+		}
+		wg.Wait()
+		time.Sleep(4 * time.Millisecond)
+		// First call recovers direct path; measure recovered steady-state throughput.
+		_, _ = ConfigDefault.Marshal(valA)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			out, err := ConfigDefault.Marshal(valA)
+			if err != nil || len(out) == 0 {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("Parallel16Contention", func(b *testing.B) {
+		b.SetParallelism(16)
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				out, err := ConfigDefault.Marshal(valA)
+				if err != nil || len(out) == 0 {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
 }

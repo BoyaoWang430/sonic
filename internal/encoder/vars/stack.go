@@ -79,9 +79,8 @@ type Stack struct {
 }
 
 type EncExecCtx struct {
-	Buf  []byte
-	Stk  Stack
-	Tick uint32
+	Buf []byte
+	Stk Stack
 }
 
 var (

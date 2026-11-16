@@ -23,7 +23,9 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 
+	"github.com/bytedance/sonic/internal/compat"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -45,6 +47,9 @@ func (cfg frozenConfig) marshalOptions(val interface{}, prefix, indent string) (
 	enc.SetEscapeHTML(cfg.EscapeHTML)
 	enc.SetIndent(prefix, indent)
 	err := enc.Encode(val)
+	if err != nil {
+		return nil, err
+	}
 	out := w.Bytes()
 
 	// json.Encoder always appends '\n' after encoding,
@@ -52,7 +57,7 @@ func (cfg frozenConfig) marshalOptions(val interface{}, prefix, indent string) (
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
-	return out, err
+	return out, nil
 }
 
 // Marshal is implemented by sonic
@@ -79,7 +84,7 @@ func (cfg frozenConfig) MarshalIndent(val interface{}, prefix, indent string) ([
 
 // UnmarshalFromString is implemented by sonic
 func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
-	r := bytes.NewBufferString(buf)
+	r := strings.NewReader(buf)
 	dec := json.NewDecoder(r)
 	if cfg.UseNumber {
 		dec.UseNumber()
@@ -92,17 +97,32 @@ func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
 		return err
 	}
 
-	// check the trailing chars
-	offset := dec.InputOffset()
-	if t, err := dec.Token(); !(t == nil && err == io.EOF) {
-		return &json.SyntaxError{Offset: offset}
+	// check the trailing chars without copying remaining buffer
+	if pos, hasTrailing := compat.FindTrailingNonSpace(buf, int(dec.InputOffset())); hasTrailing {
+		return compat.NewTrailingSyntaxError(buf[pos], pos)
 	}
 	return nil
 }
 
 // Unmarshal is implemented by sonic
 func (cfg frozenConfig) Unmarshal(buf []byte, val interface{}) error {
-	return cfg.UnmarshalFromString(string(buf), val)
+	r := bytes.NewReader(buf)
+	dec := json.NewDecoder(r)
+	if cfg.UseNumber {
+		dec.UseNumber()
+	}
+	if cfg.DisallowUnknownFields {
+		dec.DisallowUnknownFields()
+	}
+	err := dec.Decode(val)
+	if err != nil {
+		return err
+	}
+
+	if pos, hasTrailing := compat.FindTrailingNonSpaceBytes(buf, int(dec.InputOffset())); hasTrailing {
+		return compat.NewTrailingSyntaxError(buf[pos], pos)
+	}
+	return nil
 }
 
 // NewEncoder is implemented by sonic

@@ -42,7 +42,14 @@ func TestIssue923_MapPointerKeyTextUnmarshalerNoSegfault(t *testing.T) {
 	jsonText := "{\"alpha\":[" + strings.Join(vals, ",") + "]}"
 
 	var m map[*singleK923][256]byte
-	if err := sonic.ConfigStd.Unmarshal([]byte(jsonText), &m); err != nil {
+	err := sonic.ConfigStd.Unmarshal([]byte(jsonText), &m)
+	if sonic.APIKind == sonic.UseStdJSON && !stdUsesJSONV2 {
+		if err == nil {
+			t.Fatal("expected legacy encoding/json fallback to reject map[*TextUnmarshaler] key")
+		}
+		return
+	}
+	if err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 	if len(m) != 1 {
