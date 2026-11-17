@@ -310,6 +310,14 @@ func (self *Compiler) compileOps(p *ir.Program, sp int, vt reflect.Type) {
 	default:
 		self.compileUnsupportedType(p, vt)
 	}
+	if vt.Kind() != reflect.Struct {
+		self.lastPureSpecs = nil
+		self.lastPureOK = false
+	}
+	if vt.Kind() != reflect.Ptr {
+		self.lastPtrSpecs = nil
+		self.lastPtrOK = false
+	}
 }
 
 func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op ir.Op, nilType reflect.Type, fn func(*ir.Program, int, reflect.Type)) {
@@ -338,9 +346,15 @@ func (self *Compiler) compilePtrBody(p *ir.Program, sp int, vt reflect.Type) {
 	bodyStart := p.PC()
 	self.compileOne(p, sp+1, vt, true)
 	bodyEnd := p.PC()
-	innerPureSpecs, innerPureOK := self.lastPureSpecs, self.lastPureOK
+	var innerPureSpecs []ir.StructFieldSpec
+	var innerPureOK bool
+	if vt.Kind() == reflect.Struct {
+		innerPureSpecs, innerPureOK = self.lastPureSpecs, self.lastPureOK
+	}
 	p.Add(ir.OP_drop)
 
+	self.lastPureSpecs = nil
+	self.lastPureOK = false
 	self.lastPtrSpecs = innerPureSpecs
 	self.lastPtrOK = innerPureOK
 	if sp == 0 && !self.pv {
