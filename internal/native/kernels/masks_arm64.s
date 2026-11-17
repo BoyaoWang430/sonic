@@ -1,4 +1,4 @@
-//go:build !sonic_compat && arm64 && go1.20 && !go1.28
+//go:build !sonic_compat && !sonic_scalar && arm64 && go1.20 && !go1.28
 
 #include "textflag.h"
 // Shared NEON whitespace classifier and exact bit packing. These macros only

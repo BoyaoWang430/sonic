@@ -1,3 +1,5 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
 // Copyright 2026 ByteDance Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,9 +27,9 @@ import "github.com/bytedance/sonic/internal/native/types"
 //     (including nil data pointers when size == 0) without dereferencing memory.
 //  3. In-Place & Overlap:
 //     - Unquote / UnquoteBuffer / UnquoteStatus and ParseString / DecodeQuoted
-//       support exact in-place aliasing (dst == src) and disjoint buffers;
-//       arbitrary partial overlap (dst != src with overlapping byte ranges) is
-//       unsupported.
+//     support exact in-place aliasing (dst == src) and disjoint buffers;
+//     arbitrary partial overlap (dst != src with overlapping byte ranges) is
+//     unsupported.
 //     - Quote* and HTMLEscape* require disjoint src and dst buffers.
 //  4. Neutral Status Protocol: Kernels report neutral KernelStatus codes and
 //     local byte offsets; outer Go scanners/decoders translate them into public

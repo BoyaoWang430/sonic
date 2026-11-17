@@ -1,4 +1,4 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package optdec
 
@@ -15,10 +15,10 @@ import (
 // without owning separate per-backend grammars for numbers, escapes, or containers:
 //   - subtreeOutEmit:         emit full node(s) onto Document tape.
 //   - subtreeOutRawSpan:      strictly validate subtree and emit one KRaw span
-//                             (used by json.RawMessage / Unmarshaler; never relaxed).
+//     (used by json.RawMessage / Unmarshaler; never relaxed).
 //   - subtreeOutValidateOnly: strictly validate subtree without emitting nodes.
 //   - subtreeOutRelaxedSkip:  relaxed boundary skip ONLY for discarded unknown
-//                             fields when OptionNoValidateJSONSkip is explicitly set.
+//     fields when OptionNoValidateJSONSkip is explicitly set.
 type subtreeOutputMode uint8
 
 const (

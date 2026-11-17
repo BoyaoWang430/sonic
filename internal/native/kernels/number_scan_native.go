@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -18,6 +19,10 @@ func ScanNumber(src string, start int) (end int, err types.ParsingError) {
 		return start, types.ERR_INVALID_CHAR
 	}
 	tail := src[start:]
+	if cpu.UseScalar {
+		end, err = numberScanScalar(rt.StringData(tail), len(tail), 0)
+		return start + end, err
+	}
 	end, err = numberScan(rt.StringData(tail), len(tail), 0)
 	readN := end
 	if readN < len(tail) {
@@ -37,6 +42,10 @@ func ScanNumberStrict(src string, start int) (end int, err types.ParsingError) {
 		return start, types.ERR_INVALID_CHAR
 	}
 	tail := src[start:]
+	if cpu.UseScalar {
+		end, err = numberScanScalar(rt.StringData(tail), len(tail), 1)
+		return start + end, err
+	}
 	end, err = numberScan(rt.StringData(tail), len(tail), 1)
 	readN := end
 	if readN < len(tail) {
@@ -51,6 +60,10 @@ func ScanNumberStrict(src string, start int) (end int, err types.ParsingError) {
 // start must be in [0, len(src)]. No readable padding is needed.
 func SkipNumber(src string, start int) (end int) {
 	tail := src[start:]
+	if cpu.UseScalar {
+		end, _ = numberScanScalar(rt.StringData(tail), len(tail), 2)
+		return start + end
+	}
 	end, _ = numberScan(rt.StringData(tail), len(tail), 2)
 	readN := end
 	if readN < len(tail) {

@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
@@ -14,8 +15,8 @@ func NonSpaceMask(src string) (mask uint64, width int) {
 	if width > 64 {
 		width = 64
 	}
+	if cpu.UseScalar {
+		return nonSpaceMaskScalar(rt.StringData(src), width), width
+	}
 	return nonSpaceMask(rt.StringData(src), width), width
 }
-
-//go:noescape
-func nonSpaceMask(src *byte, size int) (mask uint64)

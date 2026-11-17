@@ -1,8 +1,12 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package optdec
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/bytedance/sonic/internal/cpu"
+)
 
 const (
 	paddedSentinel   byte = 'x'
@@ -74,14 +78,23 @@ func (w paddedInputWindow) blockPtr(pos int) unsafe.Pointer {
 }
 
 func (w paddedInputWindow) nonspace64(pos int) uint64 {
+	if cpu.UseScalar {
+		return cParityNonspace64Scalar(w.blockPtr(pos))
+	}
 	return cParityNonspace64(w.blockPtr(pos))
 }
 
 func (w paddedInputWindow) stringMasks32(pos int, opts uint64) (bs, quote, control uint32) {
+	if cpu.UseScalar {
+		return cParityStringMasks32Scalar(w.blockPtr(pos), opts)
+	}
 	return cParityStringMasks32(w.blockPtr(pos), opts)
 }
 
 func (w paddedInputWindow) numberMasks16(pos int) (decimal, exponent, sign, valid uint32) {
+	if cpu.UseScalar {
+		return cParityNumberMasks16Scalar(w.blockPtr(pos))
+	}
 	return cParityNumberMasks16(w.blockPtr(pos))
 }
 

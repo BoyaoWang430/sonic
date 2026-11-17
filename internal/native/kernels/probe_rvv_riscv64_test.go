@@ -1,4 +1,4 @@
-//go:build !sonic_compat && riscv64 && go1.26 && !go1.28 && riscv64.rva23u64
+//go:build !sonic_compat && !sonic_scalar && riscv64 && go1.26 && !go1.28 && riscv64.rva23u64
 
 package kernels
 

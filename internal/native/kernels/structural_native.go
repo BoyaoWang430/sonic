@@ -1,4 +1,4 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
@@ -7,6 +7,7 @@ import (
 	"math/bits"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -31,6 +32,10 @@ func SkipContainer(src string, start int) (end int, err types.ParsingError) {
 	// Empty containers need no classification or quote/depth state.
 	if len(tail) != 0 && tail[0] == close {
 		return base + 1, 0
+	}
+	if cpu.UseScalar {
+		end, err = skipContainerScalar(rt.StringData(tail), len(tail), uint64(open))
+		return base + end, err
 	}
 	// Branchless SWAR fast path for short quote-free, flat containers
 	// (e.g. numeric/boolean arrays like [-2147483648,2147483647], [-0.1,0.1], [true,true,true]).

@@ -1,8 +1,11 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
-import "github.com/bytedance/sonic/internal/rt"
+import (
+	"github.com/bytedance/sonic/internal/cpu"
+	"github.com/bytedance/sonic/internal/rt"
+)
 
 // Quote escapes src into dst without surrounding quotes. Only bit zero of flags
 // (types.F_DOUBLE_UNQUOTE) affects the output. The escape spelling matches the
@@ -22,6 +25,9 @@ func Quote(src string, dst []byte, flags uint64) (consumed, written int) {
 func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int) {
 	if size <= 0 {
 		return 0, 0
+	}
+	if cpu.UseScalar {
+		return quoteScalar(src, size, dst, capacity, flags)
 	}
 	raceRead(src, size)
 	consumed, written = quote(src, size, dst, capacity, flags)
@@ -46,14 +52,11 @@ func QuoteHTMLBuffer(src *byte, size int, dst *byte, capacity int) (consumed, wr
 	if size <= 0 {
 		return 0, 0
 	}
+	if cpu.UseScalar {
+		return quoteHTMLScalar(src, size, dst, capacity)
+	}
 	raceRead(src, size)
 	consumed, written = quoteHTML(src, size, dst, capacity)
 	raceWrite(dst, written)
 	return consumed, written
 }
-
-//go:noescape
-func quote(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int)
-
-//go:noescape
-func quoteHTML(src *byte, size int, dst *byte, capacity int) (consumed, written int)

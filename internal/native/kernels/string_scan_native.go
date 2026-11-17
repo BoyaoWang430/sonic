@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -20,17 +21,20 @@ import (
 func ScanString(src string, start int, validate bool) (end, escape, errorPos int, err types.ParsingError) {
 	base := start + 1
 	tail := src[base:]
-	// Call the selected entry directly, as in SkipString.
-	if validate {
+	if cpu.UseScalar {
+		end, escape, errorPos, err = scanStringScalar(rt.StringData(tail), len(tail), validate)
+	} else if validate {
 		end, escape, errorPos, err = scanStringStrict(rt.StringData(tail), len(tail))
 	} else {
 		end, escape, errorPos, err = scanStringRelaxed(rt.StringData(tail), len(tail))
 	}
-	readN := end
-	if err != 0 && readN < len(tail) {
-		readN++
+	if !cpu.UseScalar {
+		readN := end
+		if err != 0 && readN < len(tail) {
+			readN++
+		}
+		raceRead(rt.StringData(tail), readN)
 	}
-	raceRead(rt.StringData(tail), readN)
 	end += base
 	if escape >= 0 {
 		escape += base

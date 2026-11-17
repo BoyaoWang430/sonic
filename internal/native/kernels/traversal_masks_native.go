@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
@@ -20,9 +21,10 @@ func TraversalMasks(src string, start int, validate bool) (events, nonspace uint
 	if validate {
 		strict = 1
 	}
+	if cpu.UseScalar {
+		events, nonspace = traversalMasksScalar(rt.StringData(tail), width, strict)
+		return
+	}
 	events, nonspace = traversalMasks(rt.StringData(tail), width, strict)
 	return
 }
-
-//go:noescape
-func traversalMasks(src *byte, size int, validate uint64) (events, nonspace uint64)

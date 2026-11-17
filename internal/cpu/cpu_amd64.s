@@ -1,4 +1,4 @@
-//go:build amd64
+//go:build amd64 && !sonic_scalar && !go1.28
 
 #include "textflag.h"
 

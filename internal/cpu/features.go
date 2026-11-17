@@ -28,13 +28,15 @@ var (
 	HasPOPCNT bool
 	HasCLMUL  bool
 
-	// UseAVX2 and UseSSSE3 record the resolved SIMD dispatch tier selected once
-	// at process init (after applying SONIC_MODE overrides). Direct //go:noescape
-	// assembly entrypoints read package-local mirrors of these booleans rather
-	// than indirect Go func pointers so pointer arguments remain non-escaping
-	// and avoid ABI0 closure trampolines.
-	UseAVX2  bool
-	UseSSSE3 bool
+	// UseAVX2, UseSSSE3, and UseScalar record the resolved kernel dispatch tier
+	// selected once at process init (after applying SONIC_MODE overrides or
+	// pure-Go scalar build constraints). Direct //go:noescape assembly entrypoints
+	// read package-local mirrors of these booleans rather than indirect Go func
+	// pointers so pointer arguments remain non-escaping and avoid ABI0 closure
+	// trampolines.
+	UseAVX2   bool
+	UseSSSE3  bool
+	UseScalar bool
 )
 
 func init() {
@@ -47,8 +49,17 @@ func init() {
 	case "nossse3":
 		HasAVX2 = false
 		HasSSSE3 = false
+	case "scalar":
+		UseScalar = true
+		HasAVX2 = false
+		HasSSSE3 = false
 	default:
-		panic(fmt.Sprintf("invalid mode: '%s', should be one of 'auto', 'noavx', 'noavx2', 'nossse3'", v))
+		panic(fmt.Sprintf("invalid mode: '%s', should be one of 'auto', 'noavx', 'noavx2', 'nossse3', 'scalar'", v))
+	}
+	if forceScalarBuild {
+		UseScalar = true
+		HasAVX2 = false
+		HasSSSE3 = false
 	}
 	UseAVX2 = HasAVX2 && HasPOPCNT && HasCLMUL
 	UseSSSE3 = HasSSSE3

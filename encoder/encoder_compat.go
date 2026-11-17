@@ -1,4 +1,4 @@
-//go:build sonic_compat || (((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64))
+//go:build sonic_compat || (!(amd64 && go1.20) && !(arm64 && go1.20) && !(riscv64 && go1.26 && riscv64.rva22u64) && !(sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -243,17 +243,12 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 	return out, nil
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency.
-//
-// Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
-// a compile option to set the depth of recursive compile for the nested struct type.
+// Pretouch is a no-op on the encoding/json compatibility adapter backend.
 func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-// in order to reduce the first-hit latency.
+// PretouchMany is a no-op on the encoding/json compatibility adapter backend.
 func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }

@@ -1,8 +1,15 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && !sonic_scalar && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
 
 package optdec
 
 import "unsafe"
+
+// cParityParseRunsAsm returns a scan status/done code or a hierarchy/cold event.
+// It publishes input/tape cursor offsets to ScanKernelState before every return.
+//
+//go:noescape
+//go:nocheckptr
+func cParityParseRunsAsm(kern *ScanKernelState, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
 
 // cParityNonspace64 reads exactly 64 padded bytes without a logical-length check.
 //

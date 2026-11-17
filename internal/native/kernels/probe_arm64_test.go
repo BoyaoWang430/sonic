@@ -1,4 +1,4 @@
-//go:build !sonic_compat && arm64 && go1.20 && !go1.28
+//go:build !sonic_compat && !sonic_scalar && arm64 && go1.20 && !go1.28
 
 package kernels
 

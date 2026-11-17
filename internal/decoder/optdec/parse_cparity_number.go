@@ -1,4 +1,4 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 // Copyright 2021 ByteDance Inc.
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +17,8 @@ import (
 	"math"
 	"math/bits"
 	"unsafe"
+
+	"github.com/bytedance/sonic/internal/cpu"
 )
 
 // These routines implement Sonic's padded-input number parser contract.
@@ -327,7 +329,12 @@ func cParityDoSkipNumber(start unsafe.Pointer, remain int) int {
 		return 1
 	}
 	for remain >= 16 {
-		md, me, ms, valid := cParityNumberMasks16(unsafe.Add(start, pos))
+		var md, me, ms, valid uint32
+		if cpu.UseScalar {
+			md, me, ms, valid = cParityNumberMasks16Scalar(unsafe.Add(start, pos))
+		} else {
+			md, me, ms, valid = cParityNumberMasks16(unsafe.Add(start, pos))
+		}
 		width := bits.TrailingZeros32(^valid | 1<<16)
 		if width != 16 {
 			keep := uint32(1)<<uint(width) - 1

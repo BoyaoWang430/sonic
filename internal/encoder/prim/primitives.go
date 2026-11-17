@@ -70,9 +70,7 @@ func EncodeNil(rb *[]byte) error {
 //     source bytes are never overwritten before reading.
 //   - If AppendSonicJSON returns an error or invalid JSON, the parent buffer is
 //     restored to `buf[:origLen]`.
-type JSONAppender interface {
-	AppendSonicJSON(dst []byte) ([]byte, error)
-}
+type JSONAppender = alg.JSONAppender
 
 var JSONAppenderType = reflect.TypeOf((*JSONAppender)(nil)).Elem()
 

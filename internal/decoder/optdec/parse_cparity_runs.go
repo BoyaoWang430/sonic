@@ -1,8 +1,12 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package optdec
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/bytedance/sonic/internal/cpu"
+)
 
 // Assembly owns a flat run of keys/scalars and returns at hierarchy yields
 // or cold scalar paths. Go completes cold numbers/literals and Unicode escapes;
@@ -47,13 +51,6 @@ const (
 	cParityRunsNodeCapFull
 )
 
-// cParityParseRunsAsm returns a scan status/done code or a hierarchy/cold event.
-// It publishes input/tape cursor offsets to ScanKernelState before every return.
-//
-//go:noescape
-//go:nocheckptr
-func cParityParseRunsAsm(kern *ScanKernelState, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
-
 func cParityParseWithPadding(p *Parser) ErrorCode {
 	var state cParityRunsState
 	p.scanFlags = p.options & (scanKernelFlagRawNumber | scanKernelFlagRejectControl)
@@ -92,7 +89,12 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 	nodesBase := unsafe.SliceData(p.nodes)
 	var code ErrorCode
 	for {
-		event := cParityParseRunsAsm(&p.ScanKernelState, &state, rawBase, nodesBase)
+		var event int
+		if cpu.UseScalar {
+			event = cParityParseRunsScalar(&p.ScanKernelState, &state, raw, p.nodes)
+		} else {
+			event = cParityParseRunsAsm(&p.ScanKernelState, &state, rawBase, nodesBase)
+		}
 		if event <= SONIC_STACK_OVERFLOW {
 			code = ErrorCode(event)
 			break

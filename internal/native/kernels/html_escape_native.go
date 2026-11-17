@@ -1,8 +1,11 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
-import "github.com/bytedance/sonic/internal/rt"
+import (
+	"github.com/bytedance/sonic/internal/cpu"
+	"github.com/bytedance/sonic/internal/rt"
+)
 
 // HTMLEscape copies src into dst, escaping <, >, &, U+2028, and U+2029 using
 // lowercase Unicode escapes. Other bytes, including invalid UTF-8, are preserved.
@@ -22,11 +25,11 @@ func HTMLEscapeBuffer(src *byte, size int, dst *byte, capacity int) (consumed, w
 	if size <= 0 {
 		return 0, 0
 	}
+	if cpu.UseScalar {
+		return htmlEscapeScalar(src, size, dst, capacity)
+	}
 	raceRead(src, size)
 	consumed, written = htmlEscape(src, size, dst, capacity)
 	raceWrite(dst, written)
 	return consumed, written
 }
-
-//go:noescape
-func htmlEscape(src *byte, size int, dst *byte, capacity int) (consumed, written int)

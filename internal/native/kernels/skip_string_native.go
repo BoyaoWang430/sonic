@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -22,12 +23,20 @@ func SkipString(content string, validate bool) (end int, err types.ParsingError)
 
 // SkipStringRelaxed is SkipString without control or escape validation.
 func SkipStringRelaxed(content string) (end int, err types.ParsingError) {
+	if cpu.UseScalar {
+		end, _, _, err = scanStringRelaxedScalar(rt.StringData(content), len(content))
+		return
+	}
 	end, _, _, err = scanStringRelaxed(rt.StringData(content), len(content))
 	return
 }
 
 // SkipStringStrict is SkipString with JSON control and escape validation.
 func SkipStringStrict(content string) (end int, err types.ParsingError) {
+	if cpu.UseScalar {
+		end, _, _, err = scanStringStrictScalar(rt.StringData(content), len(content))
+		return
+	}
 	end, _, _, err = scanStringStrict(rt.StringData(content), len(content))
 	return
 }

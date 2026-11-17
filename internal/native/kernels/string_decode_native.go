@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
@@ -57,6 +58,12 @@ func DecodeQuoted(tail *byte, size int, mode uint64) (end, written, escaped, err
 	if size <= 0 {
 		return 0, 0, 0, 0, StatusEOF
 	}
+	if cpu.UseScalar {
+		var code int
+		end, written, escaped, errorPos, code = stringDecodeScalar(tail, size, tail, mode)
+		status = decodeQuotedRawCodeToStatus(code)
+		return
+	}
 	var code int
 	end, written, escaped, errorPos, code = stringDecode(tail, size, tail, mode)
 	status = decodeQuotedRawCodeToStatus(code)
@@ -70,11 +77,3 @@ func DecodeQuoted(tail *byte, size int, mode uint64) (end, written, escaped, err
 	}
 	return
 }
-
-// stringDecode implements the whole operation in one ABI0 assembly call.
-// mode bits: 0 double-unquote, 1 Unicode replacement, 2 quoted parser input,
-// 3 reject raw controls. Parser input starts after the opening quote.
-// All offsets returned by this private entry are relative to src.
-//
-//go:noescape
-func stringDecode(src *byte, size int, dst *byte, mode uint64) (end, written, escaped, errorPos, code int)

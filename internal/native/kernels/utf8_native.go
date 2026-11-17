@@ -1,8 +1,9 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
@@ -12,6 +13,10 @@ import (
 func ValidUTF8(src string) bool {
 	if len(src) == 0 {
 		return true
+	}
+	if cpu.UseScalar {
+		_, _, full := utf8ScanScalar(rt.StringData(src), len(src), 0, nil, 0)
+		return !full
 	}
 	raceRead(rt.StringData(src), len(src))
 	_, _, full := utf8Scan(rt.StringData(src), len(src), 0, nil, 0)
@@ -29,6 +34,9 @@ func ValidUTF8(src string) bool {
 // Neither input nor output requires padding.
 func InvalidUTF8(src string, start int, positions []int) (next, count int, full bool) {
 	tail := src[start:]
+	if cpu.UseScalar {
+		return utf8ScanScalar(rt.StringData(tail), len(tail), start, rt.SliceData(positions), len(positions))
+	}
 	next, count, full = utf8Scan(rt.StringData(tail), len(tail), start, rt.SliceData(positions), len(positions))
 	scanned := next - start
 	if full && scanned < len(tail) {
@@ -37,9 +45,3 @@ func InvalidUTF8(src string, start int, positions []int) (next, count int, full 
 	raceRead(rt.StringData(tail), scanned)
 	return next, count, full
 }
-
-// utf8Scan processes src[:size], adding base to returned input offsets. It writes
-// at most limit offsets to positions; a zero limit never dereferences positions.
-//
-//go:noescape
-func utf8Scan(src *byte, size, base int, positions *int, limit int) (next, count int, full bool)

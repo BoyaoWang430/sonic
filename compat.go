@@ -1,4 +1,4 @@
-//go:build sonic_compat || (((!amd64 && !arm64) || go1.28 || !go1.20 || (arm64 && !go1.20)) && (!riscv64 || !go1.26 || go1.28 || !riscv64.rva22u64))
+//go:build sonic_compat || (!(amd64 && go1.20) && !(arm64 && go1.20) && !(riscv64 && go1.26 && riscv64.rva22u64) && !(sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -29,6 +29,9 @@ import (
 	"github.com/bytedance/sonic/option"
 )
 
+// apiKind marks the explicit encoding/json adapter backend (-tags=sonic_compat
+// or uncertified 32-bit / big-endian / rva20u64 fallback targets). See
+// COMPATIBILITY.md Section 4 for capability boundaries vs UseSonicJSON.
 const apiKind = UseStdJSON
 
 type frozenConfig struct {
@@ -151,17 +154,12 @@ func (cfg frozenConfig) Valid(data []byte) bool {
 	return json.Valid(data)
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency at **amd64** Arch.
-// Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
-// a compile option to set the depth of recursive compile for the nested struct type.
-// * This is the none implement for !amd64.
-// It will be useful for someone who develop with !amd64 arch,like Mac M1.
+// Pretouch is a no-op on the encoding/json compatibility adapter backend.
 func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly.
+// PretouchMany is a no-op on the encoding/json compatibility adapter backend.
 func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }

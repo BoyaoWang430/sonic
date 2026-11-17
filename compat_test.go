@@ -295,15 +295,17 @@ func TestAPIKindPlatformAndBuildTagContract(t *testing.T) {
 	want := UseStdJSON
 	if !testSonicCompatBuildTag {
 		minor, ok := parseGoMinorVersion(runtime.Version())
-		if ok && minor >= 20 && minor < 28 {
+		if ok && minor >= 20 {
 			switch runtime.GOARCH {
 			case "amd64", "arm64":
 				want = UseSonicJSON
 			case "riscv64":
-				if minor >= 26 {
+				if testSonicScalarBuildTag {
+					want = UseSonicJSON
+				} else if minor >= 26 {
 					if bi, ok := debug.ReadBuildInfo(); ok {
 						for _, s := range bi.Settings {
-							if s.Key == "GORISCV64" && (s.Value == "rva22u64" || s.Value == "rva23u64") {
+							if s.Key == "GORISCV64" && (s.Value == "rva22u64" || s.Value == "rva23u64" || strings.HasPrefix(s.Value, "rva22u64,") || strings.HasPrefix(s.Value, "rva23u64,")) {
 								want = UseSonicJSON
 								break
 							}
@@ -313,8 +315,8 @@ func TestAPIKindPlatformAndBuildTagContract(t *testing.T) {
 			}
 		}
 	}
-	require.Equal(t, want, APIKind, "unexpected sonic.APIKind for GOARCH=%s version=%s compatTag=%v",
-		runtime.GOARCH, runtime.Version(), testSonicCompatBuildTag)
+	require.Equal(t, want, APIKind, "unexpected sonic.APIKind for GOARCH=%s version=%s compatTag=%v scalarTag=%v",
+		runtime.GOARCH, runtime.Version(), testSonicCompatBuildTag, testSonicScalarBuildTag)
 }
 
 func TestCheckTrailingsAndBoundedSyntaxError(t *testing.T) {
@@ -455,4 +457,57 @@ func TestOptionBitsDistinctAndIndependentAcrossBackends(t *testing.T) {
 	var out target
 	require.NoError(t, dec.Decode(&out))
 	require.Equal(t, 7, out.A)
+}
+
+type portableAppenderVal struct {
+	Tag string
+	N   int
+}
+
+var (
+	_ encoder.JSONAppender = portableAppenderVal{}
+	_ json.Marshaler       = portableAppenderVal{}
+)
+
+func (p portableAppenderVal) AppendSonicJSON(dst []byte) ([]byte, error) {
+	dst = append(dst, `{"tag":`...)
+	dst = strconv.AppendQuote(dst, p.Tag)
+	dst = append(dst, `,"n":`...)
+	dst = strconv.AppendInt(dst, int64(p.N), 10)
+	dst = append(dst, '}')
+	return dst, nil
+}
+
+func (p portableAppenderVal) MarshalJSON() ([]byte, error) {
+	return p.AppendSonicJSON(nil)
+}
+
+func TestPortableJSONAppenderAcrossBackends(t *testing.T) {
+	type container struct {
+		Direct portableAppenderVal            `json:"direct"`
+		Ptr    *portableAppenderVal           `json:"ptr"`
+		Slice  []portableAppenderVal          `json:"slice"`
+		Map    map[string]portableAppenderVal `json:"map"`
+		Ifc    interface{}                    `json:"ifc"`
+	}
+	root := portableAppenderVal{Tag: "root", N: 1}
+	gotRoot, err := ConfigStd.Marshal(root)
+	require.NoError(t, err)
+	wantRoot, err := json.Marshal(root)
+	require.NoError(t, err)
+	require.Equal(t, string(wantRoot), string(gotRoot))
+
+	ptrVal := portableAppenderVal{Tag: "ptr", N: 3}
+	in := container{
+		Direct: portableAppenderVal{Tag: "field", N: 2},
+		Ptr:    &ptrVal,
+		Slice:  []portableAppenderVal{{Tag: "elem0", N: 4}, {Tag: "elem1", N: 5}},
+		Map:    map[string]portableAppenderVal{"k": {Tag: "mapv", N: 6}},
+		Ifc:    portableAppenderVal{Tag: "any", N: 7},
+	}
+	got, err := ConfigStd.Marshal(in)
+	require.NoError(t, err)
+	want, err := json.Marshal(in)
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(got))
 }

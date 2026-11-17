@@ -1,11 +1,11 @@
-//go:build !sonic_compat && ((amd64 && go1.20 && !go1.28) || (arm64 && go1.20 && !go1.28) || (riscv64 && go1.26 && !go1.28 && riscv64.rva22u64))
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 package kernels
 
 import (
-	"github.com/bytedance/sonic/internal/rt"
-
+	"github.com/bytedance/sonic/internal/cpu"
 	"github.com/bytedance/sonic/internal/native/types"
+	"github.com/bytedance/sonic/internal/rt"
 )
 
 // Unquote decodes a string body without surrounding quotes. len(dst) must be
@@ -39,6 +39,10 @@ func UnquoteStatus(src string, dst []byte, flags uint64) (written, errorPos int,
 func UnquoteBuffer(src *byte, size int, dst *byte, flags uint64) (written, errorPos int, err types.ParsingError) {
 	if size <= 0 {
 		return 0, -1, 0
+	}
+	if cpu.UseScalar {
+		_, written, _, errorPos, code := stringDecodeScalar(src, size, dst, flags&3)
+		return written, errorPos, types.ParsingError(code)
 	}
 	raceRead(src, size)
 	_, written, _, errorPos, code := stringDecode(src, size, dst, flags&3)
