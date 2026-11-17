@@ -4,9 +4,6 @@ package optdec
 
 import (
 	"reflect"
-	"runtime"
-	"sync/atomic"
-	"unsafe"
 )
 
 type projKind uint8
@@ -39,38 +36,6 @@ type projPlan struct {
 	sd             *structDecoder
 	elem           *projPlan
 	fields         []*projPlan
-	_              [64]byte
-	denseStreak    uint32
-}
-
-const probeWeylStep uint32 = 0x9e3779b9
-
-type backoffProbeStripe struct {
-	tick uint32
-	_    [60]byte
-}
-
-// schemaProbeStripes shards ~1-in-256 backoff recovery probes across a 128-entry
-// cache-line-isolated table.
-var schemaProbeStripes [128]backoffProbeStripe
-
-func hitSchemaBackoffProbe(seed uintptr, plan *projPlan) bool {
-	mixed := (uint64(seed) ^ (uint64(uintptr(unsafe.Pointer(plan))) * 0x517cc1b727220a95)) * 0x9e3779b97f4a7c15
-	idx := mixed >> 57
-	v := atomic.AddUint32(&schemaProbeStripes[idx].tick, probeWeylStep)
-	return (v >> 24) == 0
-}
-
-func (p *projPlan) recordDense() {
-	if atomic.LoadUint32(&p.denseStreak) < 16 {
-		atomic.AddUint32(&p.denseStreak, 1)
-	}
-}
-
-func (p *projPlan) recordSparse() {
-	if atomic.LoadUint32(&p.denseStreak) != 0 {
-		atomic.StoreUint32(&p.denseStreak, 0)
-	}
 }
 
 var (
@@ -281,20 +246,19 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 }
 
 func (p *projPlan) shouldUse(jsonLen int) bool {
-	return p.shouldUseSeededOpts(jsonLen, 0, uintptr(unsafe.Pointer(p)))
+	return p.shouldUseOpts(jsonLen, 0)
 }
 
-// Schema-projection admission thresholds:
+// Deterministic, stateless schema-projection admission thresholds:
 //   - schemaMinJSONBytes (256 B): tiny payloads are cheaper to scan in one linear
-//     Runs pass (or Flat when eligible) than initializing projection state.
+//     Runs pass than initializing projection state.
 //   - schemaBoundedBytesPerField (24 B/field): bounded structs pay off once the
 //     JSON exceeds roughly one compact key-value pair per declared field.
 //   - schemaWideStructFieldThreshold (40 fields) & schemaWideStructBytesPerField
-//     (512 B/field): on Linux/Windows (where AVX2/NEON/RVV Runs processes dense
-//     wide objects at multi-GB/s in a single linear pass), per-key schema dispatch
-//     and strict unknown-field validation win only when skipped payload strongly
-//     dominates declared fields (unless NoValidateJSONSkip enables O(1) container
-//     skipping).
+//     (512 B/field): linear SIMD Runs scanning processes dense wide objects rapidly
+//     in a single pass, so per-key schema dispatch and strict unknown-field
+//     validation pay off when skipped payload dominates declared fields (unless
+//     NoValidateJSONSkip enables O(1) container skipping).
 const (
 	schemaMinJSONBytes             = 256
 	schemaBoundedBytesPerField     = 24
@@ -305,26 +269,18 @@ const (
 	schemaUnboundedMaxTotalFields  = 64
 )
 
-func (p *projPlan) shouldUseSeededOpts(jsonLen int, f uint64, seed uintptr) bool {
+func (p *projPlan) shouldUseOpts(jsonLen int, f uint64) bool {
 	if p == nil || p.kind == projFull || p.kind == projScalar || p.kind == projBytes {
 		return false
 	}
-	if p.kind == projRaw {
-		return jsonLen > 0
-	}
-	if p.hasRawSubtree {
+	if p.kind == projRaw || p.hasRawSubtree {
 		return jsonLen > 0
 	}
 	if jsonLen < schemaMinJSONBytes {
 		return false
 	}
-	if atomic.LoadUint32(&p.denseStreak) >= 2 {
-		if !hitSchemaBackoffProbe(seed, p) {
-			return false
-		}
-	}
 	if p.isBounded {
-		if runtime.GOOS != "darwin" && f&(1<<_F_no_validate_json) == 0 && p.maxStructWidth >= schemaWideStructFieldThreshold {
+		if f&(1<<_F_no_validate_json) == 0 && p.maxStructWidth >= schemaWideStructFieldThreshold {
 			return jsonLen >= p.totalFields*schemaWideStructBytesPerField
 		}
 		return jsonLen >= p.totalFields*schemaBoundedBytesPerField

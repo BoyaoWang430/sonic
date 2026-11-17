@@ -48,10 +48,6 @@ type schemaScanner struct {
 	caseSensitive  bool
 	disUnknown     bool
 	mutatedPadded  bool
-	denseBailout   bool
-	skippedKeys    int
-	skippedBytes   int
-	matchedKeys    int
 	num            cParityNum
 }
 
@@ -203,17 +199,7 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 	ok = sc.scanByPlan(plan, c, valStart)
 	p.options = oldOpts
 	if !ok || sc.pos > sc.end {
-		if sc.denseBailout && !plan.hasRawSubtree {
-			plan.recordDense()
-		}
 		return false, sc.mutatedPadded
-	}
-	if !plan.hasRawSubtree {
-		if sc.skippedKeys*4 < sc.matchedKeys && sc.skippedBytes*3 < sc.end {
-			plan.recordDense()
-		} else {
-			plan.recordSparse()
-		}
 	}
 	p.hasProjHints = true
 	p.pos = sc.pos
@@ -670,11 +656,9 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 
 		if idx < 0 {
 			if !disUnknown {
-				sc.skippedKeys++
 				if !sc.skipValidateValue(vc) {
 					return false
 				}
-				sc.skippedBytes += sc.pos - vStart
 			} else {
 				if !sc.skipValidateValue(vc) {
 					return false
@@ -686,7 +670,6 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 				count++
 			}
 		} else {
-			sc.matchedKeys++
 			hint := uint64(0)
 			if idx < 0xFFFFFE {
 				hint = uint64(idx+1) << 8
@@ -809,7 +792,6 @@ func (sc *schemaScanner) scanSlice(plan *projPlan, c byte, valStart int) bool {
 
 	elemPlan := plan.elem
 	useFullElem := elemPlan == nil || elemPlan.kind == projFull
-	checkAdaptive := elemPlan != nil && elemPlan.kind == projStruct && !elemPlan.hasRawSubtree
 	var count uint64
 	strPtr := sc.strPtr
 	tailPtr := sc.tailPtr
@@ -821,18 +803,6 @@ func (sc *schemaScanner) scanSlice(plan *projPlan, c byte, valStart int) bool {
 		if useFullElem {
 			if !sc.scanFullSubtree(ec, eStart) {
 				return false
-			}
-		} else if checkAdaptive && count == 0 {
-			beforeSkip := sc.skippedKeys
-			if !sc.scanByPlan(elemPlan, ec, eStart) {
-				return false
-			}
-			if sc.skippedKeys == beforeSkip {
-				if arrIdx == 0 && !sc.mutatedPadded {
-					sc.denseBailout = true
-					return false
-				}
-				useFullElem = true
 			}
 		} else {
 			if !sc.scanByPlan(elemPlan, ec, eStart) {

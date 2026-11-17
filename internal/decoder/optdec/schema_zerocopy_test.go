@@ -80,7 +80,7 @@ func TestSchemaProjBytesFieldZeroFallback(t *testing.T) {
 			t.Fatalf("case %d length %d must be >= 512", idx, len(js))
 		}
 		if !proj.shouldUse(len(js)) {
-			t.Fatalf("case %d expected proj.shouldUse(%d) == true (denseStreak=%d)", idx, len(js), atomic.LoadUint32(&proj.denseStreak))
+			t.Fatalf("case %d expected proj.shouldUse(%d) == true", idx, len(js))
 		}
 
 		beforeFallback := atomic.LoadUint64(&schemaFallbackCount)
@@ -657,13 +657,10 @@ func BenchmarkDecoder_Binding_ShouldUseCalibration(b *testing.B) {
 	fixedArrDense12K := `[` + strings.Join(arrItems[:], ",") + `]`
 
 	runPair := func(name, js string, newDst func() any, reset func(any)) {
-		b.Run(name+"/Adaptive", func(b *testing.B) {
+		b.Run(name+"/Router", func(b *testing.B) {
 			b.SetBytes(int64(len(js)))
 			b.ReportAllocs()
 			dst := newDst()
-			if _, _, _, proj, err := unpackAndCompileRoot(dst); err == nil && proj != nil {
-				atomic.StoreUint32(&proj.denseStreak, 0)
-			}
 			for w := 0; w < 4; w++ {
 				if reset != nil {
 					reset(dst)
@@ -718,20 +715,30 @@ func BenchmarkDecoder_Binding_ShouldUseCalibration(b *testing.B) {
 	runPair("FixedArr150_Dense_12KB", fixedArrDense12K, func() any { return new([150]smallBoundedItem) }, nil)
 }
 
-func TestSchemaProjDenseStreakRecovery(t *testing.T) {
+func TestSchemaProjDeterministicStatelessAdmission(t *testing.T) {
 	type wideBounded36 struct {
 		F01, F02, F03, F04, F05, F06, F07, F08, F09, F10 int64
 		F11, F12, F13, F14, F15, F16, F17, F18, F19, F20 int64
 		S21, S22, S23, S24, S25, S26, S27, S28           string
 		S29, S30, S31, S32, S33, S34, S35, S36           string
 	}
-	var dst wideBounded36
-	_, _, _, proj, err := unpackAndCompileRoot(&dst)
+	type wideBounded40 struct {
+		wideBounded36
+		S37, S38, S39, S40 string
+	}
+	var dst1, dst2 wideBounded36
+	_, _, _, proj36, err := unpackAndCompileRoot(&dst1)
 	if err != nil {
 		t.Fatalf("unpackAndCompileRoot: %v", err)
 	}
-	if proj == nil || !proj.isBounded || proj.totalFields != 36 {
-		t.Fatalf("unexpected projPlan: %+v", proj)
+	if proj36 == nil || !proj36.isBounded || proj36.totalFields != 36 {
+		t.Fatalf("unexpected projPlan: %+v", proj36)
+	}
+
+	var w40 wideBounded40
+	_, _, _, proj40, err := unpackAndCompileRoot(&w40)
+	if err != nil || proj40 == nil || !proj40.isBounded || proj40.totalFields != 40 || proj40.maxStructWidth != 40 {
+		t.Fatalf("unexpected wideBounded40 projPlan: %+v (err=%v)", proj40, err)
 	}
 
 	var denseSB, sparseSB strings.Builder
@@ -754,32 +761,31 @@ func TestSchemaProjDenseStreakRecovery(t *testing.T) {
 	denseJSON := denseSB.String()
 	sparseJSON := sparseSB.String()
 
-	// 1. Wide bounded (>32 fields) sparse payload uses zero-copy schema projection.
-	if !proj.shouldUse(len(sparseJSON)) {
-		t.Fatalf("expected sparse wideBounded36 (%dB) to use zero-copy projection", len(sparseJSON))
+	// 1. Stateless admission: repeated dense calls MUST NOT suppress subsequent sparse calls on any target address.
+	if !proj36.shouldUseOpts(len(sparseJSON), 0) {
+		t.Fatalf("expected sparse wideBounded36 (%dB) to use schema projection", len(sparseJSON))
+	}
+	for i := 0; i < 8; i++ {
+		if _, _, err := DecodeOne(denseJSON, 0, &dst1); err != nil {
+			t.Fatalf("DecodeOne dense #%d: %v", i, err)
+		}
+	}
+	if !proj36.shouldUseOpts(len(sparseJSON), 0) {
+		t.Fatalf("stateless admission violated: dense history altered proj36.shouldUseOpts")
+	}
+	if _, _, err := DecodeOne(sparseJSON, 0, &dst2); err != nil {
+		t.Fatalf("DecodeOne sparse after dense: %v", err)
 	}
 
-	// 2. Large (>8 KiB) dense bounded payload records denseStreak >= 2 and cools down to FullCopy.
-	for i := 0; i < 3; i++ {
-		if _, _, err := DecodeOne(denseJSON, 0, &dst); err != nil {
-			t.Fatalf("DecodeOne dense: %v", err)
-		}
+	// 2. Platform-independent deterministic threshold on >=40-field wide bounded structs.
+	if proj40.shouldUseOpts(4096, 0) {
+		t.Fatalf("expected 40-field bounded struct at 4KB without NoValidateJSON to stay on linear Runs across all OSes")
 	}
-	if got := atomic.LoadUint32(&proj.denseStreak); got < 2 {
-		t.Fatalf("expected denseStreak >= 2 on >8KiB dense bounded input, got %d", got)
+	if !proj40.shouldUseOpts(40*schemaWideStructBytesPerField, 0) {
+		t.Fatalf("expected 40-field bounded struct at >=20KB to use schema projection")
 	}
-
-	// 3. Subsequent sparse calls recover denseStreak to 0 on the 1-in-256 probe (verifies single shouldUse increment per DecodeOne).
-	for i := 0; i < 300; i++ {
-		if _, _, err := DecodeOne(sparseJSON, 0, &dst); err != nil {
-			t.Fatalf("DecodeOne sparse #%d: %v", i, err)
-		}
-		if atomic.LoadUint32(&proj.denseStreak) == 0 {
-			break
-		}
-	}
-	if got := atomic.LoadUint32(&proj.denseStreak); got != 0 {
-		t.Fatalf("expected denseStreak to recover to 0 within 256 sparse calls, got %d", got)
+	if !proj40.shouldUseOpts(4096, 1<<_F_no_validate_json) {
+		t.Fatalf("expected 40-field bounded struct at 4KB with NoValidateJSON to use schema projection")
 	}
 }
 

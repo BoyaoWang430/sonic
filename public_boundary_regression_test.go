@@ -1485,8 +1485,7 @@ type schemaSubtreeFallbackItem struct {
 }
 
 func TestSchemaFullSubtreeMutatedPaddedFallback(t *testing.T) {
-	// 1. Dense-slice bailout in scanSlice after scanFullSubtree unescaped a string in place.
-	// Elements 0..11 match all 4 fields, triggering denseBailout at element 8.
+	// 1. Slice of structs with any subtree unescaping a string in place across 12 elements.
 	var sb strings.Builder
 	sb.WriteByte('[')
 	for i := 0; i < 12; i++ {

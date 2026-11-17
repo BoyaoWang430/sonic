@@ -182,13 +182,13 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	if err != nil {
 		return s, 0, err
 	}
-	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUseSeededOpts(len(s), f, uintptr(vp))) {
+	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUseOpts(len(s), f)) {
 		return decodeGiantOneCompiled(s, f, etp, vp, dec)
 	}
 
 	var activeProj *projPlan
 	var p *Parser
-	if proj != nil && proj.shouldUseSeededOpts(len(s), f, uintptr(vp)) {
+	if proj != nil && proj.shouldUseOpts(len(s), f) {
 		activeProj = proj
 		p = newParserLazy(s, 0, f)
 	} else {
@@ -237,7 +237,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
 		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
 		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
-		(proj == nil || !proj.hasRawSubtree || !proj.shouldUseSeededOpts(len(*s)-origPos, f, uintptr(vp))) {
+		(proj == nil || !proj.hasRawSubtree || !proj.shouldUseOpts(len(*s)-origPos, f)) {
 		*i = origPos
 		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
@@ -245,7 +245,7 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	/* parse into document */
 	var activeProj *projPlan
 	var p *Parser
-	if proj != nil && proj.shouldUseSeededOpts(len(*s)-origPos, f, uintptr(vp)) {
+	if proj != nil && proj.shouldUseOpts(len(*s)-origPos, f) {
 		activeProj = proj
 		p = newParserLazyFromSession(*s, origPos, uint64(f), sess)
 	} else {
