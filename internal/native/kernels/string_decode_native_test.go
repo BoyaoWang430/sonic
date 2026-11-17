@@ -49,26 +49,27 @@ func TestParseStringErrorPositions(t *testing.T) {
 		src           string
 		validate      bool
 		unicodeErrors bool
-		pos, code     int
+		pos           int
+		code          KernelStatus
 		escaped       bool
 	}{
-		{`"`, true, false, 1, 5, false},
-		{`"plain`, true, false, 6, 5, false},
-		{`"x\`, true, false, 3, 5, true},
-		{`"\"`, true, false, 3, 5, true},
-		{`"\x"`, true, false, 1, 2, true},
-		{`"\x"`, false, false, 1, 2, true},
-		{`"\'"`, false, false, 1, 2, true},
-		{`"\u`, true, false, 3, 5, true},
-		{`"\u123`, true, false, 6, 5, true},
-		{`"\u12x4"`, true, false, 1, 12, true},
-		{`"\ud800\u12x4"`, true, false, 7, 12, true},
-		{`"\ud800"`, true, true, 1, 12, true},
-		{`"\udc00"`, false, true, 1, 12, true},
-		{`"\ud800\u0041"`, true, true, 7, 12, true},
-		{`"\ud800\ud800"`, true, true, 7, 12, true},
-		{"\"a\x00b\"", true, false, 2, 1, false},
-		{"\"\\nX\x00Y\"", true, false, 4, 1, true},
+		{`"`, true, false, 1, StatusEOF, false},
+		{`"plain`, true, false, 6, StatusEOF, false},
+		{`"x\`, true, false, 3, StatusEOF, true},
+		{`"\"`, true, false, 3, StatusEOF, true},
+		{`"\x"`, true, false, 1, StatusInvalidEscape, true},
+		{`"\x"`, false, false, 1, StatusInvalidEscape, true},
+		{`"\'"`, false, false, 1, StatusInvalidEscape, true},
+		{`"\u`, true, false, 3, StatusEOF, true},
+		{`"\u123`, true, false, 6, StatusEOF, true},
+		{`"\u12x4"`, true, false, 1, StatusInvalidUnicode, true},
+		{`"\ud800\u12x4"`, true, false, 7, StatusInvalidUnicode, true},
+		{`"\ud800"`, true, true, 1, StatusInvalidUnicode, true},
+		{`"\udc00"`, false, true, 1, StatusInvalidUnicode, true},
+		{`"\ud800\u0041"`, true, true, 7, StatusInvalidUnicode, true},
+		{`"\ud800\ud800"`, true, true, 7, StatusInvalidUnicode, true},
+		{"\"a\x00b\"", true, false, 2, StatusControlChar, false},
+		{"\"\\nX\x00Y\"", true, false, 4, StatusControlChar, true},
 	} {
 		for _, start := range []int{0, 11} {
 			input := []byte(strings.Repeat("p", start) + tt.src)

@@ -609,21 +609,28 @@ func (p *Parser) free() {
 	parsePool.Put(p)
 }
 
+func buildSyntaxErrorAt(src string, errOffset int, code ErrorCode) error {
+	if errOffset < 0 {
+		errOffset = 0
+	} else if errOffset > len(src) {
+		errOffset = len(src)
+	}
+	return error_syntax(errOffset, src, ParsingErrors[code])
+}
+
+func syntaxErrorFromAfterCursor(src string, afterPos int, code ErrorCode) error {
+	if afterPos <= 0 {
+		return buildSyntaxErrorAt(src, 0, SONIC_EOF)
+	}
+	return buildSyntaxErrorAt(src, afterPos-1, code)
+}
+
 //go:noinline
 func (p *Parser) fixError(code ErrorCode) error {
 	if code == SONIC_OK {
 		return nil
 	}
-
-	if p.Pos() == 0 {
-		code = SONIC_EOF
-	}
-
-	pos := p.Pos() - 1
-	if pos > len(p.Json) {
-		pos = len(p.Json)
-	}
-	return error_syntax(pos, p.Json, ParsingErrors[code])
+	return syntaxErrorFromAfterCursor(p.Json, p.Pos(), code)
 }
 
 func Parse(data string, opt uint64) error {

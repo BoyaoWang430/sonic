@@ -33,13 +33,13 @@ func TestStringDecodeResumeFollowingByte(t *testing.T) {
 					padding := strings.Repeat("p", start)
 					input := []byte(padding + quoted)
 					end, written, escaped, pos, code := ParseString(input, start, validate, false)
-					wantEnd, wantPos, wantCode, output := start+len(quoted), -1, 0, want
+					wantEnd, wantPos, wantCode, output := start+len(quoted), -1, StatusOK, want
 					if c == '"' {
 						wantEnd = start + 1 + len(prefix.src) + 1
 						output = prefix.decoded
 					} else if c < 0x20 && validate {
 						wantPos = start + 1 + len(prefix.src)
-						wantEnd, wantCode, output = wantPos, 1, prefix.decoded
+						wantEnd, wantCode, output = wantPos, StatusControlChar, prefix.decoded
 					}
 					if end != wantEnd || written != len(output) || !escaped || pos != wantPos || code != wantCode || string(input[start+1:start+1+written]) != output {
 						t.Fatalf("resume prefix=%q byte=%02x start=%d validate=%v: (%d,%d,%v,%d,%d), want (%d,%d,true,%d,%d) output=%q", prefix.src, c, start, validate, end, written, escaped, pos, code, wantEnd, len(output), wantPos, wantCode, output)

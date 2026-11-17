@@ -36,12 +36,12 @@ func TestStringDecodeSimpleEscapeBytes(t *testing.T) {
 				src := `"` + body + `",after`
 				input := []byte(src)
 				end, written, escaped, pos, code := ParseString(input, 0, validate, false)
-				want, wantEnd, wantPos, wantCode := prefix.decoded+escape+"tail", len(body)+2, -1, 0
+				want, wantEnd, wantPos, wantCode := prefix.decoded+escape+"tail", len(body)+2, -1, StatusOK
 				if !valid {
 					want = prefix.decoded
-					wantPos, wantCode = len(prefix.body)+1, 2
+					wantPos, wantCode = len(prefix.body)+1, StatusInvalidEscape
 					if c == 'u' {
-						wantCode = 12
+						wantCode = StatusInvalidUnicode
 					}
 					wantEnd = wantPos
 				}

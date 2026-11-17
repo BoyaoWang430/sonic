@@ -10,6 +10,9 @@ import (
 // require padding. The selected assembly kernel validates ASCII and multibyte
 // sequences within the logical input bounds.
 func ValidUTF8(src string) bool {
+	if len(src) == 0 {
+		return true
+	}
 	raceRead(rt.StringData(src), len(src))
 	_, _, full := utf8Scan(rt.StringData(src), len(src), 0, nil, 0)
 	return !full

@@ -128,8 +128,9 @@ func BenchmarkNativeParseString(b *testing.B) {
 				bufs[i] = []byte(src)
 			}
 			type result struct {
-				end, written, pos, code int
-				escaped                 bool
+				end, written, pos int
+				code              KernelStatus
+				escaped           bool
 			}
 			results := make([]result, batch)
 			wantEscape := strings.Contains(tc.body, `\`)

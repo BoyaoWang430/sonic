@@ -77,6 +77,7 @@ type StreamSession struct {
 	lastElemType       reflect.Type
 	lastDec            decFunc
 	cur                int
+	errPos             int
 	nodeLen            int
 	tokStart           int
 	strScanOff         int
@@ -169,6 +170,7 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 	p.Utf8Inv = false
 	p.isEface = isEface
 	s.cur = 0
+	s.errPos = -1
 	s.nodeLen = 0
 	s.tokStart = 0
 	s.strScanOff = 0
@@ -328,9 +330,9 @@ func safeStringResumeOffset(src string, floor int) int {
 	return n
 }
 
-func mapUnquoteError(perr types.ParsingError) ErrorCode {
-	switch perr {
-	case types.ERR_INVALID_UNICODE, types.ERR_INVALID_CHAR, types.ERR_EOF:
+func mapUnquoteStatus(st kernels.KernelStatus) ErrorCode {
+	switch st {
+	case kernels.StatusInvalidUnicode, kernels.StatusEOF:
 		return SONIC_INVALID_ESCAPED_UTF
 	default:
 		return SONIC_INVALID_ESCAPED
@@ -348,11 +350,26 @@ func unpackOpenParentIdx(openVal uint64) int64 {
 	return int64(int32(uint32(openVal >> 32)))
 }
 
-func eofCursor(n int) int {
-	if n > 0 {
-		return n + 1
+func (s *StreamSession) failEOF(srcLen int) ErrorCode {
+	s.cur = srcLen
+	s.errPos = srcLen
+	return SONIC_EOF
+}
+
+func (s *StreamSession) failAt(errOffset, nextCur, srcLen int, code ErrorCode) ErrorCode {
+	if nextCur > srcLen {
+		nextCur = srcLen
 	}
-	return 0
+	s.cur = nextCur
+	s.errPos = errOffset
+	return code
+}
+
+func (s *StreamSession) syntaxError(src string, code ErrorCode) error {
+	if s.errPos >= 0 {
+		return buildSyntaxErrorAt(src, s.errPos, code)
+	}
+	return syntaxErrorFromAfterCursor(src, s.cur, code)
 }
 
 // isValidNumberPrefixToEnd reports whether src[pos:] is a syntactically valid
@@ -443,21 +460,17 @@ func (s *StreamSession) scanStringStep(src string, eof bool, isKey bool) (bool, 
 			return false, scanStopNeedMore, SONIC_OK
 		}
 		if perr == types.ERR_EOF {
-			s.cur = eofCursor(len(src))
-			return false, scanStopSyntaxError, SONIC_EOF
+			return false, scanStopSyntaxError, s.failEOF(len(src))
 		}
 		errPos := pos + errRel
 		if errPos < len(src) && src[errPos] < 0x20 {
-			s.cur = errPos + 1
-			return false, scanStopSyntaxError, SONIC_CONTROL_CHAR
+			return false, scanStopSyntaxError, s.failAt(errPos, errPos+1, len(src), SONIC_CONTROL_CHAR)
 		}
 		// Distinguish invalid \uXXXX hex vs invalid \x escape for exact C parity.
 		if errPos+1 < len(src) && src[errPos] == '\\' && src[errPos+1] == 'u' {
-			s.cur = errPos + 1
-			return false, scanStopSyntaxError, SONIC_INVALID_ESCAPED_UTF
+			return false, scanStopSyntaxError, s.failAt(errPos, errPos+1, len(src), SONIC_INVALID_ESCAPED_UTF)
 		}
-		s.cur = errPos + 1
-		return false, scanStopSyntaxError, SONIC_INVALID_ESCAPED
+		return false, scanStopSyntaxError, s.failAt(errPos, errPos+1, len(src), SONIC_INVALID_ESCAPED)
 	}
 
 	end := pos + endRel
@@ -486,14 +499,11 @@ func (s *StreamSession) scanStringStep(src string, eof bool, isKey bool) (bool, 
 		s.unesc = append(s.unesc, src[rawStart:firstEsc]...)
 		escTail := src[firstEsc:rawContentEnd]
 		dst := s.unesc[uoff+prefixLen : uoff+maxOut]
-		written, errOff, uerr := kernels.Unquote(escTail, dst, s.unquoteFlags)
-		if uerr != 0 {
+		written, errOff, ustatus := kernels.UnquoteStatus(escTail, dst, s.unquoteFlags)
+		if ustatus != kernels.StatusOK {
 			s.unesc = s.unesc[:uoff]
-			s.cur = firstEsc + errOff + 1
-			if s.cur > len(src) {
-				s.cur = len(src)
-			}
-			return false, scanStopSyntaxError, mapUnquoteError(uerr)
+			errAt := firstEsc + errOff
+			return false, scanStopSyntaxError, s.failAt(errAt, errAt+1, len(src), mapUnquoteStatus(ustatus))
 		}
 		ulen := prefixLen + written
 		s.unesc = s.unesc[:uoff+ulen]
@@ -524,8 +534,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			ch := src[pos]
 			switch ch {
@@ -593,8 +602,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 					if !eof {
 						return scanStopNeedMore, SONIC_OK
 					}
-					s.cur = eofCursor(len(src))
-					return scanStopSyntaxError, SONIC_INVALID_LITERAL
+					return scanStopSyntaxError, s.failAt(len(src), len(src), len(src), SONIC_INVALID_LITERAL)
 				}
 				// Mismatch occurred within full length.
 				for i := 1; i < len(want); i++ {
@@ -731,8 +739,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			if src[pos] != ':' {
 				s.cur = pos + 1
@@ -749,8 +756,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			ch := src[pos]
 			if ch == '}' {
@@ -775,8 +781,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			if src[pos] != '"' {
 				s.cur = pos + 1
@@ -796,8 +801,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			if src[pos] == ']' {
 				s.cur = pos + 1
@@ -813,8 +817,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			ch := src[pos]
 			s.cur = pos + 1
@@ -834,8 +837,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if !eof {
 					return scanStopNeedMore, SONIC_OK
 				}
-				s.cur = eofCursor(len(src))
-				return scanStopSyntaxError, SONIC_EOF
+				return scanStopSyntaxError, s.failEOF(len(src))
 			}
 			ch := src[pos]
 			s.cur = pos + 1
@@ -1004,16 +1006,10 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 
 		default:
 			raw := (*buf)[rootStart:]
-			pos := sess.cur - 1
-			if sess.cur == 0 {
-				code = SONIC_EOF
-				pos = 0
-			} else if pos < 0 {
-				pos = 0
-			}
 			ownedSrc := string(raw)
+			err := sess.syntaxError(ownedSrc, code)
 			sess.Reset()
-			return error_syntax(pos, ownedSrc, ParsingErrors[code])
+			return err
 		}
 	}
 }
@@ -1327,9 +1323,6 @@ scanValue:
 		nodes = p.nodes
 		nlen = s.nodeLen
 		if !ok {
-			if code == SONIC_EOF && n > 0 {
-				s.cur = n + 1
-			}
 			p.nbuf.parent = parentIdx
 			p.nbuf.depth = depth
 			return code
@@ -1768,13 +1761,6 @@ func (s *StreamSession) failLiteralComplete(src string, pos int, want string, nl
 	return SONIC_INVALID_LITERAL
 }
 
-func giantSyntaxError(src string, cur int, code ErrorCode) error {
-	if cur <= 0 {
-		return error_syntax(0, src, ParsingErrors[SONIC_EOF])
-	}
-	return error_syntax(cur-1, src, ParsingErrors[code])
-}
-
 func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Pointer, dec decFunc) (string, int, error) {
 	if f&(1<<_F_validate_string) != 0 && !utf8.ValidateString(s) {
 		dbuf := utf8.CorrectWith(nil, rt.Str2Mem(s), "\ufffd")
@@ -1792,7 +1778,7 @@ func decodeGiantOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.Poin
 		if endPos > len(s) {
 			endPos = len(s)
 		}
-		return s, endPos, fix_error(s, 0, giantSyntaxError(s, sess.cur, code))
+		return s, endPos, fix_error(s, 0, sess.syntaxError(s, code))
 	}
 
 	p := sess.p
@@ -1848,7 +1834,7 @@ func decodeGiantWithSessionCompiled(s *string, i *int, f uint64, etp reflect.Typ
 			newPos = len(*s)
 		}
 		*i = newPos
-		return fix_error(*s, origPos, giantSyntaxError(sub, sess.cur, code))
+		return fix_error(*s, origPos, sess.syntaxError(sub, code))
 	}
 
 	p := sess.p

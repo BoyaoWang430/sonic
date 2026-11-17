@@ -19,6 +19,9 @@ func HTMLEscape(src string, dst []byte) (consumed, written int) {
 // HTMLEscapeBuffer copies size bytes from src into dst capacity bytes while
 // escaping HTML-unsafe runes, avoiding string/slice header construction.
 func HTMLEscapeBuffer(src *byte, size int, dst *byte, capacity int) (consumed, written int) {
+	if size <= 0 {
+		return 0, 0
+	}
 	raceRead(src, size)
 	consumed, written = htmlEscape(src, size, dst, capacity)
 	raceWrite(dst, written)

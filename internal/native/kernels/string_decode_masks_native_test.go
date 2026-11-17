@@ -73,13 +73,13 @@ func TestStringDecodeMaskChunksErrors(t *testing.T) {
 		for _, tc := range []struct {
 			tail string
 			pos  int
-			code int
+			code KernelStatus
 		}{
-			{"\x00\"", 0, 1},
-			{`\x"`, 0, 2},
-			{`\u12x4"`, 0, 12},
-			{`\ud800\u12x4"`, 6, 12},
-			{`\u123`, 5, 5},
+			{"\x00\"", 0, StatusControlChar},
+			{`\x"`, 0, StatusInvalidEscape},
+			{`\u12x4"`, 0, StatusInvalidUnicode},
+			{`\ud800\u12x4"`, 6, StatusInvalidUnicode},
+			{`\u123`, 5, StatusEOF},
 		} {
 			input := []byte(`"` + body + tc.tail)
 			end, _, escaped, pos, code := ParseString(input, 0, true, false)

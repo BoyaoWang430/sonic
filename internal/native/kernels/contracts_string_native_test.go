@@ -134,13 +134,14 @@ func TestStringDecodeNativeErrors(t *testing.T) {
 	}
 	for _, tt := range []struct {
 		src           string
-		pos, code     int
+		pos           int
+		code          KernelStatus
 		unicodeErrors bool
 	}{
-		{`"plain`, 6, 5, false}, {`"x\`, 3, 5, false}, {`"\x"`, 1, 2, false},
-		{`"\u123`, 6, 5, false}, {`"\u12x4"`, 1, 12, false},
-		{`"\ud800\u12x4"`, 7, 12, false}, {`"\ud800"`, 1, 12, true},
-		{`"\ud800\u0041"`, 7, 12, true}, {"\"a\x00b\"", 2, 1, false},
+		{`"plain`, 6, StatusEOF, false}, {`"x\`, 3, StatusEOF, false}, {`"\x"`, 1, StatusInvalidEscape, false},
+		{`"\u123`, 6, StatusEOF, false}, {`"\u12x4"`, 1, StatusInvalidUnicode, false},
+		{`"\ud800\u12x4"`, 7, StatusInvalidUnicode, false}, {`"\ud800"`, 1, StatusInvalidUnicode, true},
+		{`"\ud800\u0041"`, 7, StatusInvalidUnicode, true}, {"\"a\x00b\"", 2, StatusControlChar, false},
 	} {
 		buf := []byte(tt.src)
 		end, _, _, pos, code := ParseString(buf, 0, true, tt.unicodeErrors)

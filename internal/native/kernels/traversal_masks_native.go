@@ -13,6 +13,9 @@ import (
 func TraversalMasks(src string, start int, validate bool) (events, nonspace uint64, width int) {
 	tail := src[start:]
 	width = minInt(len(tail), 64)
+	if width == 0 {
+		return 0, 0, 0
+	}
 	var strict uint64
 	if validate {
 		strict = 1

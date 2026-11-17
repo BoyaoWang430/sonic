@@ -20,6 +20,9 @@ func Quote(src string, dst []byte, flags uint64) (consumed, written int) {
 // QuoteBuffer escapes size bytes from src into dst capacity bytes without
 // surrounding quotes, avoiding string/slice header construction on raw buffers.
 func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int) {
+	if size <= 0 {
+		return 0, 0
+	}
 	raceRead(src, size)
 	consumed, written = quote(src, size, dst, capacity, flags)
 	raceWrite(dst, written)
@@ -40,6 +43,9 @@ func QuoteHTML(src string, dst []byte) (consumed, written int) {
 // QuoteHTMLBuffer escapes size bytes from src into dst capacity bytes without
 // surrounding quotes, fusing JSON string escaping and HTML escaping in one pass.
 func QuoteHTMLBuffer(src *byte, size int, dst *byte, capacity int) (consumed, written int) {
+	if size <= 0 {
+		return 0, 0
+	}
 	raceRead(src, size)
 	consumed, written = quoteHTML(src, size, dst, capacity)
 	raceWrite(dst, written)

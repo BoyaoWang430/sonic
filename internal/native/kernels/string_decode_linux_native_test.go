@@ -124,12 +124,12 @@ func TestParseStringNoEscapeNeedsNoStores(t *testing.T) {
 	for prefix := 0; prefix <= 2*stringDecodeVectorBytes(); prefix++ {
 		for _, tc := range []struct {
 			tail    string
-			code    int
+			code    KernelStatus
 			escaped bool
 		}{
-			{`"`, 0, false},
-			{"\x01\"", 1, false},
-			{`\x"`, 2, true},
+			{`"`, StatusOK, false},
+			{"\x01\"", StatusControlChar, false},
+			{`\x"`, StatusInvalidEscape, true},
 		} {
 			// Trailing source keeps the event inside a full SIMD load even for
 			// short keys. The prefix must not be copied before a closing quote,

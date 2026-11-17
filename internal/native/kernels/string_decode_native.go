@@ -22,11 +22,12 @@ func StringSpecialMask(word uint64) uint64 {
 // at start+1. The original closing quote and trailing input remain unchanged.
 // With no escapes, no stores are needed. Raw UTF-8 bytes are not validated.
 //
-// Errors use the optdec family: 1 control, 2 escape, 5 EOF, 12 Unicode escape.
-// ErrorPos is the original control byte, offending escape's backslash, or the
-// logical end for EOF. On error end equals errorPos; written is the completed
-// output prefix. The caller supplies a valid opening-quote offset.
-func ParseString(buf []byte, start int, validate, unicodeErrors bool) (end, written int, escaped bool, errorPos, code int) {
+// Status uses neutral KernelStatus values (StatusOK, StatusControlChar,
+// StatusInvalidEscape, StatusEOF, StatusInvalidUnicode). ErrorPos is the
+// original control byte, offending escape's backslash, or the logical end for
+// EOF. On error end equals errorPos; written is the completed output prefix.
+// The caller supplies a valid opening-quote offset.
+func ParseString(buf []byte, start int, validate, unicodeErrors bool) (end, written int, escaped bool, errorPos int, status KernelStatus) {
 	base := start + 1
 	tail := buf[base:]
 	mode := uint64(4)
@@ -37,12 +38,12 @@ func ParseString(buf []byte, start int, validate, unicodeErrors bool) (end, writ
 		mode |= 2
 	}
 	var sawEscape int
-	end, written, sawEscape, errorPos, code = DecodeQuoted(rt.SliceData(tail), len(tail), mode)
+	end, written, sawEscape, errorPos, status = DecodeQuoted(rt.SliceData(tail), len(tail), mode)
 	end += base
 	if errorPos >= 0 {
 		errorPos += base
 	}
-	return end, written, sawEscape != 0, errorPos, code
+	return end, written, sawEscape != 0, errorPos, status
 }
 
 // DecodeQuoted decodes in place from the bytes after an opening quote. The caller
@@ -52,10 +53,15 @@ func ParseString(buf []byte, start int, validate, unicodeErrors bool) (end, writ
 // offsets are relative to tail; a negative errorPos remains a sentinel. escaped
 // is nonzero when an escape was decoded. No padding is needed; tail may be nil
 // only when size is zero. The closing quote and following input are unchanged.
-func DecodeQuoted(tail *byte, size int, mode uint64) (end, written, escaped, errorPos, code int) {
+func DecodeQuoted(tail *byte, size int, mode uint64) (end, written, escaped, errorPos int, status KernelStatus) {
+	if size <= 0 {
+		return 0, 0, 0, 0, StatusEOF
+	}
+	var code int
 	end, written, escaped, errorPos, code = stringDecode(tail, size, tail, mode)
+	status = decodeQuotedRawCodeToStatus(code)
 	readN := end
-	if readN < size && code != 0 {
+	if readN < size && status != StatusOK {
 		readN++
 	}
 	raceRead(tail, readN)
