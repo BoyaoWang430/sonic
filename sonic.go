@@ -19,11 +19,8 @@
 package sonic
 
 import (
-	"encoding/json"
 	"io"
 	"reflect"
-	"strconv"
-	"unsafe"
 
 	"github.com/bytedance/sonic/decoder"
 	"github.com/bytedance/sonic/encoder"
@@ -125,99 +122,9 @@ func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
 	return api.UnmarshalString(buf, uint64(cfg.decoderOpts), val)
 }
 
-func isUntypedDOMTarget(val interface{}) bool {
-	switch val.(type) {
-	case *interface{}, *map[string]interface{}, *[]interface{}:
-		return true
-	default:
-		return false
-	}
-}
-
 // Unmarshal is implemented by sonic
 func (cfg frozenConfig) Unmarshal(buf []byte, val interface{}) error {
-	if !cfg.CopyString && isUntypedDOMTarget(val) {
-		return cfg.UnmarshalFromString(string(buf), val)
-	}
-	err := api.UnmarshalString(rt.Mem2Str(buf), uint64(cfg.decoderOpts)|uint64(decoder.OptionCopyString), val)
-	if err != nil {
-		return copyUnmarshalErrorSource(err, buf)
-	}
-	return nil
-}
-
-func cloneIfAliasesBuf(s string, b0, bEnd uintptr, buf []byte) (string, bool) {
-	if len(s) == 0 {
-		return s, false
-	}
-	sp := uintptr(rt.IndexChar(s, 0))
-	if sp < b0 || sp >= bEnd {
-		return s, false
-	}
-	if sp == b0 && len(s) == len(buf) {
-		return string(buf), true
-	}
-	return string([]byte(s)), true
-}
-
-func copyUnmarshalErrorSource(err error, buf []byte) error {
-	if len(buf) == 0 {
-		return err
-	}
-	b0 := uintptr(unsafe.Pointer(&buf[0]))
-	bEnd := b0 + uintptr(len(buf))
-	switch e := err.(type) {
-	case decoder.SyntaxError:
-		if cloned, ok := cloneIfAliasesBuf(e.Src, b0, bEnd, buf); ok {
-			e.Src = cloned
-			return e
-		}
-	case *decoder.SyntaxError:
-		if e != nil {
-			if cloned, ok := cloneIfAliasesBuf(e.Src, b0, bEnd, buf); ok {
-				cp := *e
-				cp.Src = cloned
-				return &cp
-			}
-		}
-	case decoder.MismatchTypeError:
-		if cloned, ok := cloneIfAliasesBuf(e.Src, b0, bEnd, buf); ok {
-			e.Src = cloned
-			return e
-		}
-	case *decoder.MismatchTypeError:
-		if e != nil {
-			if cloned, ok := cloneIfAliasesBuf(e.Src, b0, bEnd, buf); ok {
-				cp := *e
-				cp.Src = cloned
-				return &cp
-			}
-		}
-	case *json.UnmarshalTypeError:
-		if e != nil {
-			valCloned, okV := cloneIfAliasesBuf(e.Value, b0, bEnd, buf)
-			fldCloned, okF := cloneIfAliasesBuf(e.Field, b0, bEnd, buf)
-			if okV || okF {
-				cp := *e
-				if okV {
-					cp.Value = valCloned
-				}
-				if okF {
-					cp.Field = fldCloned
-				}
-				return &cp
-			}
-		}
-	case *strconv.NumError:
-		if e != nil {
-			if cloned, ok := cloneIfAliasesBuf(e.Num, b0, bEnd, buf); ok {
-				cp := *e
-				cp.Num = cloned
-				return &cp
-			}
-		}
-	}
-	return err
+	return api.UnmarshalBytes(buf, cfg.CopyString, uint64(cfg.decoderOpts), val)
 }
 
 // NewEncoder is implemented by sonic

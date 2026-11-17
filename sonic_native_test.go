@@ -3,6 +3,7 @@
 package sonic
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/decoder"
+	decerrors "github.com/bytedance/sonic/internal/decoder/errors"
 )
 
 func TestCopyUnmarshalErrorSourceDetachesAllErrorKinds(t *testing.T) {
@@ -20,22 +22,22 @@ func TestCopyUnmarshalErrorSourceDetachesAllErrorKinds(t *testing.T) {
 	aliasFull := unsafe.String(&buf[0], len(buf))
 	aliasSub := unsafe.String(&buf[8], 10) // "not_an_int"
 
-	valMismatch := copyUnmarshalErrorSource(decoder.MismatchTypeError{
+	valMismatch := decerrors.DetachSource(decoder.MismatchTypeError{
 		Pos:  7,
 		Src:  aliasFull,
 		Type: reflect.TypeOf(0),
 	}, buf)
-	ptrSyntax := copyUnmarshalErrorSource(&decoder.SyntaxError{
+	ptrSyntax := decerrors.DetachSource(&decoder.SyntaxError{
 		Pos: 7,
 		Src: aliasFull,
 		Msg: "boom",
 	}, buf)
-	unmarshalType := copyUnmarshalErrorSource(&json.UnmarshalTypeError{
+	unmarshalType := decerrors.DetachSource(&json.UnmarshalTypeError{
 		Value: aliasSub,
 		Field: aliasSub,
 		Type:  reflect.TypeOf(json.Number("")),
 	}, buf)
-	numErr := copyUnmarshalErrorSource(&strconv.NumError{
+	numErr := decerrors.DetachSource(&strconv.NumError{
 		Func: "ParseInt",
 		Num:  aliasSub,
 		Err:  strconv.ErrSyntax,
@@ -58,5 +60,28 @@ func TestCopyUnmarshalErrorSourceDetachesAllErrorKinds(t *testing.T) {
 	var ne *strconv.NumError
 	if !errors.As(numErr, &ne) || ne.Num != "not_an_int" {
 		t.Fatalf("strconv.NumError still aliased caller buffer: %+v", ne)
+	}
+
+	// End-to-end Unmarshal([]byte) and StreamDecoder error detachment after buffer reuse.
+	type target struct {
+		Age int `json:"age"`
+	}
+	liveBuf := []byte(`{"age":"wrong_type"}`)
+	var dst target
+	uerr := Unmarshal(liveBuf, &dst)
+	if uerr == nil {
+		t.Fatal("expected Unmarshal error")
+	}
+	for i := range liveBuf {
+		liveBuf[i] = 'Z'
+	}
+	if strings.Contains(uerr.Error(), "ZZZZ") || !strings.Contains(uerr.Error(), "wrong_type") {
+		t.Fatalf("Unmarshal returned error aliasing mutated caller buffer: %s", uerr.Error())
+	}
+
+	streamDec := ConfigDefault.NewDecoder(bytes.NewReader([]byte(`{"age":"stream_bad"} {"age":1}`)))
+	serr := streamDec.Decode(&dst)
+	if serr == nil || !strings.Contains(serr.Error(), "stream_bad") {
+		t.Fatalf("unexpected StreamDecoder error: %v", serr)
 	}
 }

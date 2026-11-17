@@ -93,6 +93,12 @@ func TestRISCVFastSkipSemantics(t *testing.T) {
 	if ret := ValidateOne(&src, &p, &types.StateMachine{}, noValidateJSON); ret != -int(types.ERR_INVALID_CHAR) || p != 1 {
 		t.Fatalf("ValidateOne must still check literal spelling: ret=%d cursor=%d", ret, p)
 	}
+	for _, bad := range []string{`txxx`, `1.2.3`, `[invalid,]`, `{]}`, `[}]`, `"\q"`} {
+		p := 0
+		if ret := ValidateOne(&bad, &p, &types.StateMachine{}, types.F_VALIDATE_STRING); ret >= 0 {
+			t.Fatalf("strict ValidateOne must reject %q: ret=%d cursor=%d", bad, ret, p)
+		}
+	}
 }
 
 func FuzzRISCVValidateOne(f *testing.F) {

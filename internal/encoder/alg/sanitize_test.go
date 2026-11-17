@@ -91,3 +91,75 @@ func TestQuoteFlagsHTMLAndUTF8(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendCompactedJSONPreservesSpellingAndOverlapSafety(t *testing.T) {
+	// Raw numeric spellings and escape sequences must never be normalized when compacting.
+	raw := []byte("  { \"num0\" : -0.000 , \"exp\" : 1e+00 , \"big\" : 1E999999 , \"esc\" : \"\\/\\u0041\\u004a\" , \"arr\" : [   ] } \n\t ")
+	want := `{"num0":-0.000,"exp":1e+00,"big":1E999999,"esc":"\/\u0041\u004a","arr":[]}`
+	got, err := AppendCompactedJSON([]byte("prefix:"), raw, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got) != "prefix:"+want {
+		t.Fatalf("got %q, want %q", string(got), "prefix:"+want)
+	}
+
+	// Exact spare suffix finalizes in place without reallocating.
+	backing := make([]byte, 0, 128)
+	backing = append(backing, "hdr:"...)
+	clean := `{"a":1,"b":[true,false,null]}`
+	spare := backing[len(backing) : len(backing)+len(clean)]
+	copy(spare, clean)
+	inPlace, err := AppendCompactedJSON(backing, spare, 1<<BitEscapeHTML)
+	if err != nil {
+		t.Fatalf("exact spare suffix err: %v", err)
+	}
+	if &inPlace[0] != &backing[0] || string(inPlace) != "hdr:"+clean {
+		t.Fatalf("exact spare suffix unexpected result: %q", string(inPlace))
+	}
+
+	// Overlapping non-exact spare region detaches safely before rewriting.
+	ovBuf := make([]byte, 0, 128)
+	ovBuf = append(ovBuf, "p:"...)
+	dirty := `  { "tag" : "<a>&<b>" }  `
+	ovSlice := ovBuf[len(ovBuf)+3 : len(ovBuf)+3+len(dirty)]
+	copy(ovSlice, dirty)
+	ovOut, err := AppendCompactedJSON(ovBuf, ovSlice, 1<<BitEscapeHTML)
+	if err != nil {
+		t.Fatalf("overlapping spare err: %v", err)
+	}
+	if string(ovOut) != `p:{"tag":"\u003ca\u003e\u0026\u003cb\u003e"}` {
+		t.Fatalf("overlapping spare unexpected output: %q", string(ovOut))
+	}
+
+	// Invalid inputs preserve dst prefix and return *json.SyntaxError consistently
+	// regardless of sanitize flags or preceding HTML/UTF-8 bytes.
+	invalids := []string{
+		"",
+		" ",
+		"01",
+		"[01]",
+		`{"a":"<b>\q"}`,
+		`{"a":"\xff\q"}`,
+		`{"a":1} trailing`,
+		`[1,]`,
+		`{,}`,
+		"\"unclosed",
+		"\"\x01\"",
+	}
+	for _, bad := range invalids {
+		for _, flags := range []uint64{0, 1 << BitEscapeHTML, 1 << BitValidateString, SanitizeMask} {
+			dst := []byte("keep:")
+			out, cerr := AppendCompactedJSON(dst, []byte(bad), flags)
+			if cerr == nil {
+				t.Fatalf("expected error for %q (flags=%d), got %q", bad, flags, string(out))
+			}
+			if _, ok := cerr.(*json.SyntaxError); !ok {
+				t.Fatalf("expected *json.SyntaxError for %q, got %T (%v)", bad, cerr, cerr)
+			}
+			if string(out) != "keep:" {
+				t.Fatalf("dst prefix mutated on error for %q: %q", bad, string(out))
+			}
+		}
+	}
+}

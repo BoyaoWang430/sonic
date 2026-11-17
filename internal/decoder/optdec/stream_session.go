@@ -5,10 +5,10 @@ package optdec
 import (
 	"encoding/json"
 	"reflect"
-	"strconv"
 	"sync"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/decoder/errors"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/utf8"
@@ -269,7 +269,7 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 				p.backup = nil
 			}
 			if merr != nil {
-				return detachStreamError(merr, rawVal)
+				return errors.DetachSource(merr, rawVal)
 			}
 			*scanp = valEnd
 			return nil
@@ -290,82 +290,6 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 			sess.Reset()
 			return err
 		}
-	}
-}
-
-func cloneIfAliasesStreamVal(s string, b0, bEnd uintptr) (string, bool) {
-	if len(s) == 0 {
-		return s, false
-	}
-	sp := uintptr(rt.IndexChar(s, 0))
-	if sp < b0 || sp >= bEnd {
-		return s, false
-	}
-	return string([]byte(s)), true
-}
-
-func detachStreamError(err error, rawVal []byte) error {
-	switch e := err.(type) {
-	case SyntaxError:
-		return SyntaxError{
-			Pos:  e.Pos,
-			Src:  string(rawVal),
-			Code: e.Code,
-			Msg:  e.Msg,
-		}
-	case *SyntaxError:
-		if e == nil {
-			return err
-		}
-		cp := *e
-		cp.Src = string(rawVal)
-		return &cp
-	case MismatchTypeError:
-		return &MismatchTypeError{
-			Pos:  e.Pos,
-			Src:  string(rawVal),
-			Type: e.Type,
-		}
-	case *MismatchTypeError:
-		if e == nil {
-			return err
-		}
-		cp := *e
-		cp.Src = string(rawVal)
-		return &cp
-	case *json.UnmarshalTypeError:
-		if e == nil || len(rawVal) == 0 {
-			return err
-		}
-		b0 := uintptr(unsafe.Pointer(&rawVal[0]))
-		bEnd := b0 + uintptr(len(rawVal))
-		valCloned, okV := cloneIfAliasesStreamVal(e.Value, b0, bEnd)
-		fldCloned, okF := cloneIfAliasesStreamVal(e.Field, b0, bEnd)
-		if okV || okF {
-			cp := *e
-			if okV {
-				cp.Value = valCloned
-			}
-			if okF {
-				cp.Field = fldCloned
-			}
-			return &cp
-		}
-		return err
-	case *strconv.NumError:
-		if e == nil || len(rawVal) == 0 {
-			return err
-		}
-		b0 := uintptr(unsafe.Pointer(&rawVal[0]))
-		bEnd := b0 + uintptr(len(rawVal))
-		if cloned, ok := cloneIfAliasesStreamVal(e.Num, b0, bEnd); ok {
-			cp := *e
-			cp.Num = cloned
-			return &cp
-		}
-		return err
-	default:
-		return err
 	}
 }
 

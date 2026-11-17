@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/vars"
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/utf8"
 )
@@ -630,6 +631,7 @@ func AppendSanitizedBytes(dst []byte, src []byte, sanitize uint64) []byte {
 const (
 	compactPhaseValue uint8 = iota
 	compactPhaseAfterValue
+	compactPhaseElemOrEnd
 	compactPhaseObjKeyOrEnd
 	compactPhaseObjKey
 	compactPhaseObjColon
@@ -651,52 +653,339 @@ func quoteEscapeBits64Strict(w uint64) uint64 {
 	return ((w - saniSp64) & ^w) | ((q - saniLSB64) & ^q) | ((bs - saniLSB64) & ^bs)
 }
 
-func scanStrictJSONNumber(src []byte, pos int) (int, bool) {
-	n := len(src)
-	i := pos
-	if i < n && src[i] == '-' {
-		i++
-	}
-	if i >= n {
-		return pos, false
-	}
-	if src[i] == '0' {
-		i++
-	} else if src[i] >= '1' && src[i] <= '9' {
-		i++
-		for i < n && src[i] >= '0' && src[i] <= '9' {
-			i++
-		}
-	} else {
-		return pos, false
-	}
-	if i < n && src[i] == '.' {
-		i++
-		if i >= n || src[i] < '0' || src[i] > '9' {
-			return pos, false
-		}
-		i++
-		for i < n && src[i] >= '0' && src[i] <= '9' {
-			i++
-		}
-	}
-	if i < n && (src[i] == 'e' || src[i] == 'E') {
-		i++
-		if i < n && (src[i] == '+' || src[i] == '-') {
-			i++
-		}
-		if i >= n || src[i] < '0' || src[i] > '9' {
-			return pos, false
-		}
-		i++
-		for i < n && src[i] >= '0' && src[i] <= '9' {
-			i++
-		}
-	}
-	return i, true
+type compactScanResult struct {
+	valid         bool
+	hasSpace      bool
+	needsRewrite  bool
+	firstDirtyPos int
 }
 
-func appendCompactedJSONStringContent(dst []byte, src []byte, i int, sanitize uint64) ([]byte, int, bool) {
+// scanStrictJSONString validates RFC 8259 string syntax starting right after the
+// opening quote (at index i) and reports whether any byte inside the string
+// requires HTML or UTF-8 rewriting under sanitize. Existing valid escape
+// sequences (\uXXXX, \/, etc.) are accepted without rewrite.
+func scanStrictJSONString(src []byte, i int, sanitize uint64) (endPos int, needsRewrite bool, ok bool) {
+	nb := len(src)
+	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
+	validateUTF8 := sanitize&(1<<BitValidateString) != 0
+	sp := unsafe.Pointer(rt.SliceData(src))
+
+	for i < nb {
+		if sanitize == 0 || needsRewrite {
+			for i+8 <= nb {
+				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
+				mask := quoteEscapeBits64Strict(w) & saniMSB64
+				if mask != 0 {
+					i += bits.TrailingZeros64(mask) >> 3
+					break
+				}
+				i += 8
+			}
+		} else if !validateUTF8 {
+			for i+8 <= nb {
+				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
+				mask := quoteSafeHTMLNoValBits64(w) & saniMSB64
+				if mask != 0 {
+					i += bits.TrailingZeros64(mask) >> 3
+					break
+				}
+				i += 8
+			}
+		} else {
+			for i+8 <= nb {
+				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
+				mask := quoteSafeHTMLBits64(w) & saniMSB64
+				if mask != 0 {
+					i += bits.TrailingZeros64(mask) >> 3
+					break
+				}
+				i += 8
+			}
+		}
+		if i >= nb {
+			return i, false, false
+		}
+		c := src[i]
+		if c == '"' {
+			return i + 1, needsRewrite, true
+		}
+		if c < 0x20 {
+			return i, false, false
+		}
+		if c == '\\' {
+			if i+1 >= nb {
+				return i, false, false
+			}
+			switch src[i+1] {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				i += 2
+			case 'u':
+				if i+6 > nb || !isHexByte(src[i+2]) || !isHexByte(src[i+3]) || !isHexByte(src[i+4]) || !isHexByte(src[i+5]) {
+					return i, false, false
+				}
+				i += 6
+			default:
+				return i, false, false
+			}
+			continue
+		}
+		if c < 0x80 {
+			if escapeHTML && (c == '<' || c == '>' || c == '&') {
+				needsRewrite = true
+			}
+			i++
+			continue
+		}
+		if needsRewrite {
+			i++
+			continue
+		}
+		if c >= 0xe0 && c <= 0xef && i+2 < nb {
+			b1 := src[i+1]
+			b2 := src[i+2]
+			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (c != 0xe0 || b1 >= 0xa0) && (c != 0xed || b1 < 0xa0) {
+				if escapeHTML && c == 0xe2 && b1 == 0x80 && (b2&^1) == 0xa8 {
+					needsRewrite = true
+				}
+				i += 3
+				continue
+			}
+		} else if c >= 0xc2 && c <= 0xdf && i+1 < nb {
+			if (src[i+1] & 0xc0) == 0x80 {
+				i += 2
+				continue
+			}
+		} else if c >= 0xf0 && c <= 0xf4 && i+3 < nb {
+			b1 := src[i+1]
+			b2 := src[i+2]
+			b3 := src[i+3]
+			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (b3&0xc0) == 0x80 && (c != 0xf0 || b1 >= 0x90) && (c != 0xf4 || b1 < 0x90) {
+				i += 4
+				continue
+			}
+		}
+		if validateUTF8 {
+			needsRewrite = true
+		}
+		i++
+	}
+	return i, false, false
+}
+
+// scanCompactJSON is the single authoritative RFC 8259 grammar scanner for
+// AppendCompactedJSON. It validates src in one pass using shared number.Scan and
+// scanStrictJSONString, reporting whether src is valid JSON, whether inter-token
+// whitespace exists, whether any string needs HTML/UTF-8 rewriting, and the byte
+// offset of the first token or whitespace requiring compaction/rewriting.
+func scanCompactJSON(src []byte, sanitize uint64) compactScanResult {
+	nb := len(src)
+	if nb == 0 {
+		return compactScanResult{}
+	}
+	srcStr := rt.Mem2Str(src)
+	var stackBuf [64]byte
+	stack := stackBuf[:0]
+	phase := compactPhaseValue
+	firstDirty := -1
+	hasSpace := false
+	needsRewrite := false
+	i := 0
+
+	for i < nb {
+		c := src[i]
+		if c <= ' ' {
+			if !isJSONSpaceByte(c) {
+				return compactScanResult{}
+			}
+			if firstDirty < 0 {
+				firstDirty = i
+			}
+			hasSpace = true
+			i++
+			for i < nb && isJSONSpaceByte(src[i]) {
+				i++
+			}
+			continue
+		}
+
+		if phase == compactPhaseElemOrEnd {
+			if c == ']' {
+				stack = stack[:len(stack)-1]
+				phase = compactPhaseAfterValue
+				i++
+				continue
+			}
+			phase = compactPhaseValue
+		}
+
+		switch phase {
+		case compactPhaseValue:
+			switch c {
+			case '{':
+				if len(stack) >= maxCompactNestingDepth {
+					return compactScanResult{}
+				}
+				stack = append(stack, '{')
+				phase = compactPhaseObjKeyOrEnd
+				i++
+			case '[':
+				if len(stack) >= maxCompactNestingDepth {
+					return compactScanResult{}
+				}
+				stack = append(stack, '[')
+				i++
+				if i < nb && src[i] == ']' {
+					stack = stack[:len(stack)-1]
+					phase = compactPhaseAfterValue
+					i++
+				} else {
+					phase = compactPhaseElemOrEnd
+				}
+			case '"':
+				quoteStart := i
+				nextPos, strRewrite, ok := scanStrictJSONString(src, i+1, sanitize)
+				if !ok {
+					return compactScanResult{}
+				}
+				if strRewrite {
+					if firstDirty < 0 {
+						firstDirty = quoteStart
+					}
+					needsRewrite = true
+				}
+				i = nextPos
+				phase = compactPhaseAfterValue
+			case 't':
+				if i+4 > nb || src[i+1] != 'r' || src[i+2] != 'u' || src[i+3] != 'e' {
+					return compactScanResult{}
+				}
+				i += 4
+				phase = compactPhaseAfterValue
+			case 'f':
+				if i+5 > nb || src[i+1] != 'a' || src[i+2] != 'l' || src[i+3] != 's' || src[i+4] != 'e' {
+					return compactScanResult{}
+				}
+				i += 5
+				phase = compactPhaseAfterValue
+			case 'n':
+				if i+4 > nb || src[i+1] != 'u' || src[i+2] != 'l' || src[i+3] != 'l' {
+					return compactScanResult{}
+				}
+				i += 4
+				phase = compactPhaseAfterValue
+			default:
+				endNum, numErr := number.Scan(srcStr, i)
+				if numErr != 0 {
+					return compactScanResult{}
+				}
+				i = endNum
+				phase = compactPhaseAfterValue
+			}
+
+		case compactPhaseObjKeyOrEnd:
+			if c == '}' {
+				stack = stack[:len(stack)-1]
+				phase = compactPhaseAfterValue
+				i++
+				continue
+			}
+			if c != '"' {
+				return compactScanResult{}
+			}
+			quoteStart := i
+			nextPos, strRewrite, ok := scanStrictJSONString(src, i+1, sanitize)
+			if !ok {
+				return compactScanResult{}
+			}
+			if strRewrite {
+				if firstDirty < 0 {
+					firstDirty = quoteStart
+				}
+				needsRewrite = true
+			}
+			i = nextPos
+			phase = compactPhaseObjColon
+
+		case compactPhaseObjKey:
+			if c != '"' {
+				return compactScanResult{}
+			}
+			quoteStart := i
+			nextPos, strRewrite, ok := scanStrictJSONString(src, i+1, sanitize)
+			if !ok {
+				return compactScanResult{}
+			}
+			if strRewrite {
+				if firstDirty < 0 {
+					firstDirty = quoteStart
+				}
+				needsRewrite = true
+			}
+			i = nextPos
+			phase = compactPhaseObjColon
+
+		case compactPhaseObjColon:
+			if c != ':' {
+				return compactScanResult{}
+			}
+			phase = compactPhaseValue
+			i++
+
+		case compactPhaseAfterValue:
+			if len(stack) == 0 {
+				return compactScanResult{}
+			}
+			top := stack[len(stack)-1]
+			if top == '{' {
+				if c == ',' {
+					phase = compactPhaseObjKey
+					i++
+				} else if c == '}' {
+					stack = stack[:len(stack)-1]
+					i++
+				} else {
+					return compactScanResult{}
+				}
+			} else {
+				if c == ',' {
+					phase = compactPhaseValue
+					i++
+				} else if c == ']' {
+					stack = stack[:len(stack)-1]
+					i++
+				} else {
+					return compactScanResult{}
+				}
+			}
+		}
+	}
+
+	if phase != compactPhaseAfterValue || len(stack) != 0 {
+		return compactScanResult{}
+	}
+	return compactScanResult{
+		valid:         true,
+		hasSpace:      hasSpace,
+		needsRewrite:  needsRewrite,
+		firstDirtyPos: firstDirty,
+	}
+}
+
+// compactStdSyntaxError is the single stdlib error adapter used when
+// scanCompactJSON rejects invalid JSON, preserving encoding/json.Compact's exact
+// error type and message without re-running stdlib on valid fast paths.
+func compactStdSyntaxError(src []byte) error {
+	var errBuf bytes.Buffer
+	if err := json.Compact(&errBuf, src); err != nil {
+		return err
+	}
+	return &json.SyntaxError{}
+}
+
+// appendValidatedJSONStringContent copies an already-validated JSON string body
+// (starting after the opening quote at index i) to dst while preserving existing
+// escape spellings verbatim and applying optional HTML/UTF-8 rewriting.
+func appendValidatedJSONStringContent(dst []byte, src []byte, i int, sanitize uint64) ([]byte, int) {
 	nb := len(src)
 	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
 	validateUTF8 := sanitize&(1<<BitValidateString) != 0
@@ -741,39 +1030,24 @@ func appendCompactedJSONStringContent(dst []byte, src []byte, i int, sanitize ui
 				i += 8
 			}
 		}
-		if i >= nb {
-			return dst[:bLen], i, false
-		}
 		c := *(*byte)(unsafe.Add(sp, i))
 		dp := unsafe.Add(bPtr, bLen)
 		if c == '"' {
 			*(*byte)(dp) = '"'
-			return dst[:bLen+1], i + 1, true
-		}
-		if c < 0x20 {
-			return dst[:bLen], i, false
+			return dst[:bLen+1], i + 1
 		}
 		if c == '\\' {
-			if i+1 >= nb {
-				return dst[:bLen], i, false
-			}
 			esc := *(*byte)(unsafe.Add(sp, i+1))
-			switch esc {
-			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
-				*(*byte)(dp) = '\\'
-				*(*byte)(unsafe.Add(dp, 1)) = esc
-				bLen += 2
-				i += 2
-			case 'u':
-				if i+6 > nb || !isHexByte(src[i+2]) || !isHexByte(src[i+3]) || !isHexByte(src[i+4]) || !isHexByte(src[i+5]) {
-					return dst[:bLen], i, false
-				}
+			if esc == 'u' {
 				*(*[4]byte)(dp) = *(*[4]byte)(unsafe.Add(sp, i))
 				*(*[2]byte)(unsafe.Add(dp, 4)) = *(*[2]byte)(unsafe.Add(sp, i+4))
 				bLen += 6
 				i += 6
-			default:
-				return dst[:bLen], i, false
+			} else {
+				*(*byte)(dp) = '\\'
+				*(*byte)(unsafe.Add(dp, 1)) = esc
+				bLen += 2
+				i += 2
 			}
 			continue
 		}
@@ -792,430 +1066,68 @@ func appendCompactedJSONStringContent(dst []byte, src []byte, i int, sanitize ui
 		}
 		bLen, i = appendUTF8OrInvalidByte(bPtr, bLen, sp, i, nb, escapeHTML, validateUTF8)
 	}
-	return dst[:bLen], i, false
+	return dst[:bLen], i
 }
 
-func scanCleanJSONStringContent(src []byte, i int, sanitize uint64) (int, bool) {
+// rewriteValidatedCompactJSON compacts src[start:] into dst after scanCompactJSON
+// has already proven src is syntactically valid and src[:start] is clean. It
+// focuses solely on dropping inter-token whitespace, copying non-string tokens
+// (including raw number and literal spellings) verbatim, and rewriting strings.
+func rewriteValidatedCompactJSON(dst []byte, src []byte, start int, sanitize uint64) []byte {
 	nb := len(src)
-	escapeHTML := sanitize&(1<<BitEscapeHTML) != 0
-	validateUTF8 := sanitize&(1<<BitValidateString) != 0
-	sp := unsafe.Pointer(rt.SliceData(src))
-
-	for i < nb {
-		if sanitize == 0 {
-			for i+8 <= nb {
-				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
-				mask := quoteEscapeBits64Strict(w) & saniMSB64
-				if mask != 0 {
-					i += bits.TrailingZeros64(mask) >> 3
-					break
-				}
-				i += 8
-			}
-		} else {
-			for i+8 <= nb {
-				w := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(sp, i))[:])
-				mask := quoteSafeHTMLBits64(w) & saniMSB64
-				if mask != 0 {
-					i += bits.TrailingZeros64(mask) >> 3
-					break
-				}
-				i += 8
-			}
-		}
-		if i >= nb {
-			return i, false
-		}
-		c := src[i]
-		if c == '"' {
-			return i + 1, true
-		}
-		if c < 0x20 {
-			return i, false
-		}
-		if c == '\\' {
-			if i+1 >= nb {
-				return i, false
-			}
-			switch src[i+1] {
-			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
-				i += 2
-			case 'u':
-				if i+6 > nb || !isHexByte(src[i+2]) || !isHexByte(src[i+3]) || !isHexByte(src[i+4]) || !isHexByte(src[i+5]) {
-					return i, false
-				}
-				i += 6
-			default:
-				return i, false
-			}
-			continue
-		}
-		if c < 0x80 {
-			if escapeHTML && (c == '<' || c == '>' || c == '&') {
-				return i, false
-			}
-			i++
-			continue
-		}
-		if c >= 0xe0 && c <= 0xef && i+2 < nb {
-			b1 := src[i+1]
-			b2 := src[i+2]
-			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (c != 0xe0 || b1 >= 0xa0) && (c != 0xed || b1 < 0xa0) {
-				if escapeHTML && c == 0xe2 && b1 == 0x80 && (b2&^1) == 0xa8 {
-					return i, false
-				}
-				i += 3
-				continue
-			}
-		} else if c >= 0xc2 && c <= 0xdf && i+1 < nb {
-			if (src[i+1] & 0xc0) == 0x80 {
-				i += 2
-				continue
-			}
-		} else if c >= 0xf0 && c <= 0xf4 && i+3 < nb {
-			b1 := src[i+1]
-			b2 := src[i+2]
-			b3 := src[i+3]
-			if (b1&0xc0) == 0x80 && (b2&0xc0) == 0x80 && (b3&0xc0) == 0x80 && (c != 0xf0 || b1 >= 0x90) && (c != 0xf4 || b1 < 0x90) {
-				i += 4
-				continue
-			}
-		}
-		if validateUTF8 {
-			return i, false
-		}
-		i++
-	}
-	return i, false
-}
-
-// validateCompactAndCleanJSON reports whether src is a single valid JSON value
-// that already has no outer/inter-token whitespace and requires no HTML or UTF-8
-// escaping expansion under sanitize.
-func validateCompactAndCleanJSON(src []byte, sanitize uint64) bool {
-	nb := len(src)
-	if nb == 0 {
-		return false
-	}
-	var stackBuf [64]byte
-	stack := stackBuf[:0]
-	phase := compactPhaseValue
-	i := 0
-
+	i := start
 	for i < nb {
 		c := src[i]
 		if c <= ' ' {
-			return false
-		}
-		switch phase {
-		case compactPhaseValue:
-			switch c {
-			case '{':
-				if len(stack) >= maxCompactNestingDepth {
-					return false
-				}
-				stack = append(stack, '{')
-				phase = compactPhaseObjKeyOrEnd
-				i++
-			case '[':
-				if len(stack) >= maxCompactNestingDepth {
-					return false
-				}
-				stack = append(stack, '[')
-				i++
-				if i < nb && src[i] == ']' {
-					stack = stack[:len(stack)-1]
-					phase = compactPhaseAfterValue
-					i++
-				}
-			case '"':
-				var ok bool
-				i, ok = scanCleanJSONStringContent(src, i+1, sanitize)
-				if !ok {
-					return false
-				}
-				phase = compactPhaseAfterValue
-			case 't':
-				if i+4 > nb || src[i+1] != 'r' || src[i+2] != 'u' || src[i+3] != 'e' {
-					return false
-				}
-				i += 4
-				phase = compactPhaseAfterValue
-			case 'f':
-				if i+5 > nb || src[i+1] != 'a' || src[i+2] != 'l' || src[i+3] != 's' || src[i+4] != 'e' {
-					return false
-				}
-				i += 5
-				phase = compactPhaseAfterValue
-			case 'n':
-				if i+4 > nb || src[i+1] != 'u' || src[i+2] != 'l' || src[i+3] != 'l' {
-					return false
-				}
-				i += 4
-				phase = compactPhaseAfterValue
-			default:
-				endNum, ok := scanStrictJSONNumber(src, i)
-				if !ok {
-					return false
-				}
-				i = endNum
-				phase = compactPhaseAfterValue
-			}
-		case compactPhaseObjKeyOrEnd:
-			if c == '}' {
-				stack = stack[:len(stack)-1]
-				phase = compactPhaseAfterValue
-				i++
-				continue
-			}
-			if c != '"' {
-				return false
-			}
-			var ok bool
-			i, ok = scanCleanJSONStringContent(src, i+1, sanitize)
-			if !ok {
-				return false
-			}
-			phase = compactPhaseObjColon
-		case compactPhaseObjKey:
-			if c != '"' {
-				return false
-			}
-			var ok bool
-			i, ok = scanCleanJSONStringContent(src, i+1, sanitize)
-			if !ok {
-				return false
-			}
-			phase = compactPhaseObjColon
-		case compactPhaseObjColon:
-			if c != ':' {
-				return false
-			}
-			phase = compactPhaseValue
 			i++
-		case compactPhaseAfterValue:
-			if len(stack) == 0 {
-				return false
+			for i < nb && src[i] <= ' ' {
+				i++
 			}
-			top := stack[len(stack)-1]
-			if top == '{' {
-				if c == ',' {
-					phase = compactPhaseObjKey
-					i++
-				} else if c == '}' {
-					stack = stack[:len(stack)-1]
-					i++
-				} else {
-					return false
-				}
-			} else {
-				if c == ',' {
-					phase = compactPhaseValue
-					i++
-				} else if c == ']' {
-					stack = stack[:len(stack)-1]
-					i++
-				} else {
-					return false
-				}
-			}
+			continue
 		}
+		if c == '"' {
+			dst = append(dst, '"')
+			dst, i = appendValidatedJSONStringContent(dst, src, i+1, sanitize)
+			continue
+		}
+		runStart := i
+		i++
+		for i < nb && src[i] > ' ' && src[i] != '"' {
+			i++
+		}
+		dst = append(dst, src[runStart:i]...)
 	}
-	return phase == compactPhaseAfterValue && len(stack) == 0
+	return dst
 }
 
-// AppendCompactedJSON validates src as a single JSON value and appends its compacted
-// (and optionally HTML-escaped / UTF-8-sanitized) representation to dst.
-// It first pre-scans src for already-compact, escape-free JSON (using a 64-level
-// local container stack before heap growth) so clean inputs can be finalized in
-// place; if whitespace compaction or character escaping is required, it falls back
-// to a second pass that rewrites into dst. On invalid JSON, dst is restored to its
-// entry length and encoding/json.Compact's exact error is returned.
+// AppendCompactedJSON validates src as a single JSON value via scanCompactJSON
+// and appends its compacted (and optionally HTML-escaped / UTF-8-sanitized)
+// representation to dst. Clean, already-compact inputs finalize in place (or via
+// a single copy), dirty valid inputs copy their clean prefix and run linear token
+// compaction without a second grammar state machine, and invalid inputs preserve
+// dst and delegate to compactStdSyntaxError.
 func AppendCompactedJSON(dst []byte, src []byte, sanitize uint64) ([]byte, error) {
-	if validateCompactAndCleanJSON(src, sanitize) {
+	res := scanCompactJSON(src, sanitize)
+	if !res.valid {
+		return dst, compactStdSyntaxError(src)
+	}
+	if !res.hasSpace && !res.needsRewrite {
 		if isExactSpareSuffix(dst, src) {
 			return dst[:len(dst)+len(src)], nil
 		}
-		if !overlapsSpare(dst, src) {
-			return append(dst, src...), nil
-		}
+		src = DetachIfOverlappingSpare(dst, src)
+		return append(dst, src...), nil
 	}
-	origLen := len(dst)
+
 	src = DetachIfOverlappingSpare(dst, src)
 	nb := len(src)
 	if cap(dst)-len(dst) < nb+24 {
 		dst = rt.GuardSlice2(dst, nb+nb>>3+32)
 	}
-
-	var stackBuf [64]byte
-	stack := stackBuf[:0]
-	phase := compactPhaseValue
-	i := 0
-
-	fail := func() ([]byte, error) {
-		dst = dst[:origLen]
-		var errBuf bytes.Buffer
-		if err := json.Compact(&errBuf, src); err != nil {
-			return dst, err
-		}
-		return AppendSanitizedBytes(dst, errBuf.Bytes(), sanitize), nil
+	if res.firstDirtyPos > 0 {
+		dst = append(dst, src[:res.firstDirtyPos]...)
 	}
-
-	for i < nb {
-		c := src[i]
-		if c <= ' ' {
-			if !isJSONSpaceByte(c) {
-				return fail()
-			}
-			i++
-			for i < nb && isJSONSpaceByte(src[i]) {
-				i++
-			}
-			continue
-		}
-
-		switch phase {
-		case compactPhaseValue:
-			switch c {
-			case '{':
-				if len(stack) >= maxCompactNestingDepth {
-					return fail()
-				}
-				dst = append(dst, '{')
-				stack = append(stack, '{')
-				phase = compactPhaseObjKeyOrEnd
-				i++
-			case '[':
-				if len(stack) >= maxCompactNestingDepth {
-					return fail()
-				}
-				dst = append(dst, '[')
-				stack = append(stack, '[')
-				i++
-				for i < nb && isJSONSpaceByte(src[i]) {
-					i++
-				}
-				if i < nb && src[i] == ']' {
-					dst = append(dst, ']')
-					stack = stack[:len(stack)-1]
-					phase = compactPhaseAfterValue
-					i++
-				}
-			case '"':
-				dst = append(dst, '"')
-				var ok bool
-				dst, i, ok = appendCompactedJSONStringContent(dst, src, i+1, sanitize)
-				if !ok {
-					return fail()
-				}
-				phase = compactPhaseAfterValue
-			case 't':
-				if i+4 > nb || src[i+1] != 'r' || src[i+2] != 'u' || src[i+3] != 'e' {
-					return fail()
-				}
-				dst = append(dst, "true"...)
-				i += 4
-				phase = compactPhaseAfterValue
-			case 'f':
-				if i+5 > nb || src[i+1] != 'a' || src[i+2] != 'l' || src[i+3] != 's' || src[i+4] != 'e' {
-					return fail()
-				}
-				dst = append(dst, "false"...)
-				i += 5
-				phase = compactPhaseAfterValue
-			case 'n':
-				if i+4 > nb || src[i+1] != 'u' || src[i+2] != 'l' || src[i+3] != 'l' {
-					return fail()
-				}
-				dst = append(dst, "null"...)
-				i += 4
-				phase = compactPhaseAfterValue
-			default:
-				endNum, ok := scanStrictJSONNumber(src, i)
-				if !ok {
-					return fail()
-				}
-				dst = append(dst, src[i:endNum]...)
-				i = endNum
-				phase = compactPhaseAfterValue
-			}
-
-		case compactPhaseObjKeyOrEnd:
-			if c == '}' {
-				dst = append(dst, '}')
-				stack = stack[:len(stack)-1]
-				phase = compactPhaseAfterValue
-				i++
-				continue
-			}
-			if c != '"' {
-				return fail()
-			}
-			dst = append(dst, '"')
-			var ok bool
-			dst, i, ok = appendCompactedJSONStringContent(dst, src, i+1, sanitize)
-			if !ok {
-				return fail()
-			}
-			phase = compactPhaseObjColon
-
-		case compactPhaseObjKey:
-			if c != '"' {
-				return fail()
-			}
-			dst = append(dst, '"')
-			var ok bool
-			dst, i, ok = appendCompactedJSONStringContent(dst, src, i+1, sanitize)
-			if !ok {
-				return fail()
-			}
-			phase = compactPhaseObjColon
-
-		case compactPhaseObjColon:
-			if c != ':' {
-				return fail()
-			}
-			dst = append(dst, ':')
-			phase = compactPhaseValue
-			i++
-
-		case compactPhaseAfterValue:
-			if len(stack) == 0 {
-				return fail()
-			}
-			top := stack[len(stack)-1]
-			if top == '{' {
-				if c == ',' {
-					dst = append(dst, ',')
-					phase = compactPhaseObjKey
-					i++
-				} else if c == '}' {
-					dst = append(dst, '}')
-					stack = stack[:len(stack)-1]
-					i++
-				} else {
-					return fail()
-				}
-			} else {
-				if c == ',' {
-					dst = append(dst, ',')
-					phase = compactPhaseValue
-					i++
-				} else if c == ']' {
-					dst = append(dst, ']')
-					stack = stack[:len(stack)-1]
-					i++
-				} else {
-					return fail()
-				}
-			}
-		}
-	}
-
-	if phase != compactPhaseAfterValue || len(stack) != 0 {
-		return fail()
-	}
-	return dst, nil
+	return rewriteValidatedCompactJSON(dst, src, res.firstDirtyPos, sanitize), nil
 }
 
 func AppendSanitizedLiteral(buf []byte, s string, sanitize uint64) []byte {

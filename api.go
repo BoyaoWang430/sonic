@@ -74,7 +74,8 @@ type Config struct {
 	// non-ignored, exported fields in the destination.
 	DisallowUnknownFields bool
 
-	// CopyString indicates decoder to decode string values by copying instead of referring.
+	// CopyString indicates decoder to decode string values by copying into bounded
+	// standalone slabs instead of referencing the input string.
 	CopyString bool
 
 	// ValidateString indicates decoder and encoder to validate string values: decoder will return errors
@@ -193,13 +194,17 @@ func MarshalString(val interface{}) (string, error) {
 }
 
 // Unmarshal parses the JSON-encoded data and stores the result in the value pointed to by v.
-// NOTICE: This API copies given buffer by default,
-// if you want to pass JSON more efficiently, use UnmarshalString instead.
+// Decoded built-in strings and returned errors are detached from buf so buf may be reused
+// after Unmarshal returns (custom json.Unmarshaler implementations that retain their []byte
+// argument must copy it themselves per encoding/json rules).
 func Unmarshal(buf []byte, val interface{}) error {
 	return ConfigDefault.Unmarshal(buf, val)
 }
 
-// UnmarshalString is like Unmarshal, except buf is a string.
+// UnmarshalString is like Unmarshal, except buf is an immutable string.
+// When CopyString is false (the default in ConfigDefault), unescaped decoded strings may
+// borrow substrings of buf directly; if buf was constructed via an unsafe []byte-to-string
+// cast, the caller must keep the backing bytes immutable for the lifetime of decoded values.
 func UnmarshalString(buf string, val interface{}) error {
 	return ConfigDefault.UnmarshalFromString(buf, val)
 }

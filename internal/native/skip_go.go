@@ -21,9 +21,10 @@ const (
 
 const noValidateJSON = uint64(1 << types.B_NO_VALIDATE_JSON)
 
-// SkipOne returns the first non-space position, or a negative ParsingError.
-// The caller receives the end/error cursor through p. String validation is
-// controlled by F_VALIDATE_STRING, independently of structural validation.
+// SkipOne dispatches between relaxed boundary location (SkipOneFast when
+// B_NO_VALIDATE_JSON is set) and structural JSON validation (ValidateOne).
+// Prefer calling ValidateOne or SkipOneFast directly rather than introducing
+// new mixed-meaning flag bits.
 func SkipOne(s *string, p *int, m *types.StateMachine, flags uint64) int {
 	if flags&noValidateJSON != 0 {
 		return SkipOneFast(s, p)
