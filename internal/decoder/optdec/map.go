@@ -586,75 +586,36 @@ func (d *mapStrKeyDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 
 	var gerr error
 	next := obj.Children()
-	opts := ctx.options
-	if psd := d.ptrStructDec; psd != nil && !d.freshElem && psd.canFastObj(opts) {
-		jsonStr := ctx.Doc.Json
-		copyStr := opts&(1<<_F_copy_string) != 0
+	if psd := d.ptrStructDec; psd != nil && !d.freshElem {
+		epPtr := (*unsafe.Pointer)(ep)
 		for i := 0; i < obj.Len(); i++ {
 			keyn := NewNode(next)
 			key, _ := keyn.AsStr(ctx)
 			kv.SetString(key)
 
+			*epPtr = nil
 			vptr := PtrOffset(next, 1)
-			vtyp := uint8(vptr.typ)
-			if vtyp == KObject {
-				next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
-				subPtr := psd.allocPtr(ctx)
-				if uint32(vptr.val) != 0 {
-					err := psd.fromObjFast(subPtr, vptr, jsonStr, copyStr, ctx)
-					if gerr == nil && err != nil {
-						gerr = err
-					}
-				}
-				*(*unsafe.Pointer)(ep) = subPtr
-				mv.SetMapIndex(kv, ev)
-				continue
-			}
-			if vtyp == KNull {
-				mv.SetMapIndex(kv, d.zeroElem)
-				next = PtrOffset(vptr, 1)
-				continue
-			}
-			valn := NewNode(vptr)
-			err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
+			var err error
+			next, err = psd.decodePtrSlot(epPtr, vptr, d.elemDec, ctx)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
-			next = valn.Next()
+			mv.SetMapIndex(kv, ev)
 		}
-	} else if sd := d.structDec; sd != nil && !d.freshElem && sd.canFastObj(opts) {
-		jsonStr := ctx.Doc.Json
-		copyStr := opts&(1<<_F_copy_string) != 0
+	} else if sd := d.structDec; sd != nil && !d.freshElem {
 		for i := 0; i < obj.Len(); i++ {
 			keyn := NewNode(next)
 			key, _ := keyn.AsStr(ctx)
 			kv.SetString(key)
 
 			vptr := PtrOffset(next, 1)
-			vtyp := uint8(vptr.typ)
-			if vtyp == KObject {
-				next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
-				ev.Set(d.zeroElem)
-				if uint32(vptr.val) != 0 {
-					err := sd.fromObjFast(ep, vptr, jsonStr, copyStr, ctx)
-					if gerr == nil && err != nil {
-						gerr = err
-					}
-				}
-				mv.SetMapIndex(kv, ev)
-				continue
-			}
-			if vtyp == KNull {
-				mv.SetMapIndex(kv, d.zeroElem)
-				next = PtrOffset(vptr, 1)
-				continue
-			}
-			valn := NewNode(vptr)
-			err := decodeMapEntry(mv, kv, ev, d.zeroElem, ep, d.elemType, d.freshElem, d.elemDec, valn, ctx)
+			ev.Set(d.zeroElem)
+			var err error
+			next, err = sd.decodeValueSlot(ep, vptr, ctx)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
-			next = valn.Next()
+			mv.SetMapIndex(kv, ev)
 		}
 	} else {
 		for i := 0; i < obj.Len(); i++ {

@@ -231,74 +231,10 @@ type structDecoder struct {
 	structName    string
 	typ           reflect.Type
 	goType        reflect.Type
-	sliceType     reflect.Type
-	elemSize      uintptr
-	maxPtrBatch   uint16
 	fast          bool
 	noInterface   bool
 	ptrScalarHint uint8
 	ptrStrHint    uint8
-}
-
-func (d *structDecoder) allocPtr(ctx *Context) unsafe.Pointer {
-	if d.maxPtrBatch < 2 || d.sliceType == nil || ctx == nil {
-		return reflect.New(d.goType).UnsafePointer()
-	}
-	for i := range ctx.ptrStructSlabs {
-		slot := &ctx.ptrStructSlabs[i]
-		if slot.sd == d {
-			if slot.rem > 0 {
-				ptr := slot.base
-				slot.rem--
-				if slot.rem > 0 {
-					slot.base = unsafe.Add(ptr, d.elemSize)
-				} else {
-					slot.base = nil
-				}
-				return ptr
-			}
-			return d.allocPtrBatchSlow(slot)
-		}
-		if slot.sd == nil {
-			slot.sd = d
-			slot.next = 4
-			return reflect.New(d.goType).UnsafePointer()
-		}
-	}
-	for i := range ctx.ptrStructSlabs {
-		slot := &ctx.ptrStructSlabs[i]
-		if slot.rem == 0 {
-			slot.sd = d
-			slot.next = 4
-			return reflect.New(d.goType).UnsafePointer()
-		}
-	}
-	return reflect.New(d.goType).UnsafePointer()
-}
-
-//go:noinline
-func (d *structDecoder) allocPtrBatchSlow(slot *ptrStructSlabSlot) unsafe.Pointer {
-	n := slot.next
-	if n < 2 {
-		n = 4
-	}
-	maxBatch := int(d.maxPtrBatch)
-	if maxBatch < 2 {
-		return reflect.New(d.goType).UnsafePointer()
-	}
-	if n > maxBatch {
-		n = maxBatch
-	}
-	next := n * 2
-	if next > maxBatch {
-		next = maxBatch
-	}
-	slot.next = next
-	rv := reflect.MakeSlice(d.sliceType, n, n)
-	base := rv.UnsafePointer()
-	slot.base = unsafe.Add(base, d.elemSize)
-	slot.rem = n - 1
-	return base
 }
 
 // canFastObj reports whether this struct decoder can run fromObjFast under opts.
@@ -311,6 +247,55 @@ func (d *structDecoder) canFastObj(opts uint64) bool {
 		exclude = fastStructStrictExcludeMask
 	}
 	return opts&exclude == 0
+}
+
+// decodeValueSlot decodes one JSON value at vptr into an existing struct value
+// slot (elem) and returns the next sibling *node cursor and any decode error.
+func (d *structDecoder) decodeValueSlot(elem unsafe.Pointer, vptr *node, ctx *Context) (*node, error) {
+	vtyp := uint8(vptr.typ)
+	if vtyp == KObject {
+		next := PtrOffset(vptr, int64(vptr.val>>ConLenBits))
+		if uint32(vptr.val) == 0 {
+			return next, nil
+		}
+		opts := ctx.options
+		if d.canFastObj(opts) {
+			return next, d.fromObjFast(elem, vptr, ctx.Doc.Json, opts&(1<<_F_copy_string) != 0, ctx)
+		}
+		return next, d.fromObjSlow(elem, vptr, opts, ctx)
+	}
+	val := NewNode(vptr)
+	err := d.FromDom(elem, val, ctx)
+	return val.Next(), err
+}
+
+// decodePtrSlot decodes one JSON value at vptr into a *Struct pointer slot (pp)
+// and returns the next sibling *node cursor and any decode error.
+func (d *structDecoder) decodePtrSlot(pp *unsafe.Pointer, vptr *node, elemDec decFunc, ctx *Context) (*node, error) {
+	vtyp := uint8(vptr.typ)
+	if vtyp == KNull {
+		*pp = nil
+		return PtrOffset(vptr, 1), nil
+	}
+	if vtyp == KObject {
+		next := PtrOffset(vptr, int64(vptr.val>>ConLenBits))
+		dst := *pp
+		if dst == nil {
+			dst = reflect.New(d.goType).UnsafePointer()
+			*pp = dst
+		}
+		if uint32(vptr.val) == 0 {
+			return next, nil
+		}
+		opts := ctx.options
+		if d.canFastObj(opts) {
+			return next, d.fromObjFast(dst, vptr, ctx.Doc.Json, opts&(1<<_F_copy_string) != 0, ctx)
+		}
+		return next, d.fromObjSlow(dst, vptr, opts, ctx)
+	}
+	val := NewNode(vptr)
+	err := elemDec.FromDom(unsafe.Pointer(pp), val, ctx)
+	return val.Next(), err
 }
 
 func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {

@@ -729,7 +729,7 @@ func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 	}
 	if cap(*dst) >= size {
 		s = (*dst)[:size]
-	} else if *dst == nil && ctx.sliceArena != nil {
+	} else if *dst == nil && ctx.sliceArenaEnabled {
 		s = ctx.allocEfaceSlice(size)
 	} else {
 		s = prepareSlice(dst, size)
@@ -1279,7 +1279,7 @@ func strEscapedAny(ctx *Context, off int, val uint64) any {
 
 // AsEface will always ok, because we have parse in native.
 func (node *Node) AsEface(ctx *Context) (interface{}, error) {
-	if ctx.isEface && (ctx.options&(1<<_F_use_int64)) == 0 && node.ptr == ctx.Root().ptr && ctx.sliceArena == nil {
+	if ctx.isEface && (ctx.options&(1<<_F_use_int64)) == 0 && node.ptr == ctx.Root().ptr && !ctx.sliceArenaEnabled {
 		ctx.initSliceArena()
 	}
 	return node.AsEfaceFallback(ctx)
@@ -1380,7 +1380,7 @@ func decodeEfaceAtFastNoCopy(cur *node, ctx *Context, jsonStr string) (interface
 			return emptyEfaceSliceAny, next, nil
 		}
 		var a []interface{}
-		if ctx.sliceArena != nil {
+		if ctx.sliceArenaEnabled {
 			a = ctx.allocEfaceSlice(size)
 		} else {
 			a = make([]interface{}, size)
@@ -1547,7 +1547,7 @@ func decodeEfaceAt(cur *node, ctx *Context, opts uint64, copyStr bool, numSpecia
 			return emptyEfaceSliceAny, next, nil
 		}
 		var a []interface{}
-		if ctx.sliceArena != nil {
+		if ctx.sliceArenaEnabled {
 			a = ctx.allocEfaceSlice(size)
 		} else {
 			a = make([]interface{}, size)

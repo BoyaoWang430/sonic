@@ -133,13 +133,6 @@ type strAnySlot struct {
 	v any
 }
 
-type ptrStructSlabSlot struct {
-	sd   *structDecoder
-	base unsafe.Pointer
-	rem  int
-	next int
-}
-
 // only when parse non-empty object/array are needed.
 type jsonStat struct {
 	object      uint32

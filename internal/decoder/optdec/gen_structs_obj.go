@@ -59,6 +59,7 @@ package optdec
 
 import (
 	"math"
+	"reflect"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
@@ -324,7 +325,7 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, opts uint64, 
 					sd := (*structDecoder)(fe.subDec)
 					dst := *(*unsafe.Pointer)(elem)
 					if dst == nil {
-						dst = sd.allocPtr(ctx)
+						dst = reflect.New(sd.goType).UnsafePointer()
 						*(*unsafe.Pointer)(elem) = dst
 					}
 {{- if .Fast}}

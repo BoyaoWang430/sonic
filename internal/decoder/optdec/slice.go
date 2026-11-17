@@ -55,87 +55,22 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 
 	var gerr error
 	if sd := d.structDec; sd != nil {
-		opts := ctx.options
-		if sd.canFastObj(opts) {
-			jsonStr := ctx.Doc.Json
-			copyStr := opts&(1<<_F_copy_string) != 0
-			for i := 0; i < size; i++ {
-				elem := unsafe.Add(elems, uintptr(i)*elemSize)
-				vptr := next
-				vtyp := uint8(vptr.typ)
-				if vtyp == KObject {
-					next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
-					if uint32(vptr.val) != 0 {
-						err := sd.fromObjFast(elem, vptr, jsonStr, copyStr, ctx)
-						if gerr == nil && err != nil {
-							gerr = err
-						}
-					}
-					continue
-				}
-				val := NewNode(vptr)
-				err := sd.FromDom(elem, val, ctx)
-				if gerr == nil && err != nil {
-					gerr = err
-				}
-				next = val.Next()
-			}
-			return gerr
-		}
 		for i := 0; i < size; i++ {
-			val := NewNode(next)
 			elem := unsafe.Add(elems, uintptr(i)*elemSize)
-			err := sd.FromDom(elem, val, ctx)
+			var err error
+			next, err = sd.decodeValueSlot(elem, next, ctx)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
-			next = val.Next()
 		}
 	} else if psd := d.ptrStructDec; psd != nil {
-		opts := ctx.options
 		ptrs := unsafe.Slice((*unsafe.Pointer)(elems), size)
-		if psd.canFastObj(opts) {
-			jsonStr := ctx.Doc.Json
-			copyStr := opts&(1<<_F_copy_string) != 0
-			for i := 0; i < size; i++ {
-				vptr := next
-				vtyp := uint8(vptr.typ)
-				if vtyp == KObject {
-					next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
-					dst := ptrs[i]
-					if dst == nil {
-						dst = psd.allocPtr(ctx)
-						ptrs[i] = dst
-					}
-					if uint32(vptr.val) != 0 {
-						err := psd.fromObjFast(dst, vptr, jsonStr, copyStr, ctx)
-						if gerr == nil && err != nil {
-							gerr = err
-						}
-					}
-					continue
-				}
-				if vtyp == KNull {
-					ptrs[i] = nil
-					next = PtrOffset(vptr, 1)
-					continue
-				}
-				val := NewNode(vptr)
-				err := d.elemDec.FromDom(unsafe.Pointer(&ptrs[i]), val, ctx)
-				if gerr == nil && err != nil {
-					gerr = err
-				}
-				next = val.Next()
-			}
-			return gerr
-		}
 		for i := 0; i < size; i++ {
-			val := NewNode(next)
-			err := d.elemDec.FromDom(unsafe.Pointer(&ptrs[i]), val, ctx)
+			var err error
+			next, err = psd.decodePtrSlot(&ptrs[i], next, d.elemDec, ctx)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
-			next = val.Next()
 		}
 	} else {
 		for i := 0; i < size; i++ {

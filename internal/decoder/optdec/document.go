@@ -74,32 +74,34 @@ func (d *Document) strRefEscaped(off int, val uint64) string {
 	return rt.Mem2Str(d.bytesEscaped(off, val))
 }
 
+const maxEfaceSliceArenaChunk = 256
+
 // DecodeContext (aliased as Context across materialization decoders) owns
-// materialization options, the read-only Document view, and target-value
+// materialization options, the read-only Document view, and bounded target-value
 // arenas. Backing storage referenced by returned Go values is detached on
 // resetMaterialization and never returned to any pool.
 type DecodeContext = Context
 
 type Context struct {
-	Doc            Document
-	options        uint64
-	isEface        bool
-	Utf8Inv        bool
-	ownedParser    *Parser
-	sliceArena     []interface{}
-	sliceIdx       int
-	strSlab        []byte
-	strSlabOff     int
-	strSlabNext    int
-	scalarSlab     []uint64
-	scalarSlabOff  int
-	scalarSlabNext int
-	strPtrSlab     []string
-	strPtrSlabOff  int
-	strPtrSlabNext int
-	ptrStructSlabs [4]ptrStructSlabSlot
-	strAnyMask     uint32
-	strAnyCache    [32]strAnySlot
+	Doc               Document
+	options           uint64
+	isEface           bool
+	Utf8Inv           bool
+	sliceArenaEnabled bool
+	ownedParser       *Parser
+	sliceArena        []interface{}
+	sliceIdx          int
+	strSlab           []byte
+	strSlabOff        int
+	strSlabNext       int
+	scalarSlab        []uint64
+	scalarSlabOff     int
+	scalarSlabNext    int
+	strPtrSlab        []string
+	strPtrSlabOff     int
+	strPtrSlabNext    int
+	strAnyMask        uint32
+	strAnyCache       [32]strAnySlot
 }
 
 func (ctx *Context) Options() uint64 {
@@ -123,12 +125,13 @@ func (ctx *Context) initForDocument(doc Document, opts uint64, root reflect.Type
 
 // resetMaterialization detaches all references to user-owned allocations before
 // scan scratch buffers are recycled. None of strSlab, scalarSlab, strPtrSlab,
-// sliceArena, or ptrStructSlabs are returned to a pool.
+// or sliceArena are returned to a pool.
 func (ctx *Context) resetMaterialization() {
 	ctx.Doc = Document{}
 	ctx.options = 0
 	ctx.isEface = false
 	ctx.Utf8Inv = false
+	ctx.sliceArenaEnabled = false
 	ctx.sliceArena = nil
 	ctx.sliceIdx = 0
 	ctx.strSlab = nil
@@ -140,9 +143,6 @@ func (ctx *Context) resetMaterialization() {
 	ctx.strPtrSlab = nil
 	ctx.strPtrSlabOff = 0
 	ctx.strPtrSlabNext = 0
-	if ctx.ptrStructSlabs[0].sd != nil {
-		ctx.ptrStructSlabs = [4]ptrStructSlabSlot{}
-	}
 	if ctx.strAnyMask != 0 {
 		ctx.clearStrAnyCache()
 	}
@@ -158,7 +158,15 @@ func (ctx *Context) Delete() {
 }
 
 func (ctx *Context) initSliceArena() {
-	if n := int(ctx.Doc.stat.array_elems); n > 0 && ctx.sliceArena == nil {
+	n := int(ctx.Doc.stat.array_elems)
+	if n <= 0 {
+		return
+	}
+	ctx.sliceArenaEnabled = true
+	if n > maxEfaceSliceArenaChunk {
+		n = maxEfaceSliceArenaChunk
+	}
+	if ctx.sliceArena == nil {
 		ctx.sliceArena = make([]interface{}, n)
 		ctx.sliceIdx = 0
 	}
@@ -168,12 +176,22 @@ func (ctx *Context) allocEfaceSlice(size int) []interface{} {
 	if size == 0 {
 		return []interface{}{}
 	}
+	if size > maxEfaceSliceArenaChunk {
+		return make([]interface{}, size)
+	}
 	if rem := len(ctx.sliceArena) - ctx.sliceIdx; rem >= size {
 		s := ctx.sliceArena[ctx.sliceIdx : ctx.sliceIdx+size : ctx.sliceIdx+size]
 		ctx.sliceIdx += size
 		return s
 	}
-	return make([]interface{}, size)
+	chunk := maxEfaceSliceArenaChunk
+	if chunk < size {
+		chunk = size
+	}
+	arena := make([]interface{}, chunk)
+	ctx.sliceArena = arena
+	ctx.sliceIdx = size
+	return arena[:size:size]
 }
 
 func (ctx *Context) clearStrAnyCache() {
