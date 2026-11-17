@@ -37,8 +37,6 @@
 #define WS_ARRAY_ELEMS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array_elems)
 #define WS_OBJECT_KEYS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object_keys)
 #define WS_MAX_DEPTH (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_max_depth)
-#define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
-#define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
 #define NBK_OFF (ScanKernelState_nbk+cParityNonspaceBlock_offPlus64)
 #define NBK_BITS (ScanKernelState_nbk+cParityNonspaceBlock_bits)
 
@@ -137,10 +135,6 @@ runs_object_key:
 runs_key_string_result:
 	CMPQ AX, $-const_cParityRunsStringYield
 	JE   runs_unicode_yield
-	CMPQ BX, $-1
-	JE   runs_key_escape_saved
-	MOVQ BX, cParityRunsState_hasEsc(R13)
-runs_key_escape_saved:
 	CMPQ AX, $0
 	JL   runs_string_error
 	CMPB (SI), $58
@@ -148,7 +142,6 @@ runs_key_escape_saved:
 	INCQ SI
 	MOVQ AX, DX
 runs_key_colon_ok:
-	MOVQ cParityRunsState_hasEsc(R13), BX
 	SHLQ $3, BX
 	ORQ  $const_KStringCommon, BX
 	MOVQ 24(SP), CX
@@ -164,10 +157,12 @@ runs_key_colon_ok:
 	JMP  runs_error_capacity
 runs_key_colon_space:
 	MOVQ AX, 8(SP)
+	MOVQ BX, 40(SP)
 	CALL runs_space<>(SB)
 	CMPQ AX, $58
 	JNE  runs_error_colon
 	MOVQ 8(SP), DX
+	MOVQ 40(SP), BX
 	JMP  runs_key_colon_ok
 
 runs_object_value:
@@ -301,28 +296,7 @@ runs_value_number:
 	CMPQ AX, $const_cParityRunsNumber
 	JE   runs_number_yield
 	TESTQ AX, AX
-	JNZ  runs_number_load_old
-	MOVQ BX, W_NUM_TYPE(R13)
-	MOVQ DX, W_NUM_VALUE(R13)
-	JMP  runs_emit_number
-runs_number_load_old:
-	MOVQ W_NUM_TYPE(R13), BX
-	MOVQ W_NUM_VALUE(R13), DX
-	JMP  runs_emit_number
-runs_number_yield:
-	MOVQ $const_cParityRunsNumber, AX
-	JMP  runs_yield
-runs_emit_number:
-	CMPQ BX, $const_KUint
-	JE   runs_emit_valid_number
-	CMPQ BX, $const_KSint
-	JE   runs_emit_valid_number
-	CMPQ BX, $const_KReal
-	JE   runs_emit_valid_number
-	TESTQ AX, AX
 	JNZ  runs_done
-	JMP  runs_error_capacity
-runs_emit_valid_number:
 	MOVQ 24(SP), CX
 	SHLQ $32, CX
 	ORQ  CX, BX
@@ -331,16 +305,15 @@ runs_emit_valid_number:
 	ADDQ $16, BP
 	INCL WS_NUMBER(R12)
 	JMP  runs_after_scalar
+runs_number_yield:
+	MOVQ $const_cParityRunsNumber, AX
+	JMP  runs_yield
 
 runs_value_string:
 	CALL runs_string<>(SB)
 runs_value_string_result:
 	CMPQ AX, $-const_cParityRunsStringYield
 	JE   runs_unicode_yield
-	CMPQ BX, $-1
-	JE   runs_value_escape_saved
-	MOVQ BX, cParityRunsState_hasEsc(R13)
-runs_value_escape_saved:
 	MOVQ AX, DX
 	XORQ AX, AX
 	CMPQ DX, $0
@@ -349,14 +322,15 @@ runs_value_escape_saved:
 	NEGQ AX
 runs_value_string_eof:
 	CMPQ 32(SP), $0
-	JNE  runs_emit_string
+	JNE  runs_value_string_check_err
 	MOVQ rawBase+16(FP), CX
 	ADDQ ScanKernelState_end(R12), CX
 	CMPQ CX, SI
-	JGE  runs_emit_string
+	JGE  runs_value_string_check_err
 	MOVQ $const_SONIC_EOF, AX
-runs_emit_string:
-	MOVQ cParityRunsState_hasEsc(R13), BX
+runs_value_string_check_err:
+	TESTQ AX, AX
+	JNZ  runs_done
 	SHLQ $3, BX
 	ORQ  $const_KStringCommon, BX
 	MOVQ 24(SP), CX
@@ -437,10 +411,10 @@ runs_literal_yield:
 runs_after_scalar:
 	TESTQ AX, AX
 	JNZ  runs_done
-	RUNS_CAPACITY
-	JA   runs_error_capacity
 	CMPQ 32(SP), $0
 	JE   runs_ok
+	RUNS_CAPACITY
+	JA   runs_error_capacity
 	MOVBLZX (SI), AX
 	CMPB AL, $32
 	JBE  runs_after_scalar_space

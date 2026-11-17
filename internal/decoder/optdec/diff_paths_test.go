@@ -197,7 +197,6 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	p.isEface = etp == anyType || etp == mapEfaceType || etp == sliceEfaceType
 	p.strictURC = (f & (1 << _F_disable_urc)) != 0
 	p.keepUseNumber = (f & (1 << _F_use_number)) != 0
-	p.strictRawNum = true
 	p.deferFloatOverflow = !p.keepUseNumber
 	ok, mutated := parseSchemaRoot(p, proj)
 	if !ok {

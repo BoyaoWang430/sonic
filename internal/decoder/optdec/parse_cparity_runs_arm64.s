@@ -23,10 +23,8 @@
 #define WS_ARRAY_ELEMS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array_elems)
 #define WS_OBJECT_KEYS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object_keys)
 #define WS_MAX_DEPTH (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_max_depth)
-#define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
-#define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
 
-// Match C's reservation of one spare node after every scalar/key write.
+// Reserve one spare node after every scalar/key write.
 #define RUNS_CAPACITY \
 	CMP R14, R23
 
@@ -97,7 +95,7 @@
 // The assembly handles contiguous scalar/key runs. Go owns container entry,
 // closure, allocation, Unicode decoding and cold numeric/literal handling.
 // All internal scanner calls use the private register convention above.
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $32-40
 	NO_LOCAL_POINTERS
 	MOVD kern+0(FP), R19
 	MOVD state+8(FP), R20
@@ -162,10 +160,6 @@ runs_object_key:
 runs_key_string_result:
 	CMN $const_cParityRunsStringYield, R0
 	BEQ runs_unicode_yield
-	CMN $1, R1
-	BEQ runs_key_escape_saved
-	MOVD R1, cParityRunsState_hasEsc(R20)
-runs_key_escape_saved:
 	CMP $0, R0
 	BLT runs_string_error
 	MOVD R0, R2
@@ -174,7 +168,6 @@ runs_key_escape_saved:
 	BNE runs_key_colon_space
 	ADD $1, R22
 runs_key_colon_ok:
-	MOVD cParityRunsState_hasEsc(R20), R1
 	LSL $3, R1
 	ORR $const_KStringCommon, R1
 	ADD $1, R16, R3
@@ -188,10 +181,12 @@ runs_key_colon_ok:
 	JMP runs_error_capacity
 runs_key_colon_space:
 	MOVD R2, 8(RSP)
+	MOVD R1, 16(RSP)
 	CALL runs_space<>(SB)
 	CMP $58, R0
 	BNE runs_error_colon
 	MOVD 8(RSP), R2
+	MOVD 16(RSP), R1
 	JMP runs_key_colon_ok
 
 runs_object_value:
@@ -312,27 +307,7 @@ runs_value_number:
 	CALL runs_number<>(SB)
 	CMP $const_cParityRunsNumber, R0
 	BEQ runs_number_yield
-	CBNZ R0, runs_number_load_old
-	MOVD R1, W_NUM_TYPE(R20)
-	MOVD R2, W_NUM_VALUE(R20)
-	JMP runs_emit_number
-runs_number_load_old:
-	MOVD W_NUM_TYPE(R20), R1
-	MOVD W_NUM_VALUE(R20), R2
-	JMP runs_emit_number
-runs_number_yield:
-	MOVD $const_cParityRunsNumber, R0
-	JMP runs_yield
-runs_emit_number:
-	CMP $const_KUint, R1
-	BEQ runs_emit_valid_number
-	CMP $const_KSint, R1
-	BEQ runs_emit_valid_number
-	CMP $const_KReal, R1
-	BEQ runs_emit_valid_number
 	CBNZ R0, runs_done
-	JMP runs_error_capacity
-runs_emit_valid_number:
 	ORR R16<<32, R1, R1
 	STP (R1, R2), (R23)
 	ADD $16, R23
@@ -340,28 +315,27 @@ runs_emit_valid_number:
 	ADDW $1, R1
 	MOVW R1, WS_NUMBER(R19)
 	JMP runs_after_scalar
+runs_number_yield:
+	MOVD $const_cParityRunsNumber, R0
+	JMP runs_yield
 
 runs_value_string:
 	CALL runs_string<>(SB)
 runs_value_string_result:
 	CMN $const_cParityRunsStringYield, R0
 	BEQ runs_unicode_yield
-	CMN $1, R1
-	BEQ runs_value_escape_saved
-	MOVD R1, cParityRunsState_hasEsc(R20)
-runs_value_escape_saved:
 	MOVD R0, R2
 	MOVD $0, R0
 	CMP $0, R2
 	BGE runs_value_string_eof
 	NEG R2, R0
 runs_value_string_eof:
-	CBNZ R17, runs_emit_string
+	CBNZ R17, runs_value_string_check_err
 	CMP R22, R26
-	BGE runs_emit_string
+	BGE runs_value_string_check_err
 	MOVD $const_SONIC_EOF, R0
-runs_emit_string:
-	MOVD cParityRunsState_hasEsc(R20), R1
+runs_value_string_check_err:
+	CBNZ R0, runs_done
 	LSL $3, R1
 	ORR $const_KStringCommon, R1
 	ADD $1, R16, R3
@@ -442,9 +416,9 @@ runs_literal_yield:
 
 runs_after_scalar:
 	CBNZ R0, runs_done
+	CBZ R17, runs_ok
 	RUNS_CAPACITY
 	BHI runs_error_capacity
-	CBZ R17, runs_ok
 	MOVBU (R22), R0
 	CMP $32, R0
 	BLS runs_after_scalar_space

@@ -55,12 +55,14 @@ func TestCParityRunsStringProbeBoundary(t *testing.T) {
 					src := prefix + body + "]"
 					wantBytes := append([]byte(src), padding...)
 					wantCur := unsafe.Pointer(&wantBytes[len(prefix)])
-					wantEscaped := priorEscaped
+					wantEscaped := false
 					wantLength := cParityParseString(&wantCur, &wantEscaped, options)
 					wantPos := int(uintptr(wantCur) - uintptr(unsafe.Pointer(&wantBytes[0])))
 					wantCode := ErrorCode(SONIC_OK)
+					wantUsed := 3
 					if wantLength < 0 {
 						wantCode = ErrorCode(-wantLength)
+						wantUsed = 2 // Only the valid prefix ('[' and seed string) is published on error.
 					} else {
 						wantPos++ // The complete parser also consumes the array's ']'.
 					}
@@ -73,10 +75,14 @@ func TestCParityRunsStringProbeBoundary(t *testing.T) {
 						p := cParityRunsTuneParser(src, offset, 8, options)
 						code := p.parse()
 						used := p.nbuf.nlen
-						if code != wantCode || p.Pos() != wantPos || used != 3 || p.nodes[2] != wantNode ||
+						nodeOK := wantCode != SONIC_OK || p.nodes[2] == wantNode
+						if wantCode != SONIC_OK && p.nodes[2] != (node{}) {
+							nodeOK = false
+						}
+						if code != wantCode || p.Pos() != wantPos || used != wantUsed || !nodeOK ||
 							!bytes.Equal(p.padded[len(prefix):len(src)], wantBytes[len(prefix):len(src)]) {
-							t.Fatalf("prefix=%d offset=%d options=%d priorEscaped=%v suffix=%q: code=%d pos=%d used=%d node=%+v, want %d/%d/3/%+v",
-								n, offset, options, priorEscaped, suffix, code, p.Pos(), used, p.nodes[2], wantCode, wantPos, wantNode)
+							t.Fatalf("prefix=%d offset=%d options=%d priorEscaped=%v suffix=%q: code=%d pos=%d used=%d node=%+v, want %d/%d/%d/%+v",
+								n, offset, options, priorEscaped, suffix, code, p.Pos(), used, p.nodes[2], wantCode, wantPos, wantUsed, wantNode)
 						}
 					}
 				}

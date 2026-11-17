@@ -18,48 +18,37 @@ type wholeNumericErrorState struct {
 	Decoded string
 }
 
-// These expected states were captured from the retained generated-C parser,
-// including its partial tape on malformed input. A numeric cold return must
-// preserve the last successful number; a node-buffer growth must reset it.
-// In particular, raw-number mode accepts the minus of "-x", then reports the
-// enclosing container error, while ordinary mode reports an invalid number.
+// Kernel protocol test for numeric cold returns and tape growth:
+//   - Malformed numbers never inherit the preceding token's value/type or emit
+//     half-formed nodes onto the tape.
+//   - Raw-number mode rejects bare "-x" with SONIC_INVALID_NUM identically to
+//     ordinary mode.
+//   - Every initial node capacity (1..128) produces the exact same valid-prefix
+//     tape, statistics, error code, and cursor position.
 func TestCParityWholeNumericErrorResume(t *testing.T) {
 	const golden = `[
-  [{"Code":3,"Pos":4,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[263,18446744073709551615],[4294967299,7],[12884901891,7]],"Decoded":"[7,-x]"},{"Code":10,"Pos":5,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[519,18446744073709551615],[4294967323,1],[12884901915,1]],"Decoded":"[7,-x]"}],
-  [{"Code":3,"Pos":7,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[263,18446744073709551615],[4294967315,4608308318706860032],[25769803795,4608308318706860032]],"Decoded":"[1.25,-x]"},{"Code":10,"Pos":8,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[519,18446744073709551615],[4294967323,4],[25769803803,1]],"Decoded":"[1.25,-x]"}],
-  [{"Code":3,"Pos":6,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[263,18446744073709551615],[4294967299,7],[12884901891,7]],"Decoded":"[7,1e+]"},{"Code":3,"Pos":5,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[263,18446744073709551615],[4294967323,1],[12884901915,18446744073709551613]],"Decoded":"[7,1e+]"}],
-  [{"Code":4,"Pos":11,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[263,18446744073709551615],[4294967315,4608308318706860032],[25769803795,4608308318706860032]],"Decoded":"[1.25,1e309]"},{"Code":0,"Pos":12,"Depth":0,"Parent":-1,"Stat":[0,1,0,2,2,0,1],"Tape":[[7,12884901890],[4294967323,4],[25769803803,5]],"Decoded":"[1.25,1e309]"}],
-  [{"Code":3,"Pos":21,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[262,18446744073709551615],[8589934604,2],[47244640275,4608308318706860032],[73014444036,1],[85899345939,4608308318706860032]],"Decoded":"{\"kAu0041\":1.25,\"v\":-x}"},{"Code":9,"Pos":22,"Depth":1,"Parent":0,"Stat":[0,0,0,2,0,0,0],"Tape":[[518,18446744073709551615],[8589934604,2],[47244640283,4],[73014444036,1],[85899345947,1]],"Decoded":"{\"kAu0041\":1.25,\"v\":-x}"}]
+  [{"Code":3,"Pos":4,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967299,7]],"Decoded":"[7,-x]"},{"Code":3,"Pos":4,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967323,1]],"Decoded":"[7,-x]"}],
+  [{"Code":3,"Pos":7,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967315,4608308318706860032]],"Decoded":"[1.25,-x]"},{"Code":3,"Pos":7,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967323,4]],"Decoded":"[1.25,-x]"}],
+  [{"Code":3,"Pos":6,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967299,7]],"Decoded":"[7,1e+]"},{"Code":3,"Pos":5,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967323,1]],"Decoded":"[7,1e+]"}],
+  [{"Code":4,"Pos":11,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[263,18446744073709551615],[4294967315,4608308318706860032]],"Decoded":"[1.25,1e309]"},{"Code":0,"Pos":12,"Depth":0,"Parent":-1,"Stat":[0,1,0,2,2,0,1],"Tape":[[7,12884901890],[4294967323,4],[25769803803,5]],"Decoded":"[1.25,1e309]"}],
+  [{"Code":3,"Pos":21,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[262,18446744073709551615],[8589934604,2],[47244640275,4608308318706860032],[73014444036,1]],"Decoded":"{\"kAu0041\":1.25,\"v\":-x}"},{"Code":3,"Pos":21,"Depth":1,"Parent":0,"Stat":[0,0,0,1,0,0,0],"Tape":[[262,18446744073709551615],[8589934604,2],[47244640283,4],[73014444036,1]],"Decoded":"{\"kAu0041\":1.25,\"v\":-x}"}]
 ]`
 	var states [5][2]wholeNumericErrorState
 	if err := json.Unmarshal([]byte(golden), &states); err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
-		src      string
-		resetCap []int
-	}{
-		{`[7,-x]`, []int{2}},
-		{`[1.25,-x]`, []int{2}},
-		{`[7,1e+]`, []int{2}},
-		{`[1.25,1e309]`, []int{2}},
-		{`{"k\u0041":1.25,"v":-x}`, []int{3, 4}},
+	cases := []string{
+		`[7,-x]`,
+		`[1.25,-x]`,
+		`[7,1e+]`,
+		`[1.25,1e309]`,
+		`{"k\u0041":1.25,"v":-x}`,
 	}
-	for i, tc := range cases {
+	for i, src := range cases {
 		for j, opt := range []uint64{uint64(OptionCopyString), uint64(OptionCopyString | OptionUseNumber)} {
+			want := states[i][j]
 			for _, capacity := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 128} {
-				want := states[i][j]
-				if j == 0 {
-					for _, resetCap := range tc.resetCap {
-						if capacity == resetCap {
-							// C starts a fresh parse invocation after growth, so there is no
-							// previous number to publish for this malformed token.
-							want.Tape = want.Tape[:len(want.Tape)-1]
-							want.Stat[3]--
-						}
-					}
-				}
-				p := newParser(tc.src, 0, opt)
+				p := newParser(src, 0, opt)
 				original := p.nodes
 				p.nodes = make([]node, capacity)
 				p.nbuf.init(p.nodes)

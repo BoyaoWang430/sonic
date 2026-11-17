@@ -19,9 +19,9 @@ import (
 	"unsafe"
 )
 
-// These routines preserve Sonic's padded-input number parser contract.
+// These routines implement Sonic's padded-input number parser contract.
 // The caller owns a readable 64-byte sentinel after the logical document.
-// Errors leave num unchanged and publish the exact error cursor.
+// Errors return a zero cParityNum and publish the exact error cursor.
 type cParityNum struct {
 	typ uint64
 	val uint64
@@ -31,16 +31,20 @@ func cParityNumberByte(p unsafe.Pointer) byte { return *(*byte)(p) }
 func cParityNumberDigit(c byte) bool          { return c >= '0' && c <= '9' }
 
 func cParityParseNumber(cur *unsafe.Pointer, num *cParityNum, neg bool, dbuf *[]byte) ErrorCode {
-	end, value, code := cParityParseNumberValue(*cur, *num, neg, *dbuf)
-	*cur, *num = end, value
+	end, value, code := cParityParseNumberValue(*cur, neg, *dbuf)
+	*cur = end
+	if code == SONIC_OK {
+		*num = value
+	}
 	return code
 }
 
 // Keep input, result and scratch ownership local to one numeric operation.
 // Returning the cursor by value avoids publishing an interior pointer through
-// a pointer argument on every completion. Errors retain the preceding number.
-func cParityParseNumberValue(p unsafe.Pointer, num cParityNum, neg bool, dbuf []byte) (unsafe.Pointer, cParityNum, ErrorCode) {
+// a pointer argument on every completion.
+func cParityParseNumberValue(p unsafe.Pointer, neg bool, dbuf []byte) (unsafe.Pointer, cParityNum, ErrorCode) {
 	start := p
+	var num cParityNum
 	var sig uint64
 	var exp, expDec int64
 	expNeg := int64(1)

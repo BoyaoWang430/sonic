@@ -390,11 +390,10 @@ func scanSharedNumberEmit(p *Parser, jsonStr string, win paddedInputWindow, firs
 	if neg {
 		numBody++
 	}
-	var zeroNum cParityNum
 	var numVal cParityNum
 	var numEnd int
 	if startPtr, exactEnd, contiguous := win.terminatedNumberPtr(numBody, pos); contiguous {
-		nextCur, nv, code := cParityParseNumberValue(startPtr, zeroNum, neg, p.dbuf)
+		nextCur, nv, code := cParityParseNumberValue(startPtr, neg, p.dbuf)
 		if code == SONIC_FLOAT_INF && p.deferFloatOverflow {
 			endPos, ok := scanStrictNumberEnd(jsonStr, win, valStart)
 			if !ok {
@@ -428,7 +427,7 @@ func scanSharedNumberEmit(p *Parser, jsonStr string, win paddedInputWindow, firs
 		p.unescBuf = append(p.unescBuf, jsonStr[numBody:numEnd]...)
 		p.unescBuf = append(p.unescBuf, 'x', 0, 0, 0, 0, 0, 0, 0)
 		startPtr := unsafe.Pointer(&p.unescBuf[savedLen])
-		nextCur, nv, code := cParityParseNumberValue(startPtr, zeroNum, neg, p.dbuf)
+		nextCur, nv, code := cParityParseNumberValue(startPtr, neg, p.dbuf)
 		p.unescBuf = p.unescBuf[:savedLen]
 		if p.unesc != nil {
 			p.unesc = p.unescBuf

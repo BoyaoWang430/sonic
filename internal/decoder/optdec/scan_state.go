@@ -660,7 +660,7 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 				if end+8 <= len(src) {
 					term := src[end]
 					if term != '.' && term != 'e' && term != 'E' && (term-'0' > 9) {
-						_, num, code = cParityParseNumberValue(unsafe.Pointer(rt.IndexChar(src, bodyOff)), num, neg, p.dbuf)
+						_, num, code = cParityParseNumberValue(unsafe.Pointer(rt.IndexChar(src, bodyOff)), neg, p.dbuf)
 						goto finishNum
 					}
 				}
@@ -670,12 +670,12 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 					if bodyLen+8 <= len(stackBuf) {
 						copy(stackBuf[:bodyLen], src[bodyOff:end])
 						stackBuf[bodyLen] = ' '
-						_, num, code = cParityParseNumberValue(unsafe.Pointer(&stackBuf[0]), num, neg, p.dbuf)
+						_, num, code = cParityParseNumberValue(unsafe.Pointer(&stackBuf[0]), neg, p.dbuf)
 					} else {
 						savedLen := len(s.unesc)
 						s.unesc = append(s.unesc, src[bodyOff:end]...)
 						s.unesc = append(s.unesc, "        "...)
-						_, num, code = cParityParseNumberValue(unsafe.Pointer(&s.unesc[savedLen]), num, neg, p.dbuf)
+						_, num, code = cParityParseNumberValue(unsafe.Pointer(&s.unesc[savedLen]), neg, p.dbuf)
 						s.unesc = s.unesc[:savedLen]
 					}
 				}

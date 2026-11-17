@@ -16,17 +16,15 @@
 #define WS_MAX_DEPTH (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_max_depth)
 #define WB_NBK_OFF (ScanKernelState_nbk+cParityNonspaceBlock_offPlus64)
 #define WB_NBK_BITS (ScanKernelState_nbk+cParityNonspaceBlock_bits)
-#define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
-#define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
 
-// Match C's reservation of one spare node after every scalar/key write:
+// Reserve one spare node after every scalar/key write:
 // X16 loads nodesLast (last spare-safe node) cached at 16(X2).
 #define RUNS_CAPACITY \
 	MOV 16(X2), X16
 
 // The assembly handles contiguous scalar/key runs. Go owns container entry,
 // closure, allocation, Unicode decoding and cold numeric/literal handling.
-TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $24-40
+TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $32-40
 	NO_LOCAL_POINTERS
 	MOV kern+0(FP), X9
 	MOV state+8(FP), X18
@@ -94,10 +92,6 @@ runs_object_key:
 runs_key_string_result:
 	MOV $-const_cParityRunsStringYield, X19
 	BEQ X10, X19, runs_unicode_yield
-	MOV $-1, X19
-	BEQ X11, X19, runs_key_escape_saved
-	MOV X11, cParityRunsState_hasEsc(X18)
-runs_key_escape_saved:
 	BLT X10, X0, runs_string_error
 	MOV X10, X12
 	MOVBU 0(X21), X10
@@ -105,7 +99,6 @@ runs_key_escape_saved:
 	BNE X10, X19, runs_key_colon_space
 	ADD $1, X21
 runs_key_colon_ok:
-	MOV cParityRunsState_hasEsc(X18), X11
 	SLL $3, X11
 	OR $const_KStringCommon, X11
 	ADD $1, X26, X13
@@ -121,10 +114,12 @@ runs_key_colon_ok:
 	JMP runs_error_capacity
 runs_key_colon_space:
 	MOV X12, 8(X2)
+	MOV X11, 24(X2)
 	CALL runs_space<>(SB)
 	MOV $58, X19
 	BNE X10, X19, runs_error_colon
 	MOV 8(X2), X12
+	MOV 24(X2), X11
 	JMP runs_key_colon_ok
 
 runs_object_value:
@@ -249,27 +244,7 @@ runs_value_number:
 	CALL runs_number<>(SB)
 	MOV $const_cParityRunsNumber, X19
 	BEQ X10, X19, runs_number_yield
-	BNEZ X10, runs_number_load_old
-	MOV X11, W_NUM_TYPE(X18)
-	MOV X12, W_NUM_VALUE(X18)
-	JMP runs_emit_number
-runs_number_load_old:
-	MOV W_NUM_TYPE(X18), X11
-	MOV W_NUM_VALUE(X18), X12
-	JMP runs_emit_number
-runs_number_yield:
-	MOV $const_cParityRunsNumber, X10
-	JMP runs_yield
-runs_emit_number:
-	MOV $const_KUint, X19
-	BEQ X11, X19, runs_emit_valid_number
-	MOV $const_KSint, X19
-	BEQ X11, X19, runs_emit_valid_number
-	MOV $const_KReal, X19
-	BEQ X11, X19, runs_emit_valid_number
 	BNEZ X10, runs_done
-	JMP runs_error_capacity
-runs_emit_valid_number:
 	SLL $32, X26, X19
 	OR X19, X11
 	MOV X11, 0(X22)
@@ -279,26 +254,25 @@ runs_emit_valid_number:
 	ADD $1, X11
 	MOVW X11, WS_NUMBER(X9)
 	JMP runs_after_scalar
+runs_number_yield:
+	MOV $const_cParityRunsNumber, X10
+	JMP runs_yield
 
 runs_value_string:
 	CALL runs_string<>(SB)
 runs_value_string_result:
 	MOV $-const_cParityRunsStringYield, X19
 	BEQ X10, X19, runs_unicode_yield
-	MOV $-1, X19
-	BEQ X11, X19, runs_value_escape_saved
-	MOV X11, cParityRunsState_hasEsc(X18)
-runs_value_escape_saved:
 	MOV X10, X12
 	MOV $0, X10
 	BGE X12, X0, runs_value_string_eof
 	SUB X12, X0, X10
 runs_value_string_eof:
-	BNEZ X28, runs_emit_string
-	BGE X25, X21, runs_emit_string
+	BNEZ X28, runs_value_string_check_err
+	BGE X25, X21, runs_value_string_check_err
 	MOV $const_SONIC_EOF, X10
-runs_emit_string:
-	MOV cParityRunsState_hasEsc(X18), X11
+runs_value_string_check_err:
+	BNEZ X10, runs_done
 	SLL $3, X11
 	OR $const_KStringCommon, X11
 	ADD $1, X26, X13
@@ -379,9 +353,9 @@ runs_literal_yield:
 
 runs_after_scalar:
 	BNEZ X10, runs_done
+	BEQZ X28, runs_ok
 	RUNS_CAPACITY
 	BLTU X16, X22, runs_error_capacity
-	BEQZ X28, runs_ok
 	MOVBU 0(X21), X10
 	MOV $32, X19
 	BLEU X10, X19, runs_after_scalar_space

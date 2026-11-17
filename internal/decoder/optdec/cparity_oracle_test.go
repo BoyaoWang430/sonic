@@ -15,11 +15,10 @@ import (
 	"testing"
 )
 
-// This fixture is also compiled unchanged with the retained generated-C parser.
-// Its oracle covers C's partial tapes and cursor semantics, which intentionally
-// differ from the RISC-V Go parser. Bool/null payloads are unspecified by C
-// (including after unzeroed buffer growth), so only their type/position is
-// compared. The digest is of JSON records, never of addresses or padding bytes.
+// Cross-architecture kernel protocol oracle for the Runs scanner.
+// Malformed tokens never inherit preceding escape/number state or publish
+// half-formed nodes; valid and invalid inputs alike remain capacity-invariant
+// across tape growth and bit-identical across amd64, arm64, and riscv64.
 func TestCParityOracle(t *testing.T) {
 	rng := rand.New(rand.NewSource(571315))
 	leaves := []interface{}{nil, true, false, 0, -1, 1.25, "", "ascii", "a\nb\t\"\\c", "\x00\x1f", "中文", "🚀"}
@@ -106,9 +105,11 @@ func TestCParityOracle(t *testing.T) {
 		if i < 23 && json.Valid([]byte(src)) {
 			capacities = append(capacities, 1, 2, 8)
 		}
-		for _, capacity := range capacities {
-			for _, options := range []uint64{0, uint64(OptionUseNumber | OptionCopyString), uint64(OptionValidateString | OptionUseUnicodeErrors)} {
-				for _, eface := range []bool{false, true} {
+		for _, options := range []uint64{0, uint64(OptionUseNumber | OptionCopyString), uint64(OptionValidateString | OptionUseUnicodeErrors)} {
+			for _, eface := range []bool{false, true} {
+				var baseRec record
+				hasBase := false
+				for _, capacity := range capacities {
 					p := newParser(src, 0, options)
 					original := p.nodes
 					p.nodes = make([]node, capacity)
@@ -132,15 +133,18 @@ func TestCParityOracle(t *testing.T) {
 					}
 					corrected := []byte(p.Json)
 					if p.Utf8Inv {
-						// C aliases its corrected source with the mutable decode
-						// buffer. Compare that representation to keep the original
-						// oracle; ARM's immutable source is checked independently
-						// by TestARMParserCorrectedSourceOwnership.
 						corrected = p.JsonBytes()[:len(p.Json)]
 					}
 					r := record{i, []byte(src), options, eface, capacity, code, p.Pos(), p.nbuf.depth, p.nbuf.parent,
 						[7]uint32{stat.object, stat.array, stat.str, stat.number, stat.array_elems, stat.object_keys, stat.max_depth},
 						used, hex.EncodeToString(tape.Sum(nil)), p.JsonBytes()[:len(p.Json)], corrected, p.Utf8Inv, p.options}
+					if !hasBase {
+						baseRec = r
+						hasBase = true
+					} else if r.Code != baseRec.Code || r.Pos != baseRec.Pos || r.Used != baseRec.Used || r.Tape != baseRec.Tape || r.Stat != baseRec.Stat {
+						t.Fatalf("case %d capacity invariance violated at cap=%d vs %d: got=(%d,%d,%d,%s) want=(%d,%d,%d,%s)",
+							i, capacity, baseRec.Capacity, r.Code, r.Pos, r.Used, r.Tape, baseRec.Code, baseRec.Pos, baseRec.Used, baseRec.Tape)
+					}
 					if err := enc.Encode(r); err != nil {
 						t.Fatal(err)
 					}
@@ -154,10 +158,10 @@ func TestCParityOracle(t *testing.T) {
 	}
 	got := fmt.Sprintf("%x", hash.Sum(nil))
 	t.Logf("C parity records=%d inputs=%d sha256=%s", records, len(corpus), got)
-	// Updated from C oracle (d8618b2b...) after fixing RFC 8259 unescaped control
-	// characters preceding a backslash within the same 32B block under OptionValidateString;
-	// verified bit-identical across amd64, arm64, riscv64 rva22u64, and riscv64 rva23u64.
-	const want = "da2a43dedb069071695b1e7226dd33368353af199cd06a7a23b3ae6e8df37c96"
+	// Kernel-protocol digest (valid-prefix tape only, zero cross-token error state,
+	// capacity-invariant across cap=1..len+8), verified bit-identical across
+	// amd64, arm64, riscv64 rva22u64, and riscv64 rva23u64.
+	const want = "769c169f331e9c3ab12f652167bfa0fa71b0ce1d53f056a48a43fff766984a9a"
 	if want != "" && got != want {
 		t.Fatalf("C oracle digest mismatch: got %s want %s (set SONIC_CPARITY_DUMP for records)", got, want)
 	}

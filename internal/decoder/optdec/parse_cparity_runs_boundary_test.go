@@ -8,10 +8,9 @@ import (
 	"unsafe"
 )
 
-// In the padded Runs parser contract, literal scanners (true/false/null) consume
-// the first mismatching byte and write only typ on the partial node. Error checks
-// precede visit/child accounting: even a full tape retains that partial node and
-// reports the literal error without counting it as a completed child.
+// In the Runs kernel protocol, literal scanners (true/false/null) consume the
+// first mismatching byte and report SONIC_INVALID_LITERAL without growing the
+// tape or writing a partial node past the valid prefix.
 func TestCParityRunsLiteralErrorBoundary(t *testing.T) {
 	for _, context := range []struct {
 		name, prefix, suffix string
@@ -37,8 +36,8 @@ func TestCParityRunsLiteralErrorBoundary(t *testing.T) {
 				src := context.prefix + literal.text + context.suffix
 				p := cParityRunsTuneParser(src, 0, context.nodes, 0)
 				startPtr, endCap := unsafe.SliceData(p.nodes), p.nbuf.ncap
-				const sentinel = uint64(0x8badf00dcafebabe)
-				p.nodes[context.nodes-1] = node{typ: ^uint64(0), val: sentinel}
+				wantUntouched := node{typ: ^uint64(0), val: 0x8badf00dcafebabe}
+				p.nodes[context.nodes-1] = wantUntouched
 
 				code := p.parse()
 				if code != SONIC_INVALID_LITERAL || p.Pos() != len(context.prefix)+literal.consumed {
@@ -48,12 +47,11 @@ func TestCParityRunsLiteralErrorBoundary(t *testing.T) {
 					t.Fatal("literal error grew or replaced the full tape")
 				}
 				used := p.nbuf.nlen
-				if used != context.nodes || p.nbuf.nlen != endCap {
-					t.Fatalf("used=%d, want exactly full tape of %d nodes", used, context.nodes)
+				if used != context.nodes-1 {
+					t.Fatalf("used=%d, want valid prefix of %d nodes", used, context.nodes-1)
 				}
-				want := node{typ: literal.kind | uint64(len(context.prefix))<<PosBits, val: sentinel}
-				if got := p.nodes[context.nodes-1]; got != want {
-					t.Fatalf("partial node=%+v, want %+v", got, want)
+				if got := p.nodes[context.nodes-1]; got != wantUntouched {
+					t.Fatalf("slot past valid prefix modified=%+v, want untouched %+v", got, wantUntouched)
 				}
 				if context.name == "root" {
 					if p.nbuf.parent != -1 || p.nbuf.depth != 0 {

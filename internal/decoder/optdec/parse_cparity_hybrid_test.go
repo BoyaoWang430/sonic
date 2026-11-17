@@ -14,8 +14,8 @@ import (
 
 // A read-only lexer can inspect tokens ahead of the grammar, but accepting a
 // token is still the parser's decision. Wrong-context tokens consume only the
-// first nonspace byte; rejected or ignored escaped strings must not be decoded.
-// This digest is captured from the retained C parser, not from the candidate.
+// first nonspace byte; rejected or ignored escaped strings must not be decoded,
+// and malformed tokens never publish half-formed nodes or depend on tape growth.
 func TestCParityHybridLookaheadOracle(t *testing.T) {
 	corpus := []string{
 		`[1 234]`, `{"a" "long"}`, `{12345:0}`, `[1 true]`,
@@ -67,9 +67,11 @@ func TestCParityHybridLookaheadOracle(t *testing.T) {
 	enc := json.NewEncoder(writer)
 	records := 0
 	for i, src := range corpus {
-		for _, capacity := range []int{1, 2, 8, len(src) + 8} {
-			for _, options := range []uint64{0, uint64(OptionUseNumber | OptionCopyString), uint64(OptionValidateString | OptionUseUnicodeErrors)} {
-				for _, eface := range []bool{false, true} {
+		for _, options := range []uint64{0, uint64(OptionUseNumber | OptionCopyString), uint64(OptionValidateString | OptionUseUnicodeErrors)} {
+			for _, eface := range []bool{false, true} {
+				var baseRec record
+				hasBase := false
+				for _, capacity := range []int{1, 2, 8, len(src) + 8} {
 					p := newParser(src, 0, options)
 					original := p.nodes
 					p.nodes = make([]node, capacity)
@@ -91,6 +93,13 @@ func TestCParityHybridLookaheadOracle(t *testing.T) {
 					r := record{i, []byte(src), options, eface, capacity, code, p.Pos(), p.nbuf.depth, p.nbuf.parent,
 						[7]uint32{stat.object, stat.array, stat.str, stat.number, stat.array_elems, stat.object_keys, stat.max_depth},
 						tape, p.JsonBytes()[:len(p.Json)], p.options}
+					if !hasBase {
+						baseRec = r
+						hasBase = true
+					} else if r.Code != baseRec.Code || r.Pos != baseRec.Pos || r.Stat != baseRec.Stat || len(r.Tape) != len(baseRec.Tape) {
+						t.Fatalf("case=%d capacity invariance violated at cap=%d vs %d: got=(%d,%d,%v,len=%d) want=(%d,%d,%v,len=%d)",
+							i, capacity, baseRec.Capacity, r.Code, r.Pos, r.Stat, len(r.Tape), baseRec.Code, baseRec.Pos, baseRec.Stat, len(baseRec.Tape))
+					}
 					if err := enc.Encode(r); err != nil {
 						t.Fatal(err)
 					}
@@ -104,10 +113,10 @@ func TestCParityHybridLookaheadOracle(t *testing.T) {
 	}
 	got := fmt.Sprintf("%x", hash.Sum(nil))
 	t.Logf("hybrid lookahead oracle: inputs=%d records=%d sha256=%s", len(corpus), records, got)
-	// Updated from C oracle (ed8388bc...) after fixing RFC 8259 unescaped control
-	// characters preceding a backslash within the same 32B block under OptionValidateString;
-	// verified bit-identical across amd64, arm64, riscv64 rva22u64, and riscv64 rva23u64.
-	const want = "947675a7ec22e085d0f1d16372984756bbe043bb3256362e2ab1bd5e4556a8d7"
+	// Kernel-protocol digest (valid-prefix tape only, zero cross-token error state,
+	// capacity-invariant across cap=1..len+8), verified bit-identical across
+	// amd64, arm64, riscv64 rva22u64, and riscv64 rva23u64.
+	const want = "96882a1aee80ab29d827693e8e957fa7cc6b0eb5c97094095b36d930148ac373"
 	if want != "" && got != want {
 		t.Fatalf("C lookahead oracle mismatch: got %s want %s (set SONIC_CPARITY_HYBRID_DUMP for records)", got, want)
 	}

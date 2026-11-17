@@ -25,7 +25,6 @@ type ScanContext struct {
 	isEface            bool
 	strictURC          bool
 	keepUseNumber      bool
-	strictRawNum       bool
 	lazyPadded         bool
 	singleDoc          bool
 	deferFloatOverflow bool
