@@ -19,6 +19,7 @@ package ast
 import (
 	"errors"
 
+	"github.com/bytedance/sonic/internal/native/pathplan"
 	"github.com/bytedance/sonic/internal/native/types"
 )
 
@@ -38,11 +39,10 @@ type locatedSpan struct {
 	found bool
 }
 
-// PathPlan is an immutable, reusable compiled prefix plan for multi-path search
-// and raw-span patching.
+// PathPlan is an immutable, architecture-independent compiled prefix plan for
+// multi-path search and raw-span patching.
 type PathPlan struct {
-	numPaths int
-	native   nativePathPlanHandle
+	plan *pathplan.Plan
 }
 
 // NumPaths returns the number of paths compiled into the plan.
@@ -50,19 +50,16 @@ func (p *PathPlan) NumPaths() int {
 	if p == nil {
 		return 0
 	}
-	return p.numPaths
+	return p.plan.NumPaths()
 }
 
 // CompilePathPlan compiles a fixed list of JSON paths into a shared-prefix plan.
 func CompilePathPlan(paths ...[]interface{}) (*PathPlan, error) {
-	h, err := compilePathPlanImpl(paths)
+	compiled, err := pathplan.Compile(paths)
 	if err != 0 {
 		return nil, ErrUnsupportedPathType
 	}
-	return &PathPlan{
-		numPaths: len(paths),
-		native:   h,
-	}, nil
+	return &PathPlan{plan: compiled}, nil
 }
 
 // MustCompilePathPlan compiles paths into a PathPlan and panics on invalid path element types.
@@ -75,10 +72,10 @@ func MustCompilePathPlan(paths ...[]interface{}) *PathPlan {
 }
 
 func locateWithPlan(view inputView, plan *PathPlan, validate bool, out []locatedSpan) error {
-	if plan == nil || plan.numPaths == 0 {
+	if plan == nil || plan.NumPaths() == 0 {
 		return nil
 	}
-	errPos, perr := locateSpansImpl(view, plan.native, validate, out)
+	errPos, perr := locateSpansImpl(view, plan.plan, validate, out)
 	if perr != 0 {
 		if perr == types.ERR_UNSUPPORT_TYPE {
 			panic("path must be either int(>=0) or string")

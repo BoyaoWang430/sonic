@@ -44,8 +44,8 @@ type Searcher struct {
 func NewSearcher(str string) *Searcher {
 	return &Searcher{
 		parser: Parser{
-			s:      str,
-			noLazy: false,
+			s:    str,
+			mode: parseModeLazy,
 		},
 		SearchOptions: SearchOptions{
 			ValidateJSON: true,
@@ -140,7 +140,7 @@ func (self *Searcher) getManyWithPlan(plan *PathPlan, copyReturn bool) ([]Node, 
 // pass and returns Nodes in caller request order.
 func SearchMany(src string, opts SearchOptions, paths ...[]interface{}) ([]Node, error) {
 	s := Searcher{
-		parser:        Parser{s: src, noLazy: false},
+		parser:        Parser{s: src, mode: parseModeLazy},
 		SearchOptions: opts,
 	}
 	return s.GetManyByPath(paths...)
@@ -152,8 +152,8 @@ func (self *Searcher) getByPath(path ...interface{}) (Node, error) {
 
 func (self *Searcher) getByPathOpts(copyReturn bool, path ...interface{}) (Node, error) {
 	p := Parser{
-		s:      self.parser.s,
-		noLazy: self.parser.noLazy,
+		s:    self.parser.s,
+		mode: self.parser.mode,
 	}
 	start, err := p.getByPath(self.ValidateJSON, path...)
 	if err != 0 {

@@ -722,8 +722,7 @@ func TestCheckError_Empty(t *testing.T) {
 	n = newRawNode("[hello]", types.V_ARRAY, false)
 	n.parseRaw(true)
 	p := NewParser("[hello]")
-	p.noLazy = true
-	p.skipValue = false
+	p.mode = parseModeEager
 	_, x := p.Parse()
 	if n.Error() != newSyntaxError(p.syntaxError(x)).Error() {
 		t.Fatal(n.Check())

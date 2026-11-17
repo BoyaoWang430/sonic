@@ -20,12 +20,13 @@ package ast
 
 import (
 	"encoding/json"
-	"reflect"
 	"unicode/utf8"
 
 	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/internal/compat"
+	"github.com/bytedance/sonic/internal/native/pathplan"
 	"github.com/bytedance/sonic/internal/native/types"
+	"github.com/bytedance/sonic/unquote"
 )
 
 func init() {
@@ -155,129 +156,255 @@ func validate_utf8(str string) bool {
 	return utf8.ValidString(str)
 }
 
-type nativePathPlanHandle = [][]interface{}
-
-func compilePathPlanImpl(paths [][]interface{}) (nativePathPlanHandle, types.ParsingError) {
-	cp := make([][]interface{}, len(paths))
-	for i, p := range paths {
-		for _, comp := range p {
-			switch v := comp.(type) {
-			case string:
-			case int:
-				if v < 0 {
-					return nil, types.ERR_UNSUPPORT_TYPE
-				}
-			default:
-				if comp == nil {
-					return nil, types.ERR_UNSUPPORT_TYPE
-				}
-				rv := reflect.ValueOf(comp)
-				switch rv.Kind() {
-				case reflect.String:
-				case reflect.Int:
-					if rv.Int() < 0 {
-						return nil, types.ERR_UNSUPPORT_TYPE
-					}
-				default:
-					return nil, types.ERR_UNSUPPORT_TYPE
-				}
-			}
-		}
-		row := make([]interface{}, len(p))
-		copy(row, p)
-		cp[i] = row
+func recordCompatTerminals(src string, start, end int, reqIndices []int, out []locatedSpan, remaining *int) {
+	if start < len(src) && switchRawType(src[start]) == _V_NUMBER {
+		end = 1 + backward(src, end-1)
 	}
-	return cp, 0
+	for _, idx := range reqIndices {
+		out[idx] = locatedSpan{start: start, end: end, found: true}
+	}
+	*remaining -= len(reqIndices)
 }
 
-func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, out []locatedSpan) (int, types.ParsingError) {
-	for i, path := range plan {
-		p := Parser{s: view.src, p: view.base}
-		ok := true
-		depth := 0
-		for _, comp := range path {
-			p.p = p.lspace(p.p)
-			if p.p >= len(p.s) {
-				return p.p, types.ERR_EOF
-			}
-			c := p.s[p.p]
-			if switchRawType(c) == _V_NONE {
-				return p.p, types.ERR_INVALID_CHAR
-			}
-			rv := reflect.ValueOf(comp)
-			if rv.Kind() == reflect.String {
-				if c != '{' {
-					var e types.ParsingError
-					if validate {
-						_, e = p.skipDepth(depth)
-					} else {
-						_, e = p.skipFast()
-					}
-					if e != 0 {
-						return p.p, e
-					}
-					ok = false
-					break
-				}
-				depth++
-				if depth >= types.MAX_RECURSE {
-					return p.p, types.ERR_RECURSE_EXCEED_MAX
-				}
-				if err := p.searchKey(rv.String()); err != 0 {
-					if err == types.ERR_NOT_FOUND {
-						ok = false
-						break
-					}
-					return p.p, err
-				}
-			} else {
-				if c != '[' {
-					var e types.ParsingError
-					if validate {
-						_, e = p.skipDepth(depth)
-					} else {
-						_, e = p.skipFast()
-					}
-					if e != 0 {
-						return p.p, e
-					}
-					ok = false
-					break
-				}
-				depth++
-				if depth >= types.MAX_RECURSE {
-					return p.p, types.ERR_RECURSE_EXCEED_MAX
-				}
-				if err := p.searchIndex(int(rv.Int())); err != 0 {
-					if err == types.ERR_NOT_FOUND {
-						ok = false
-						break
-					}
-					return p.p, err
-				}
-			}
-		}
-		if !ok {
-			out[i] = locatedSpan{start: -1, end: -1, found: false}
-			continue
-		}
-		var start int
-		var e types.ParsingError
-		if validate {
-			start, e = p.skipDepth(depth)
-		} else {
-			start, e = p.skipFast()
-		}
-		if e != 0 {
-			return p.p, e
-		}
-		end := p.p
-		if switchRawType(p.s[start]) == _V_NUMBER {
-			end = 1 + backward(p.s, end-1)
-		}
-		out[i] = locatedSpan{start: start, end: end, found: true}
+func locateSpansImpl(view inputView, plan *pathplan.Plan, validate bool, out []locatedSpan) (int, types.ParsingError) {
+	n := plan.NumPaths()
+	if n == 0 {
+		return 0, 0
+	}
+	for i := 0; i < n; i++ {
+		out[i] = locatedSpan{start: -1, end: -1, found: false}
+	}
+	p := Parser{s: view.src, p: view.base}
+	remaining := n
+	if err := locateCompatPlanNode(&p, &plan.Root, validate, false, 0, out, &remaining); err != 0 {
+		return p.p, err
 	}
 	return 0, 0
+}
+
+func locateCompatPlanNode(
+	p *Parser,
+	node *pathplan.Node,
+	validate bool,
+	inTarget bool,
+	depth int,
+	out []locatedSpan,
+	remaining *int,
+) types.ParsingError {
+	ns := len(p.s)
+	p.p = p.lspace(p.p)
+	if p.p >= ns {
+		return types.ERR_EOF
+	}
+	valStart := p.p
+	c := p.s[valStart]
+	if switchRawType(c) == _V_NONE {
+		return types.ERR_INVALID_CHAR
+	}
+
+	needSelf := len(node.ReqIndices) > 0
+	inTarget = inTarget || needSelf
+	hasKeyChildren := len(node.KeyEdges) > 0
+	hasIdxChildren := len(node.IdxEdges) > 0
+
+	skipCurrentValue := func(d int) (int, types.ParsingError) {
+		if validate {
+			return p.skipDepth(d)
+		}
+		return p.skipFast()
+	}
+
+	if !hasKeyChildren && !hasIdxChildren {
+		start, err := skipCurrentValue(depth)
+		if err != 0 {
+			return err
+		}
+		recordCompatTerminals(p.s, start, p.p, node.ReqIndices, out, remaining)
+		return 0
+	}
+
+	if c == '{' && hasKeyChildren {
+		if depth >= types.MAX_RECURSE {
+			p.p++
+			return types.ERR_RECURSE_EXCEED_MAX
+		}
+		for _, ie := range node.IdxEdges {
+			*remaining -= ie.Child.SubtreeTargets
+		}
+		var matchedMask uint64
+		var matchedOverflow []bool
+		if len(node.KeyEdges) > 64 {
+			matchedOverflow = make([]bool, len(node.KeyEdges))
+		}
+		unmatchedTargets := 0
+		for _, ke := range node.KeyEdges {
+			unmatchedTargets += ke.Child.SubtreeTargets
+		}
+
+		p.p++
+		p.p = p.lspace(p.p)
+		if p.p >= ns {
+			return types.ERR_EOF
+		}
+		if p.s[p.p] == '}' {
+			p.p++
+			*remaining -= unmatchedTargets
+			if needSelf {
+				recordCompatTerminals(p.s, valStart, p.p, node.ReqIndices, out, remaining)
+			}
+			return 0
+		}
+
+		for {
+			kStart, ep := p.decodeKey()
+			if kStart < 0 {
+				return types.ERR_INVALID_CHAR
+			}
+			if depth+1 >= types.MAX_RECURSE {
+				return types.ERR_RECURSE_EXCEED_MAX
+			}
+			key := p.s[kStart : p.p-1]
+			if ep != -1 {
+				var uerr types.ParsingError
+				if key, uerr = unquote.String(key); uerr != 0 {
+					return uerr
+				}
+			}
+			matchedEdge := -1
+			if unmatchedTargets > 0 {
+				if idx := node.LookupPlainKey(key); idx >= 0 && !pathplan.IsEdgeMatched(idx, matchedMask, matchedOverflow) {
+					matchedEdge = idx
+				}
+			}
+			if derr := p.delim(); derr != 0 {
+				return derr
+			}
+
+			if matchedEdge >= 0 {
+				pathplan.MarkEdgeMatched(matchedEdge, &matchedMask, matchedOverflow)
+				child := node.KeyEdges[matchedEdge].Child
+				unmatchedTargets -= child.SubtreeTargets
+				if cerr := locateCompatPlanNode(p, child, validate, inTarget, depth+1, out, remaining); cerr != 0 {
+					return cerr
+				}
+				if *remaining == 0 && !inTarget {
+					return 0
+				}
+			} else {
+				var serr types.ParsingError
+				if inTarget && validate {
+					_, serr = p.skipDepth(depth + 1)
+				} else {
+					_, serr = p.skipFast()
+				}
+				if serr != 0 {
+					return serr
+				}
+			}
+
+			p.p = p.lspace(p.p)
+			if p.p >= ns {
+				return types.ERR_EOF
+			}
+			switch p.s[p.p] {
+			case '}':
+				p.p++
+				*remaining -= unmatchedTargets
+				if needSelf {
+					recordCompatTerminals(p.s, valStart, p.p, node.ReqIndices, out, remaining)
+				}
+				return 0
+			case ',':
+				p.p++
+			default:
+				return types.ERR_INVALID_CHAR
+			}
+		}
+	}
+
+	if c == '[' && hasIdxChildren {
+		if depth >= types.MAX_RECURSE {
+			p.p++
+			return types.ERR_RECURSE_EXCEED_MAX
+		}
+		for _, ke := range node.KeyEdges {
+			*remaining -= ke.Child.SubtreeTargets
+		}
+		unmatchedTargets := 0
+		for _, ie := range node.IdxEdges {
+			unmatchedTargets += ie.Child.SubtreeTargets
+		}
+
+		p.p++
+		p.p = p.lspace(p.p)
+		if p.p >= ns {
+			return types.ERR_EOF
+		}
+		if p.s[p.p] == ']' {
+			p.p++
+			*remaining -= unmatchedTargets
+			if needSelf {
+				recordCompatTerminals(p.s, valStart, p.p, node.ReqIndices, out, remaining)
+			}
+			return 0
+		}
+
+		edgeCursor := 0
+		for elemIdx := int64(0); ; elemIdx++ {
+			if edgeCursor < len(node.IdxEdges) && node.IdxEdges[edgeCursor].Index == elemIdx {
+				child := node.IdxEdges[edgeCursor].Child
+				edgeCursor++
+				unmatchedTargets -= child.SubtreeTargets
+				if cerr := locateCompatPlanNode(p, child, validate, inTarget, depth+1, out, remaining); cerr != 0 {
+					return cerr
+				}
+				if *remaining == 0 && !inTarget {
+					return 0
+				}
+			} else {
+				var serr types.ParsingError
+				if inTarget && validate {
+					_, serr = p.skipDepth(depth + 1)
+				} else {
+					_, serr = p.skipFast()
+				}
+				if serr != 0 {
+					return serr
+				}
+			}
+
+			p.p = p.lspace(p.p)
+			if p.p >= ns {
+				return types.ERR_EOF
+			}
+			switch p.s[p.p] {
+			case ']':
+				p.p++
+				*remaining -= unmatchedTargets
+				if needSelf {
+					recordCompatTerminals(p.s, valStart, p.p, node.ReqIndices, out, remaining)
+				}
+				return 0
+			case ',':
+				p.p++
+				if depth+1 >= types.MAX_RECURSE {
+					return types.ERR_RECURSE_EXCEED_MAX
+				}
+			default:
+				return types.ERR_INVALID_CHAR
+			}
+		}
+	}
+
+	start, err := skipCurrentValue(depth)
+	if err != 0 {
+		return err
+	}
+	*remaining -= node.SubtreeTargets - len(node.ReqIndices)
+	if needSelf {
+		recordCompatTerminals(p.s, start, p.p, node.ReqIndices, out, remaining)
+	}
+	return 0
 }
 
 func encodePatchValue(buf *[]byte, val interface{}) error {

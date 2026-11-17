@@ -118,9 +118,8 @@ func Preorder(str string, visitor Visitor, opts *VisitorOptions) error {
 
 	tv := &traverser{
 		parser: Parser{
-			s:         str,
-			noLazy:    true,
-			skipValue: false,
+			s:    str,
+			mode: parseModeEager,
 		},
 		visitor: visitor,
 	}

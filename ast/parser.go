@@ -52,15 +52,39 @@ var (
 	errUnsupportTypeNode = newError(_ERR_UNSUPPORT_TYPE, "unsupported type")
 )
 
+// parseMode defines the explicit container lifecycle, child-materialization,
+// and object-indexing policy of a Parser:
+//
+//   - parseModeLazy (0): root containers stay _V_OBJECT_LAZY / _V_ARRAY_LAZY
+//     and scan children incrementally on Get/Index/Load; key index builds above
+//     threshold once the lazy object finishes.
+//   - parseModeSkipChildren: materializes the immediate container while keeping
+//     child value spans as _V_RAW nodes; builds object key index above threshold.
+//   - parseModeLoadOnceRoot: materializes the root container with object key
+//     index and pooled child RWMutexes, transitioning to parseModeLoadOnceChild.
+//   - parseModeLoadOnceChild: parses child scalars and wraps nested containers
+//     as concurrent-read-safe _V_RAW nodes without eagerly deep-parsing subtrees.
+//   - parseModeEager: recursively materializes the subtree and builds object
+//     key indexes above threshold.
+//   - parseModeEagerNoIndex: recursively materializes a throwaway subtree
+//     without building object key maps (Loads / parseRaw(full) / traverser).
+type parseMode uint8
+
+const (
+	parseModeLazy parseMode = iota
+	parseModeSkipChildren
+	parseModeLoadOnceRoot
+	parseModeLoadOnceChild
+	parseModeEager
+	parseModeEagerNoIndex
+)
+
 type Parser struct {
-	p         int
-	s         string
-	noLazy    bool
-	noIndex   bool
-	loadOnce  bool
-	skipValue bool
-	dbuf      *byte
-	muPool    *linkedPairs
+	p      int
+	s      string
+	mode   parseMode
+	dbuf   *byte
+	muPool *linkedPairs
 }
 
 /** Parser Private Methods **/
@@ -165,12 +189,17 @@ func (self *Parser) decodeArray(ret *linkedNodes) (Node, types.ParsingError) {
 		return Node{t: types.V_ARRAY}, 0
 	}
 
+	skipChild := self.mode == parseModeSkipChildren
+	if self.mode == parseModeLoadOnceRoot {
+		self.mode = parseModeLoadOnceChild
+	}
+
 	/* allocate array space and parse every element */
 	for {
 		var val Node
 		var err types.ParsingError
 
-		if self.skipValue {
+		if skipChild {
 			/* skip the value */
 			var start int
 			if start, err = self.skipFast(); err != 0 {
@@ -231,8 +260,11 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 		return Node{t: types.V_OBJECT}, 0
 	}
 
-	if self.loadOnce {
+	skipChild := self.mode == parseModeSkipChildren
+	noIndex := self.mode == parseModeEagerNoIndex
+	if self.mode == parseModeLoadOnceRoot {
 		self.muPool = ret
+		self.mode = parseModeLoadOnceChild
 	}
 
 	/* decode each pair */
@@ -262,7 +294,7 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 			return Node{}, err
 		}
 
-		if self.skipValue {
+		if skipChild {
 			/* skip the value */
 			var start int
 			if start, err = self.skipFast(); err != 0 {
@@ -284,7 +316,6 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 		}
 
 		/* add the value to result */
-		// FIXME: ret's address may change here, thus previous referred node in ret may be invalid !!
 		ret.push(key, val)
 		self.p = self.lspace(self.p)
 
@@ -299,7 +330,7 @@ func (self *Parser) decodeObject(ret *linkedPairs) (Node, types.ParsingError) {
 			self.p++
 		case '}':
 			self.p++
-			if self.noIndex {
+			if noIndex {
 				return newObjectNoIndex(ret), 0
 			}
 			return newObject(ret), 0
@@ -469,7 +500,7 @@ parse_array:
 			self.p = p + 1
 			return Node{t: types.V_ARRAY}, 0
 		}
-		if self.loadOnce && !self.noLazy {
+		if self.mode == parseModeLoadOnceChild {
 			self.p = s
 			s, e := self.skipFast()
 			if e != 0 {
@@ -487,10 +518,7 @@ parse_array:
 			}
 			self.p = p
 		}
-		if self.noLazy {
-			if self.loadOnce {
-				self.noLazy = false
-			}
+		if self.mode != parseModeLazy {
 			return self.decodeArray(new(linkedNodes))
 		}
 		return newLazyArray(self), 0
@@ -504,7 +532,7 @@ parse_object:
 			self.p = p + 1
 			return Node{t: types.V_OBJECT}, 0
 		}
-		if self.loadOnce && !self.noLazy {
+		if self.mode == parseModeLoadOnceChild {
 			self.p = s
 			s, e := self.skipFast()
 			if e != 0 {
@@ -522,11 +550,7 @@ parse_object:
 			}
 			self.p = p
 		}
-		// NOTICE: loadOnce always keep raw json for object or array
-		if self.noLazy {
-			if self.loadOnce {
-				self.noLazy = false
-			}
+		if self.mode != parseModeLazy {
 			return self.decodeObject(new(linkedPairs))
 		}
 		return newLazyObject(self), 0
@@ -992,7 +1016,7 @@ func (self *Parser) decodeArrayInterface(useNumber bool) ([]interface{}, types.P
 
 // Loads parse all json into interface{}
 func Loads(src string) (int, interface{}, error) {
-	ps := Parser{s: src, noLazy: true, noIndex: true}
+	ps := Parser{s: src, mode: parseModeEagerNoIndex}
 	x, perr, err := ps.parseInterface(false)
 	if perr != 0 {
 		return 0, nil, ps.ExportError(perr)
@@ -1005,7 +1029,7 @@ func Loads(src string) (int, interface{}, error) {
 
 // LoadsUseNumber parse all json into interface{}, with numeric nodes cast to json.Number
 func LoadsUseNumber(src string) (int, interface{}, error) {
-	ps := Parser{s: src, noLazy: true, noIndex: true}
+	ps := Parser{s: src, mode: parseModeEagerNoIndex}
 	x, perr, err := ps.parseInterface(true)
 	if perr != 0 {
 		return 0, nil, ps.ExportError(perr)

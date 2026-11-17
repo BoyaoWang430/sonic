@@ -760,58 +760,8 @@ func (self *Node) Set(key string, node Node) (bool, error) {
 		if node.t == V_ERROR {
 			return false, node
 		}
-		raw := self.toString()
-		if len(raw) >= 2 && raw[0] == '{' {
-			wi := 1
-			for wi < len(raw) && (raw[wi] == ' ' || raw[wi] == '\n' || raw[wi] == '\r' || raw[wi] == '\t') {
-				wi++
-			}
-			if wi < len(raw) {
-				if raw[wi] == '}' {
-					ti := wi + 1
-					for ti < len(raw) && (raw[ti] == ' ' || raw[ti] == '\n' || raw[ti] == '\r' || raw[ti] == '\t') {
-						ti++
-					}
-					if ti == len(raw) {
-						lp := new(linkedPairs)
-						lp.head[0] = Pair{Key: key, Value: node}
-						lp.size = 1
-						*self = Node{t: types.V_OBJECT, l: 1, p: unsafe.Pointer(lp)}
-						return false, nil
-					}
-				}
-				if raw[wi] == '"' {
-					orig := *self
-					st := new(parseObjectStack)
-					st.parser.s = raw
-					st.parser.p = wi
-					self.t = _V_OBJECT_LAZY
-					self.l = 0
-					self.p = unsafe.Pointer(st)
-					p, _ := self.skipKeyLazy(key, 0)
-					if p != nil && p.t == V_ERROR {
-						*self = orig
-						return false, &Node{t: p.t, l: p.l, p: p.p, m: p.m}
-					}
-					if !p.Exists() {
-						if self.isLazy() {
-							if err := self.skipAllKey(); err != nil {
-								*self = orig
-								return false, err
-							}
-						}
-						if self.len() == 0 {
-							*self = newObject(new(linkedPairs))
-						}
-						s := (*linkedPairs)(self.p)
-						s.Push(NewPair(key, node))
-						self.l++
-						return false, nil
-					}
-					*p = node
-					return true, nil
-				}
-			}
+		if exist, err, handled := self.trySetOnRawObject(key, node); handled {
+			return exist, err
 		}
 	}
 
@@ -1503,61 +1453,6 @@ func (self *Node) unsafeArray() (*linkedNodes, error) {
 	return (*linkedNodes)(self.p), nil
 }
 
-// Interface loads all children under all paths from this node,
-// and converts itself as generic type.
-// WARN: all numeric nodes are cast to float64
-func (self *Node) rawInterface(useNumber bool) (interface{}, error) {
-	parser := Parser{s: self.toString(), noLazy: true, noIndex: true}
-	v, perr, err := parser.parseInterface(useNumber)
-	if perr != 0 {
-		se := newSyntaxError(parser.syntaxError(perr))
-		*self = *se
-		return nil, se
-	}
-	if err != nil {
-		return nil, err
-	}
-	return v, nil
-}
-
-func (self *Node) rawMap(useNumber bool) (map[string]interface{}, error) {
-	parser := Parser{s: self.toString(), noLazy: true, noIndex: true}
-	if perr := parser.object(); perr != 0 {
-		se := newSyntaxError(parser.syntaxError(perr))
-		*self = *se
-		return nil, se
-	}
-	v, perr, err := parser.decodeObjectInterface(useNumber)
-	if perr != 0 {
-		se := newSyntaxError(parser.syntaxError(perr))
-		*self = *se
-		return nil, se
-	}
-	if err != nil {
-		return nil, err
-	}
-	return v, nil
-}
-
-func (self *Node) rawArray(useNumber bool) ([]interface{}, error) {
-	parser := Parser{s: self.toString(), noLazy: true, noIndex: true}
-	if perr := parser.array(); perr != 0 {
-		se := newSyntaxError(parser.syntaxError(perr))
-		*self = *se
-		return nil, se
-	}
-	v, perr, err := parser.decodeArrayInterface(useNumber)
-	if perr != 0 {
-		se := newSyntaxError(parser.syntaxError(perr))
-		*self = *se
-		return nil, se
-	}
-	if err != nil {
-		return nil, err
-	}
-	return v, nil
-}
-
 func (self *Node) Interface() (interface{}, error) {
 	if self != nil && self.m == nil && self.loadt()&_V_RAW != 0 {
 		return self.rawInterface(false)
@@ -1719,57 +1614,27 @@ func (self *Node) should(t types.ValueType) error {
 }
 
 func (self *Node) nodeAt(i int) *Node {
-	var p *linkedNodes
 	if self.isLazy() {
 		_, stack := self.getParserAndArrayStack()
-		p = &stack.v
-	} else {
-		if uint(i) >= self.l {
-			return nil
-		}
-		p = (*linkedNodes)(self.p)
-		if l := p.Len(); l != self.len() {
-			// some nodes got unset, iterate to skip them
-			for j := 0; j < l; j++ {
-				v := p.At(j)
-				if v.Exists() {
-					i--
-				}
-				if i < 0 {
-					return v
-				}
-			}
-			return nil
-		}
+		return stack.v.At(i)
 	}
-	return p.At(i)
+	if uint(i) >= self.l {
+		return nil
+	}
+	v, _ := ((*linkedNodes)(self.p)).NodeAtLive(i, self.len())
+	return v
 }
 
 func (self *Node) pairAt(i int) *Pair {
-	var p *linkedPairs
 	if self.isLazy() {
 		_, stack := self.getParserAndObjectStack()
-		p = &stack.v
-	} else {
-		if uint(i) >= self.l {
-			return nil
-		}
-		p = (*linkedPairs)(self.p)
-		if l := p.Len(); l != self.len() {
-			// some nodes got unset, iterate to skip them
-			for j := 0; j < l; j++ {
-				v := p.At(j)
-				if v != nil && v.Value.Exists() {
-					i--
-				}
-				if i < 0 {
-					return v
-				}
-			}
-			return nil
-		}
+		return stack.v.At(i)
 	}
-	return p.At(i)
+	if uint(i) >= self.l {
+		return nil
+	}
+	v, _ := ((*linkedPairs)(self.p)).PairAtLive(i, self.len())
+	return v
 }
 
 func (self *Node) skipAllIndex() error {
@@ -1778,8 +1643,7 @@ func (self *Node) skipAllIndex() error {
 	}
 	var err types.ParsingError
 	parser, stack := self.getParserAndArrayStack()
-	parser.skipValue = true
-	parser.noLazy = true
+	parser.mode = parseModeSkipChildren
 	*self, err = parser.decodeArray(&stack.v)
 	if err != 0 {
 		return parser.ExportError(err)
@@ -1793,8 +1657,7 @@ func (self *Node) skipAllKey() error {
 	}
 	var err types.ParsingError
 	parser, stack := self.getParserAndObjectStack()
-	parser.skipValue = true
-	parser.noLazy = true
+	parser.mode = parseModeSkipChildren
 	*self, err = parser.decodeObject(&stack.v)
 	if err != 0 {
 		return parser.ExportError(err)
@@ -1807,7 +1670,6 @@ func (self *Node) skipKey(key string) (*Node, int) {
 	lazy := self.isLazy()
 
 	if nb > 0 {
-		/* linear search */
 		var p *Pair
 		var i int
 		if lazy {
@@ -1822,153 +1684,11 @@ func (self *Node) skipKey(key string) (*Node, int) {
 		}
 	}
 
-	/* not found */
 	if !lazy {
 		return nil, -1
 	}
 
 	return self.skipKeyLazy(key, nb)
-}
-
-func (self *Node) skipKeyLazy(key string, i int) (*Node, int) {
-	parser, stack := self.getParserAndObjectStack()
-	ret := &stack.v
-	s := parser.s
-	p := parser.p
-	ns := len(s)
-outer:
-	for {
-		for uint(p) < uint(ns) && (s[p] == ' ' || s[p] == '\n' || s[p] == '\r' || s[p] == '\t') {
-			p++
-		}
-		if uint(p) < uint(ns) && s[p] == '"' {
-			kStart := p + 1
-			limit := kStart + 24
-			if limit > ns {
-				limit = ns
-			}
-			kp := kStart
-			for kp < limit {
-				c := s[kp]
-				if c == '"' {
-					if kp+1 < ns && s[kp+1] == ':' {
-						vp := kp + 2
-						for vp < ns && (s[vp] == ' ' || s[vp] == '\n' || s[vp] == '\r' || s[vp] == '\t') {
-							vp++
-						}
-						if vp < ns {
-							vStart := vp
-							vc := s[vp]
-							vEnd := -1
-							var vt types.ValueType
-							switch vc {
-							case '"':
-								vt = types.V_STRING
-								vlim := vp + 1 + 48
-								if vlim > ns {
-									vlim = ns
-								}
-								for vi := vp + 1; vi < vlim; vi++ {
-									b := s[vi]
-									if b == '"' {
-										vEnd = vi + 1
-										break
-									}
-									if b < 0x20 || b == '\\' {
-										break
-									}
-								}
-							case '0':
-								vt = _V_NUMBER
-								vEnd = vp + 1
-							case '1', '2', '3', '4', '5', '6', '7', '8', '9':
-								vt = _V_NUMBER
-								vlim := vp + 1 + 24
-								if vlim > ns {
-									vlim = ns
-								}
-								for vi := vp + 1; vi < vlim; vi++ {
-									b := s[vi]
-									if b >= '0' && b <= '9' {
-										continue
-									}
-									if b == ',' || b == '}' || b == ' ' || b == '\n' || b == '\r' || b == '\t' {
-										vEnd = vi
-									}
-									break
-								}
-							case 't':
-								if ns-vp >= 4 && s[vp:vp+4] == "true" {
-									vt = types.V_TRUE
-									vEnd = vp + 4
-								}
-							case 'f':
-								if ns-vp >= 5 && s[vp:vp+5] == "false" {
-									vt = types.V_FALSE
-									vEnd = vp + 5
-								}
-							case 'n':
-								if ns-vp >= 4 && s[vp:vp+4] == "null" {
-									vt = types.V_NULL
-									vEnd = vp + 4
-								}
-							}
-							if vEnd >= 0 && vEnd < ns {
-								sp := vEnd
-								for sp < ns && (s[sp] == ' ' || s[sp] == '\n' || s[sp] == '\r' || s[sp] == '\t') {
-									sp++
-								}
-								if sp < ns {
-									sep := s[sp]
-									if sep == ',' || sep == '}' {
-										pairKey := s[kStart:kp]
-										val := newRawNode(s[vStart:vEnd], vt, false)
-										ret.push(pairKey, val)
-										self.l++
-										p = sp + 1
-										parser.p = p
-										if sep == '}' {
-											self.setObject(ret)
-											if pairKey == key {
-												return &ret.At(ret.size - 1).Value, i
-											}
-											return nil, -1
-										}
-										if pairKey == key {
-											return &ret.At(ret.size - 1).Value, i
-										}
-										i++
-										continue outer
-									}
-								}
-							}
-						}
-					}
-					break
-				}
-				if c < 0x20 || c == '\\' {
-					break
-				}
-				kp++
-			}
-		}
-		parser.p = p
-		last := self.skipNextPair()
-		if last == nil {
-			return nil, -1
-		}
-		if last.Value.t == V_ERROR {
-			return &last.Value, -1
-		}
-		if last.Key == key {
-			return &last.Value, i
-		}
-		if !self.isLazy() {
-			return nil, -1
-		}
-		p = parser.p
-		i++
-	}
 }
 
 func (self *Node) skipIndex(index int) *Node {
@@ -2023,11 +1743,9 @@ func (self *Node) loadAllIndex(loadOnce bool) error {
 	var err types.ParsingError
 	parser, stack := self.getParserAndArrayStack()
 	if !loadOnce {
-		// The materialized tree replaces *self and is kept, so nested objects
-		// keep their key index (noIndex is only for throwaway parses).
-		parser.noLazy = true
+		parser.mode = parseModeEager
 	} else {
-		parser.loadOnce = true
+		parser.mode = parseModeLoadOnceRoot
 	}
 	*self, err = parser.decodeArray(&stack.v)
 	if err != 0 {
@@ -2043,13 +1761,11 @@ func (self *Node) loadAllKey(loadOnce bool) error {
 	var err types.ParsingError
 	parser, stack := self.getParserAndObjectStack()
 	if !loadOnce {
-		// See loadAllIndex: the result is retained, so build key indexes.
-		parser.noLazy = true
-		*self, err = parser.decodeObject(&stack.v)
+		parser.mode = parseModeEager
 	} else {
-		parser.loadOnce = true
-		*self, err = parser.decodeObject(&stack.v)
+		parser.mode = parseModeLoadOnceRoot
 	}
+	*self, err = parser.decodeObject(&stack.v)
 	if err != 0 {
 		return parser.ExportError(err)
 	}
@@ -2057,44 +1773,36 @@ func (self *Node) loadAllKey(loadOnce bool) error {
 }
 
 func (self *Node) removeNode(i int) {
-	node := self.nodeAt(i)
-	if node == nil {
-		return
+	var nodes *linkedNodes
+	if self.isLazy() {
+		_, stack := self.getParserAndArrayStack()
+		nodes = &stack.v
+	} else {
+		nodes = (*linkedNodes)(self.p)
 	}
-	*node = Node{}
-	// NOTICE: not be consistent with linkedNode.Len()
-	self.l--
+	if nodes != nil && nodes.UnsetLive(i, self.len()) {
+		self.l--
+	}
 }
 
 func (self *Node) removePair(i int) {
-	last := self.pairAt(i)
-	if last == nil {
-		return
+	var pairs *linkedPairs
+	if self.isLazy() {
+		_, stack := self.getParserAndObjectStack()
+		pairs = &stack.v
+	} else {
+		pairs = (*linkedPairs)(self.p)
 	}
-	wasLive, key := !last.isUnset(), last.Key
-	*last = tombstonePair
-	if wasLive {
-		if !self.isLazy() {
-			if s := (*linkedPairs)(self.p); s != nil {
-				s.reindexKey(key)
-			}
-		} else {
-			_, stack := self.getParserAndObjectStack()
-			stack.v.reindexKey(key)
-		}
+	if pairs != nil && pairs.UnsetLive(i, self.len()) {
+		self.l--
 	}
-	// NOTICE: should be consistent with linkedPair.Len()
-	self.l--
 }
 
 func (self *Node) removePairAt(i int) {
 	s := (*linkedPairs)(self.p)
-	if s == nil || s.At(i) == nil {
-		return
+	if s != nil && s.Unset(i) {
+		self.l--
 	}
-	s.Unset(i)
-	// NOTICE: should be consistent with linkedPair.Len()
-	self.l--
 }
 
 func (self *Node) nodeToInterface() (interface{}, error) {
@@ -2613,64 +2321,8 @@ func (node *Node) toFloat64() (float64, error) {
 	return parseFloat64Fast(node.toString())
 }
 
-func parseFloat64Fast(s string) (float64, error) {
-	n := len(s)
-	if n > 0 && n <= 19 {
-		i := 0
-		neg := false
-		if s[0] == '-' {
-			neg = true
-			i = 1
-		}
-		if i < n && (n-i == 1 || (s[i] >= '1' && s[i] <= '9')) {
-			var u uint64
-			for ; i < n; i++ {
-				d := s[i] - '0'
-				if d > 9 {
-					break
-				}
-				u = u*10 + uint64(d)
-			}
-			if i == n {
-				f := float64(u)
-				if neg {
-					return -f, nil
-				}
-				return f, nil
-			}
-		}
-	}
-	return number.ParseGoFloat64(s)
-}
-
 func (node *Node) toInt64() (int64, error) {
-	s := node.toString()
-	n := len(s)
-	if n > 0 && n <= 19 {
-		i := 0
-		neg := false
-		if s[0] == '-' {
-			neg = true
-			i = 1
-		}
-		if i < n && n-i <= 18 && (n-i == 1 || (s[i] >= '1' && s[i] <= '9')) {
-			var u uint64
-			for ; i < n; i++ {
-				d := s[i] - '0'
-				if d > 9 {
-					break
-				}
-				u = u*10 + uint64(d)
-			}
-			if i == n {
-				if neg {
-					return -int64(u), nil
-				}
-				return int64(u), nil
-			}
-		}
-	}
-	return strconv.ParseInt(s, 10, 64)
+	return parseInt64Fast(node.toString())
 }
 
 func newBytes(v []byte) Node {
@@ -2753,6 +2405,8 @@ func (self *Node) setObject(v *linkedPairs) {
 	self.p = unsafe.Pointer(v)
 }
 
+// parseRaw centralizes raw -> lazy / materialized / error state transitions and
+// concurrent read-only mutex acquisition & atomic state publication.
 func (self *Node) parseRaw(full bool) {
 	// Capture the mutex before anything can overwrite *self, and release it
 	// through the captured value: on error *self is replaced, and a panic in
@@ -2765,36 +2419,27 @@ func (self *Node) parseRaw(full bool) {
 	if !self.isRaw() {
 		return
 	}
-	raw := self.toString()
-	parser := NewParserObj(raw)
-	var e types.ParsingError
-	if full && m == nil {
-		parser.noLazy = true
-		parser.noIndex = true
-		*self, e = parser.Parse()
-	} else if m != nil {
-		var n Node
-		parser.noLazy = true
-		parser.loadOnce = true
-		n, e = parser.Parse()
-		if e == 0 {
-			self.assign(n)
-		}
+	parser := Parser{s: self.toString()}
+	if m != nil {
+		parser.mode = parseModeLoadOnceRoot
+	} else if full {
+		parser.mode = parseModeEagerNoIndex
 	} else {
-		*self, e = parser.Parse()
+		parser.mode = parseModeLazy
 	}
+	n, e := parser.Parse()
 	if e != 0 {
-		if m != nil {
-			// Publish the error like any other state change and keep the
-			// mutex, which other goroutines may already be waiting on.
-			self.assign(*newSyntaxError(parser.syntaxError(e)))
-		} else {
-			*self = *newSyntaxError(parser.syntaxError(e))
-		}
+		self.publishTransition(*newSyntaxError(parser.syntaxError(e)), m != nil)
+		return
 	}
+	self.publishTransition(n, m != nil)
 }
 
-func (self *Node) assign(n Node) {
+func (self *Node) publishTransition(n Node, shared bool) {
+	if !shared {
+		*self = n
+		return
+	}
 	self.l = n.l
 	self.p = n.p
 	atomic.StoreInt64(&self.t, n.t)

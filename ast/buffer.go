@@ -60,6 +60,39 @@ func (self *linkedNodes) At(i int) *Node {
 	return nil
 }
 
+// NodeAtLive resolves the liveIdx-th existing element (0 <= liveIdx < liveCount)
+// without moving chunked Node addresses. When no tombstones exist (size == liveCount),
+// physical slot and live index coincide; otherwise unset slots are skipped.
+func (self *linkedNodes) NodeAtLive(liveIdx int, liveCount int) (*Node, int) {
+	if self == nil || liveIdx < 0 || liveIdx >= liveCount {
+		return nil, -1
+	}
+	if self.size == liveCount {
+		return self.At(liveIdx), liveIdx
+	}
+	for slot := 0; slot < self.size; slot++ {
+		v := self.At(slot)
+		if v.Exists() {
+			if liveIdx == 0 {
+				return v, slot
+			}
+			liveIdx--
+		}
+	}
+	return nil, -1
+}
+
+// UnsetLive marks the liveIdx-th existing element empty without moving sibling
+// Node addresses and reports whether an element was removed.
+func (self *linkedNodes) UnsetLive(liveIdx int, liveCount int) bool {
+	node, _ := self.NodeAtLive(liveIdx, liveCount)
+	if node == nil {
+		return false
+	}
+	*node = Node{}
+	return true
+}
+
 func (self *linkedNodes) MoveOne(source int, target int) {
 	if source == target {
 		return
@@ -293,6 +326,28 @@ func (self *linkedPairs) At(i int) *Pair {
 	return nil
 }
 
+// PairAtLive resolves the liveIdx-th live object pair (0 <= liveIdx < liveCount)
+// and returns both its stable chunked *Pair pointer and physical slot index.
+// Physical slots [0, size) include tombstones; liveCount counts non-tombstoned pairs.
+func (self *linkedPairs) PairAtLive(liveIdx int, liveCount int) (*Pair, int) {
+	if self == nil || liveIdx < 0 || liveIdx >= liveCount {
+		return nil, -1
+	}
+	if self.size == liveCount {
+		return self.At(liveIdx), liveIdx
+	}
+	for slot := 0; slot < self.size; slot++ {
+		v := self.At(slot)
+		if v != nil && v.Value.Exists() {
+			if liveIdx == 0 {
+				return v, slot
+			}
+			liveIdx--
+		}
+	}
+	return nil, -1
+}
+
 func (self *linkedPairs) Push(v Pair) {
 	if self.index == nil && self.size < _DEFAULT_NODE_CAP {
 		self.head[self.size] = v
@@ -304,12 +359,12 @@ func (self *linkedPairs) Push(v Pair) {
 
 func (self *linkedPairs) push(key string, val Node) {
 	i := self.size
-	if i < _DEFAULT_NODE_CAP {
+	if self.index == nil && i < _DEFAULT_NODE_CAP {
 		self.head[i] = Pair{Key: key, Value: val}
 		self.size = i + 1
 		return
 	}
-	self.set(i, Pair{Key: key, Value: val})
+	self.Set(i, Pair{Key: key, Value: val})
 }
 
 func (self *linkedPairs) Pop() {
@@ -320,17 +375,55 @@ func (self *linkedPairs) Pop() {
 	self.size--
 }
 
-func (self *linkedPairs) Unset(i int) {
-	var key string
-	removed := false
+// Unset replaces physical slot i with a tombstone without moving chunked Node
+// addresses, repairs the key index for duplicate keys, and reports whether slot
+// i previously held a live pair.
+func (self *linkedPairs) Unset(i int) bool {
+	if self == nil {
+		return false
+	}
+	p := self.At(i)
+	if p == nil || p.isUnset() {
+		return false
+	}
+	key := p.Key
+	*p = tombstonePair
 	if self.index != nil {
-		if p := self.At(i); p != nil && !p.isUnset() {
-			key, removed = p.Key, true
+		self.reindexKey(key)
+	}
+	return true
+}
+
+// UnsetLive tombstones the liveIdx-th non-tombstoned pair (0 <= liveIdx < liveCount)
+// via the single Unset entry point so Node never mutates tombstones or indexes directly.
+func (self *linkedPairs) UnsetLive(liveIdx int, liveCount int) bool {
+	_, slot := self.PairAtLive(liveIdx, liveCount)
+	if slot < 0 {
+		return false
+	}
+	return self.Unset(slot)
+}
+
+// Replace writes v into physical slot i while keeping self.index consistent
+// if slot i previously held a live pair with a different key.
+func (self *linkedPairs) Replace(i int, v Pair) {
+	var prevKey string
+	hadPrev := false
+	if self.index != nil && i >= 0 && i < self.size {
+		if old := self.At(i); old != nil && !old.isUnset() && old.Key != v.Key {
+			prevKey, hadPrev = old.Key, true
 		}
 	}
-	self.set(i, tombstonePair)
-	if removed {
-		self.reindexKey(key)
+	self.set(i, v)
+	if self.index != nil {
+		if !v.isUnset() {
+			if cur, ok := self.index[v.Key]; !ok || i >= cur {
+				self.index[v.Key] = i
+			}
+		}
+		if hadPrev {
+			self.reindexKey(prevKey)
+		}
 	}
 }
 
@@ -358,10 +451,7 @@ func (self *linkedPairs) reindexKey(key string) {
 }
 
 func (self *linkedPairs) Set(i int, v Pair) {
-	if self.index != nil {
-		self.index[v.Key] = i
-	}
-	self.set(i, v)
+	self.Replace(i, v)
 }
 
 func (self *linkedPairs) set(i int, v Pair) {
@@ -516,24 +606,29 @@ func (self *linkedPairs) ToMap(con map[string]Node) {
 	}
 }
 
-func (self *linkedPairs) copyPairs(to []Pair, from []Pair, l int) {
+func (self *linkedPairs) copyPairs(to []Pair, from []Pair, base int, l int) {
 	copy(to, from)
 	if self.index != nil {
 		for i := 0; i < l; i++ {
-			self.index[from[i].Key] = i
+			if !from[i].isUnset() {
+				self.index[from[i].Key] = base + i
+			}
 		}
 	}
 }
 
 func (self *linkedPairs) FromSlice(con []Pair) {
 	self.size = len(con)
+	if self.size == 0 {
+		return
+	}
 	i := self.size - 1
 	a, b := i/_DEFAULT_NODE_CAP-1, i%_DEFAULT_NODE_CAP
 	if a < 0 {
-		self.copyPairs(self.head[:b+1], con, b+1)
+		self.copyPairs(self.head[:b+1], con, 0, b+1)
 		return
 	} else {
-		self.copyPairs(self.head[:], con, len(self.head))
+		self.copyPairs(self.head[:], con, 0, len(self.head))
 		con = con[_DEFAULT_NODE_CAP:]
 	}
 
@@ -545,12 +640,12 @@ func (self *linkedPairs) FromSlice(con []Pair) {
 
 	for i := 0; i < a; i++ {
 		self.tail[i] = new(pairChunk)
-		self.copyPairs(self.tail[i][:], con, len(self.tail[i]))
+		self.copyPairs(self.tail[i][:], con, (i+1)*_DEFAULT_NODE_CAP, len(self.tail[i]))
 		con = con[_DEFAULT_NODE_CAP:]
 	}
 
 	self.tail[a] = new(pairChunk)
-	self.copyPairs(self.tail[a][:b+1], con, b+1)
+	self.copyPairs(self.tail[a][:b+1], con, (a+1)*_DEFAULT_NODE_CAP, b+1)
 }
 
 func (self *linkedPairs) Less(i, j int) bool {
@@ -559,19 +654,17 @@ func (self *linkedPairs) Less(i, j int) bool {
 
 func (self *linkedPairs) Swap(i, j int) {
 	a, b := self.At(i), self.At(j)
-	if self.index != nil {
-		if !a.isUnset() {
-			self.index[a.Key] = j
-		}
-		if !b.isUnset() {
-			self.index[b.Key] = i
-		}
-	}
 	*a, *b = *b, *a
 }
 
 func (self *linkedPairs) Sort() {
 	sort.Stable(self)
+	if self.index != nil {
+		for k := range self.index {
+			delete(self.index, k)
+		}
+		self.BuildIndex()
+	}
 }
 
 // Compare two strings from the pos d.

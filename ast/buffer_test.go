@@ -235,3 +235,53 @@ func Test_linkedNodes_MoveOne(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkedPairsIndexTombstoneAndPointerStability(t *testing.T) {
+	// Exceed _Threshold_Index (32) and _DEFAULT_NODE_CAP (16) with duplicate keys.
+	pairs := make([]Pair, 0, 40)
+	pairs = append(pairs, NewPair("dup", NewNumber("1")))
+	for i := 0; i < 36; i++ {
+		pairs = append(pairs, NewPair("k"+strconv.Itoa(i), NewNumber(strconv.Itoa(i+10))))
+	}
+	pairs = append(pairs, NewPair("dup", NewNumber("2")))
+
+	obj := NewObject(pairs)
+	heldFirst := obj.Get("k0")
+	heldTail := obj.Get("k25")
+	require.True(t, heldFirst.Exists())
+	require.True(t, heldTail.Exists())
+
+	// Indexed object resolves duplicate key to last live entry ("2").
+	v, err := obj.Get("dup").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(2), v)
+
+	// Unsetting "dup" tombstones the last occurrence and re-points the index to "1",
+	// while keeping held Node addresses across chunks completely stable.
+	existed, err := obj.Unset("dup")
+	require.NoError(t, err)
+	require.True(t, existed)
+	v, err = obj.Get("dup").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), v)
+
+	// UnsetByIndex also routes through linkedPairs.UnsetLive and updates the index.
+	existed, err = obj.UnsetByIndex(0) // live index 0 is the remaining "dup":"1"
+	require.NoError(t, err)
+	require.True(t, existed)
+	require.False(t, obj.Get("dup").Exists())
+
+	// Appending additional keys grows tail chunks without invalidating held pointers.
+	for i := 40; i < 70; i++ {
+		_, err := obj.Set("extra"+strconv.Itoa(i), NewNumber(strconv.Itoa(i)))
+		require.NoError(t, err)
+	}
+	require.Same(t, heldFirst, obj.Get("k0"))
+	require.Same(t, heldTail, obj.Get("k25"))
+
+	// Sorting rebuilds the index cleanly so lookups remain accurate.
+	require.NoError(t, obj.SortKeys(false))
+	k25Val, err := obj.Get("k25").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(35), k25Val)
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/native"
+	"github.com/bytedance/sonic/internal/native/pathplan"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/utf8"
 )
@@ -191,19 +192,13 @@ func validate_utf8(str string) bool {
 	return utf8.ValidateString(str)
 }
 
-type nativePathPlanHandle = *native.PathPlan
-
-func compilePathPlanImpl(paths [][]interface{}) (nativePathPlanHandle, types.ParsingError) {
-	return native.CompilePathPlan(paths)
-}
-
-func locateSpansImpl(view inputView, plan nativePathPlanHandle, validate bool, out []locatedSpan) (int, types.ParsingError) {
-	var stackNat [16]native.LocatedSpan
-	var nat []native.LocatedSpan
+func locateSpansImpl(view inputView, plan *pathplan.Plan, validate bool, out []locatedSpan) (int, types.ParsingError) {
+	var stackNat [16]pathplan.LocatedSpan
+	var nat []pathplan.LocatedSpan
 	if len(out) <= len(stackNat) {
 		nat = stackNat[:len(out)]
 	} else {
-		nat = make([]native.LocatedSpan, len(out))
+		nat = make([]pathplan.LocatedSpan, len(out))
 	}
 	errPos, err := native.LocateMany(view.src, view.base, plan, validate, nat)
 	if err != 0 {

@@ -39,7 +39,7 @@ func TestASTMutableNodeDoesNotRetainLargeSibling(t *testing.T) {
 
 	// Also verify post-parse mutation on a transient sibling does not retain data in kept[0]
 	{
-		p := Parser{s: `[[true],[false]]`, noLazy: true}
+		p := Parser{s: `[[true],[false]]`, mode: parseModeEager}
 		r, err := p.Parse()
 		if err != 0 {
 			t.Fatal(err)

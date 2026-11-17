@@ -158,28 +158,34 @@ func TestKeyScanSearchRandom(t *testing.T) {
 func TestKeyScanObjectParsing(t *testing.T) {
 	const src = ` { "plain":1, "a\u0062":2, "a\\b":3, "a\"b":4, "":5, "你好":6, "\uD83D\uDE00":7 } `
 	keys := []string{"plain", "ab", "a\\b", "a\"b", "", "你好", "😀"}
-	for _, eager := range []bool{false, true} {
-		for _, skipValues := range []bool{false, true} {
-			t.Run(fmt.Sprintf("eager=%v/skip=%v", eager, skipValues), func(t *testing.T) {
-				parser := NewParser(src)
-				parser.noLazy = eager
-				parser.skipValue = skipValues
-				node, err := parser.Parse()
-				if err != 0 {
-					t.Fatal(err)
+	modes := []struct {
+		name string
+		mode parseMode
+	}{
+		{"lazy", parseModeLazy},
+		{"skip_children", parseModeSkipChildren},
+		{"load_once", parseModeLoadOnceRoot},
+		{"eager", parseModeEager},
+	}
+	for _, tc := range modes {
+		t.Run(tc.name, func(t *testing.T) {
+			parser := NewParser(src)
+			parser.mode = tc.mode
+			node, err := parser.Parse()
+			if err != 0 {
+				t.Fatal(err)
+			}
+			// Lazy lookup walks skipNextPair; eager parsing walks decodeObject.
+			for i, key := range keys {
+				value, err := node.Get(key).Int64()
+				if err != nil || value != int64(i+1) {
+					t.Fatalf("key %q: got %d, %v", key, value, err)
 				}
-				// Lazy lookup walks skipNextPair; eager parsing walks decodeObject.
-				for i, key := range keys {
-					value, err := node.Get(key).Int64()
-					if err != nil || value != int64(i+1) {
-						t.Fatalf("key %q: got %d, %v", key, value, err)
-					}
-				}
-				if err := node.LoadAll(); err != nil {
-					t.Fatal(err)
-				}
-			})
-		}
+			}
+			if err := node.LoadAll(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
