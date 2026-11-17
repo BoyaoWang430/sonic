@@ -122,7 +122,7 @@ func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
 	}
 	p.pos = 0
 	p.end = len(p.Json)
-	p._nbk = _nospaceBlock{}
+	p.nbk = cParityNonspaceBlock{}
 	p.nbuf = nodeBuf{}
 	if wasLazy && len(p.Json) > 128<<10 && p.sessionPadded == nil && !looksLikeJSONLPrefix(p.Json) {
 		p.presizeNodesOne()
@@ -990,7 +990,7 @@ func (sc *schemaScanner) scanFullSubtree(c byte, valStart int) bool {
 	sc.ensureNodes(16)
 	p := sc.p
 	p.ensurePadded()
-	nbk := (*cParityNonspaceBlock)(unsafe.Pointer(&p._nbk))
+	nbk := &p.nbk
 	nbk.offPlus64 = sc.nbkOffPlus64
 	nbk.bits = sc.nbkBits
 	p.pos = valStart

@@ -7,22 +7,22 @@
 // Private register convention for cParityParseRunsAsm and its static helpers.
 // R12 whitespace cache; R13 nodesBase; R14 nodesLast (last spare-safe node);
 // R16 token position; R17 root/object/array/key context.
-// R19 Parser; R20 continuation; R21 options; R22 input; R23 tape; R24 parent;
+// R19 ScanKernelState; R20 continuation; R21 scanFlags; R22 input; R23 tape; R24 parent;
 // R25 input start; R26 input end. Helpers update R22 and preserve R12-R14, R16/R17,
 // R19-R21 and R23-R26. They are stackless leaves using only private registers;
 // Go calls only the outer parser. R18/R28/R29 are reserved, R27 is scratch.
-#define WB_LEN (Parser_nbuf+nodeBuf_nlen)
-#define WB_PARENT (Parser_nbuf+nodeBuf_parent)
-#define WB_DEPTH (Parser_nbuf+nodeBuf_depth)
-#define WB_CAP (Parser_nbuf+nodeBuf_ncap)
-#define WB_ISKEY (Parser_nbuf+nodeBuf_iskey)
-#define WS_OBJECT (Parser_nbuf+nodeBuf_stat+jsonStat_object)
-#define WS_ARRAY (Parser_nbuf+nodeBuf_stat+jsonStat_array)
-#define WS_STRING (Parser_nbuf+nodeBuf_stat+jsonStat_str)
-#define WS_NUMBER (Parser_nbuf+nodeBuf_stat+jsonStat_number)
-#define WS_ARRAY_ELEMS (Parser_nbuf+nodeBuf_stat+jsonStat_array_elems)
-#define WS_OBJECT_KEYS (Parser_nbuf+nodeBuf_stat+jsonStat_object_keys)
-#define WS_MAX_DEPTH (Parser_nbuf+nodeBuf_stat+jsonStat_max_depth)
+#define WB_LEN (ScanKernelState_nbuf+nodeBuf_nlen)
+#define WB_PARENT (ScanKernelState_nbuf+nodeBuf_parent)
+#define WB_DEPTH (ScanKernelState_nbuf+nodeBuf_depth)
+#define WB_CAP (ScanKernelState_nbuf+nodeBuf_ncap)
+#define WB_ISKEY (ScanKernelState_nbuf+nodeBuf_iskey)
+#define WS_OBJECT (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object)
+#define WS_ARRAY (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array)
+#define WS_STRING (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_str)
+#define WS_NUMBER (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_number)
+#define WS_ARRAY_ELEMS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array_elems)
+#define WS_OBJECT_KEYS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object_keys)
+#define WS_MAX_DEPTH (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_max_depth)
 #define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
 #define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
 
@@ -99,14 +99,14 @@
 // All internal scanner calls use the private register convention above.
 TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $16-40
 	NO_LOCAL_POINTERS
-	MOVD p+0(FP), R19
+	MOVD kern+0(FP), R19
 	MOVD state+8(FP), R20
-	ADD $Parser__nbk, R19, R12
-	MOVD Parser_options(R19), R21
+	ADD $ScanKernelState_nbk, R19, R12
+	MOVD ScanKernelState_scanFlags(R19), R21
 	MOVD rawBase+16(FP), R25
-	MOVD Parser_pos(R19), R22
+	MOVD ScanKernelState_pos(R19), R22
 	ADD R25, R22, R22
-	MOVD Parser_end(R19), R26
+	MOVD ScanKernelState_end(R19), R26
 	ADD R25, R26, R26
 	MOVD nodesBase+24(FP), R13
 	MOVD WB_CAP(R19), R14
@@ -572,7 +572,7 @@ runs_error_array_end:
 	MOVD $const_SONIC_EXPECT_ARR_COMMA_OR_END, R0
 	JMP runs_done
 runs_error_capacity:
-	MOVD $const_SONIC_VISIT_FAILED, R0
+	MOVD $const_cParityRunsNodeCapFull, R0
 	JMP runs_done
 runs_ok:
 	MOVD $0, R0
@@ -581,7 +581,7 @@ runs_yield:
 	MOVD R16, cParityRunsState_pos(R20)
 runs_done:
 	SUB R25, R22, R22
-	MOVD R22, Parser_pos(R19)
+	MOVD R22, ScanKernelState_pos(R19)
 	SUB R13, R23, R23
 	LSR $4, R23, R23
 	MOVD R23, WB_LEN(R19)

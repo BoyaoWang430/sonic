@@ -5,10 +5,10 @@
 #include "go_asm.h"
 
 // Private register convention for cParityParseRunsAsm and its static helpers:
-// R12: p (*Parser)
+// R12: kern (*ScanKernelState)
 // R13: state (*cParityRunsState)
-// SI:  cur (Parser_cur(p) input cursor)
-// BP:  ncur (WB_CUR(p) tape cursor)
+// SI:  cur (input cursor)
+// BP:  ncur (WB_CUR(kern) tape cursor)
 // Stack frame of cParityParseRunsAsm ($64-40):
 //   0(SP): saved BP
 //   8(SP): saved key string length (dead during runs_value_number; aliased as
@@ -25,22 +25,22 @@
 //  Y13: broadcast '\\' (0x5c)
 //  Y14: broadcast '"'  (0x22)
 
-#define WB_LEN (Parser_nbuf+nodeBuf_nlen)
-#define WB_PARENT (Parser_nbuf+nodeBuf_parent)
-#define WB_DEPTH (Parser_nbuf+nodeBuf_depth)
-#define WB_CAP (Parser_nbuf+nodeBuf_ncap)
-#define WB_ISKEY (Parser_nbuf+nodeBuf_iskey)
-#define WS_OBJECT (Parser_nbuf+nodeBuf_stat+jsonStat_object)
-#define WS_ARRAY (Parser_nbuf+nodeBuf_stat+jsonStat_array)
-#define WS_STRING (Parser_nbuf+nodeBuf_stat+jsonStat_str)
-#define WS_NUMBER (Parser_nbuf+nodeBuf_stat+jsonStat_number)
-#define WS_ARRAY_ELEMS (Parser_nbuf+nodeBuf_stat+jsonStat_array_elems)
-#define WS_OBJECT_KEYS (Parser_nbuf+nodeBuf_stat+jsonStat_object_keys)
-#define WS_MAX_DEPTH (Parser_nbuf+nodeBuf_stat+jsonStat_max_depth)
+#define WB_LEN (ScanKernelState_nbuf+nodeBuf_nlen)
+#define WB_PARENT (ScanKernelState_nbuf+nodeBuf_parent)
+#define WB_DEPTH (ScanKernelState_nbuf+nodeBuf_depth)
+#define WB_CAP (ScanKernelState_nbuf+nodeBuf_ncap)
+#define WB_ISKEY (ScanKernelState_nbuf+nodeBuf_iskey)
+#define WS_OBJECT (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object)
+#define WS_ARRAY (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array)
+#define WS_STRING (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_str)
+#define WS_NUMBER (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_number)
+#define WS_ARRAY_ELEMS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array_elems)
+#define WS_OBJECT_KEYS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object_keys)
+#define WS_MAX_DEPTH (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_max_depth)
 #define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
 #define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
-#define NBK_OFF (Parser__nbk+cParityNonspaceBlock_offPlus64)
-#define NBK_BITS (Parser__nbk+cParityNonspaceBlock_bits)
+#define NBK_OFF (ScanKernelState_nbk+cParityNonspaceBlock_offPlus64)
+#define NBK_BITS (ScanKernelState_nbk+cParityNonspaceBlock_bits)
 
 #define RUNS_CAPACITY \
 	CMPQ BP, 56(SP)
@@ -60,15 +60,15 @@ runs_scan_init_sse: \
 	MOVOU cParityRunsQuoteVec<>(SB), X14; \
 runs_scan_init_done:
 
-// func cParityParseRunsAsm(p *Parser, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
+// func cParityParseRunsAsm(kern *ScanKernelState, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
 TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $64-40
 	NO_LOCAL_POINTERS
 	MOVQ BP, 0(SP)
-	MOVQ p+0(FP), R12
+	MOVQ kern+0(FP), R12
 	MOVQ state+8(FP), R13
 	MOVQ rawBase+16(FP), SI
 	MOVQ SI, 48(SP)
-	ADDQ Parser_pos(R12), SI
+	ADDQ ScanKernelState_pos(R12), SI
 	MOVQ nodesBase+24(FP), AX
 	MOVQ WB_CAP(R12), CX
 	DECQ CX
@@ -295,7 +295,7 @@ runs_value_positive:
 runs_value_negative:
 	MOVQ $1, BX
 runs_value_number:
-	TESTB $2, Parser_options(R12)
+	TESTB $2, ScanKernelState_scanFlags(R12)
 	JNZ  runs_number_yield
 	CALL runs_number<>(SB)
 	CMPQ AX, $const_cParityRunsNumber
@@ -351,7 +351,7 @@ runs_value_string_eof:
 	CMPQ 32(SP), $0
 	JNE  runs_emit_string
 	MOVQ rawBase+16(FP), CX
-	ADDQ Parser_end(R12), CX
+	ADDQ ScanKernelState_end(R12), CX
 	CMPQ CX, SI
 	JGE  runs_emit_string
 	MOVQ $const_SONIC_EOF, AX
@@ -565,7 +565,7 @@ runs_error_array_end:
 	MOVQ $const_SONIC_EXPECT_ARR_COMMA_OR_END, AX
 	JMP  runs_done
 runs_error_capacity:
-	MOVQ $const_SONIC_VISIT_FAILED, AX
+	MOVQ $const_cParityRunsNodeCapFull, AX
 	JMP  runs_done
 runs_ok:
 	XORQ AX, AX
@@ -575,7 +575,7 @@ runs_yield:
 	MOVQ CX, cParityRunsState_pos(R13)
 runs_done:
 	SUBQ rawBase+16(FP), SI
-	MOVQ SI, Parser_pos(R12)
+	MOVQ SI, ScanKernelState_pos(R12)
 	SUBQ nodesBase+24(FP), BP
 	SHRQ $4, BP
 	MOVQ BP, WB_LEN(R12)
@@ -1003,7 +1003,7 @@ TEXT runs_string<>(SB), NOSPLIT|NOFRAME, $0-0
 	XORL R8, R8
 	CMPB ·hasAVX2(SB), $0
 	JE   runs_string_sse
-	TESTB $32, Parser_options(R12)
+	TESTB $32, ScanKernelState_scanFlags(R12)
 	JNZ  runs_string_scan_avx2_val
 
 runs_string_scan_avx2_fast:
@@ -1061,7 +1061,7 @@ runs_string_sse:
 	MOVO X0, X4; PCMPEQB X13, X4
 	MOVO X0, X5; PCMPEQB X14, X5
 	POR X5, X4
-	TESTB $32, Parser_options(R12)
+	TESTB $32, ScanKernelState_scanFlags(R12)
 	JZ   runs_string_short_events
 	MOVO X0, X6; PMAXUB X11, X6
 	PCMPEQB X11, X6
@@ -1083,7 +1083,7 @@ runs_string_scan_sse:
 	MOVO X0, X4; PCMPEQB X14, X4; PMOVMSKB X4, R10
 	MOVO X1, X4; PCMPEQB X14, X4; PMOVMSKB X4, AX
 	SHLL $16, AX; ORL AX, R10
-	TESTB $32, Parser_options(R12)
+	TESTB $32, ScanKernelState_scanFlags(R12)
 	JZ   runs_string_scan_sse_events
 	MOVO X0, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, R8
 	MOVO X1, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, AX
@@ -1156,7 +1156,7 @@ runs_string_resume:
 	MOVBLZX (SI), CX
 	CMPB CL, $92
 	JE   runs_string_escape
-	TESTB $32, Parser_options(R12)
+	TESTB $32, ScanKernelState_scanFlags(R12)
 	JNZ  runs_string_move
 	MOVBLZX 1(SI), AX
 	CMPB AL, $92
@@ -1177,7 +1177,7 @@ runs_string_move_avx2:
 	VPMOVMSKB Y4, R9
 	VPCMPEQB Y14, Y0, Y4
 	VPMOVMSKB Y4, R10
-	TESTB $32, Parser_options(R12)
+	TESTB $32, ScanKernelState_scanFlags(R12)
 	JZ   runs_string_move_events
 	VPMAXUB Y11, Y0, Y4
 	VPCMPEQB Y11, Y4, Y4
@@ -1204,7 +1204,7 @@ runs_string_move_sse:
 	MOVOU 0(SI), X0
 	MOVO X0, X4; PCMPEQB X13, X4; PMOVMSKB X4, R9
 	MOVO X0, X4; PCMPEQB X14, X4; PMOVMSKB X4, R10
-	TESTB $32, Parser_options(R12)
+	TESTB $32, ScanKernelState_scanFlags(R12)
 	JZ   runs_string_move_sse_events
 	MOVO X0, X4; PMAXUB X11, X4; PCMPEQB X11, X4; PMOVMSKB X4, R8
 runs_string_move_sse_events:

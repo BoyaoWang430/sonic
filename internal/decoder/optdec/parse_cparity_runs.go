@@ -48,11 +48,13 @@ const (
 	cParityRunsCloseContainer
 	cParityRunsUnicode
 	cParityRunsLiteral
+	cParityRunsNodeCapFull
 )
 
-// cParityParseRunsAsm returns a C error/done code or a hierarchy/cold event.
-// It publishes input/tape cursor offsets before every return. Private scanner calls
-// pass registers without Go argument frames; Go never participates per block.
+// cParityParseRunsAsm returns a scan status/done code or a hierarchy/cold event.
+// It publishes input/tape cursor offsets to ScanKernelState before every return.
+// Private scanner calls pass registers without Go argument frames; Go never
+// participates per block.
 // Open/close events have consumed their delimiter. Close has no state payload:
 // the parent's tape node includes its kind and completed child count.
 // Number restores pos to the body after an optional minus;
@@ -62,10 +64,11 @@ const (
 //
 //go:noescape
 //go:nocheckptr
-func cParityParseRunsAsm(p *Parser, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
+func cParityParseRunsAsm(kern *ScanKernelState, state *cParityRunsState, rawBase *byte, nodesBase *node) (event int)
 
 func cParityParseWithPadding(p *Parser) ErrorCode {
 	var state cParityRunsState
+	p.scanFlags = p.options & (scanKernelFlagRawNumber | scanKernelFlagRejectControl)
 	buf := &p.nbuf
 	if len(p.nodes) == 0 {
 		n := cap(p.nodes)
@@ -80,7 +83,7 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 		buf.ncap = len(p.nodes)
 	}
 	if buf.parent != -1 {
-		// C's grow/restart contract records the continuation in the last node
+		// Grow/restart contract records the continuation in the last node
 		// plus the current parent's type and the key-capacity-failure flag.
 		iskey := buf.iskey
 		buf.iskey = false
@@ -103,7 +106,7 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 	nodesBase := unsafe.SliceData(p.nodes)
 	var code ErrorCode
 	for {
-		event := cParityParseRunsAsm(p, &state, rawBase, nodesBase)
+		event := cParityParseRunsAsm(&p.ScanKernelState, &state, rawBase, nodesBase)
 		if event <= SONIC_STACK_OVERFLOW {
 			code = ErrorCode(event)
 			break
@@ -112,6 +115,9 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 		case cParityRunsCloseContainer:
 			// Bounded preemption yield after every 4096 closed containers.
 			state.phase = cParityRunsParentContinue
+		case cParityRunsNodeCapFull:
+			code = errCodeNodeCapExhausted
+			goto done
 		case cParityRunsNumber:
 			if numberCode := cParityRunsFinishNumber(p, &state); numberCode != SONIC_OK || buf.parent == -1 {
 				code = numberCode
@@ -218,7 +224,7 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 		return code
 	}
 	if nIdx+2 > buf.ncap {
-		return SONIC_VISIT_FAILED
+		return errCodeNodeCapExhausted
 	}
 	return SONIC_OK
 }

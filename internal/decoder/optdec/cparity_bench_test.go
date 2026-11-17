@@ -145,7 +145,7 @@ func armAnalysisParseStages[T any](b *testing.B, src string, eface bool) {
 				p.pos = 0
 				p.nbuf = nodeBuf{}
 				p.nbuf.init(p.nodes)
-				p._nbk = _nospaceBlock{}
+				p.nbk = cParityNonspaceBlock{}
 			}
 			b.StartTimer()
 			for i, p := range parsers[:n] {

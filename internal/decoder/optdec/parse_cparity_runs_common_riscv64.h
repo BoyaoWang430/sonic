@@ -2,20 +2,20 @@
 // and parse_cparity_runs_rvv_riscv64.s (rva23u64).
 // Included after defining RUNS_SCAN_INIT.
 
-#define WB_LEN (Parser_nbuf+nodeBuf_nlen)
-#define WB_PARENT (Parser_nbuf+nodeBuf_parent)
-#define WB_DEPTH (Parser_nbuf+nodeBuf_depth)
-#define WB_CAP (Parser_nbuf+nodeBuf_ncap)
-#define WB_ISKEY (Parser_nbuf+nodeBuf_iskey)
-#define WS_OBJECT (Parser_nbuf+nodeBuf_stat+jsonStat_object)
-#define WS_ARRAY (Parser_nbuf+nodeBuf_stat+jsonStat_array)
-#define WS_STRING (Parser_nbuf+nodeBuf_stat+jsonStat_str)
-#define WS_NUMBER (Parser_nbuf+nodeBuf_stat+jsonStat_number)
-#define WS_ARRAY_ELEMS (Parser_nbuf+nodeBuf_stat+jsonStat_array_elems)
-#define WS_OBJECT_KEYS (Parser_nbuf+nodeBuf_stat+jsonStat_object_keys)
-#define WS_MAX_DEPTH (Parser_nbuf+nodeBuf_stat+jsonStat_max_depth)
-#define WB_NBK_OFF (Parser__nbk+cParityNonspaceBlock_offPlus64)
-#define WB_NBK_BITS (Parser__nbk+cParityNonspaceBlock_bits)
+#define WB_LEN (ScanKernelState_nbuf+nodeBuf_nlen)
+#define WB_PARENT (ScanKernelState_nbuf+nodeBuf_parent)
+#define WB_DEPTH (ScanKernelState_nbuf+nodeBuf_depth)
+#define WB_CAP (ScanKernelState_nbuf+nodeBuf_ncap)
+#define WB_ISKEY (ScanKernelState_nbuf+nodeBuf_iskey)
+#define WS_OBJECT (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object)
+#define WS_ARRAY (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array)
+#define WS_STRING (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_str)
+#define WS_NUMBER (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_number)
+#define WS_ARRAY_ELEMS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_array_elems)
+#define WS_OBJECT_KEYS (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_object_keys)
+#define WS_MAX_DEPTH (ScanKernelState_nbuf+nodeBuf_stat+jsonStat_max_depth)
+#define WB_NBK_OFF (ScanKernelState_nbk+cParityNonspaceBlock_offPlus64)
+#define WB_NBK_BITS (ScanKernelState_nbk+cParityNonspaceBlock_bits)
 #define W_NUM_TYPE (cParityRunsState_num+cParityNum_typ)
 #define W_NUM_VALUE (cParityRunsState_num+cParityNum_val)
 
@@ -28,13 +28,13 @@
 // closure, allocation, Unicode decoding and cold numeric/literal handling.
 TEXT ·cParityParseRunsAsm(SB), NOSPLIT, $24-40
 	NO_LOCAL_POINTERS
-	MOV p+0(FP), X9
+	MOV kern+0(FP), X9
 	MOV state+8(FP), X18
-	MOV Parser_options(X9), X20
+	MOV ScanKernelState_scanFlags(X9), X20
 	MOV rawBase+16(FP), X24
-	MOV Parser_pos(X9), X21
+	MOV ScanKernelState_pos(X9), X21
 	ADD X24, X21, X21
-	MOV Parser_end(X9), X25
+	MOV ScanKernelState_end(X9), X25
 	ADD X24, X25, X25
 	MOV nodesBase+24(FP), X11
 	MOV WB_CAP(X9), X15
@@ -515,7 +515,7 @@ runs_error_array_end:
 	MOV $const_SONIC_EXPECT_ARR_COMMA_OR_END, X10
 	JMP runs_done
 runs_error_capacity:
-	MOV $const_SONIC_VISIT_FAILED, X10
+	MOV $const_cParityRunsNodeCapFull, X10
 	JMP runs_done
 runs_ok:
 	MOV $0, X10
@@ -524,7 +524,7 @@ runs_yield:
 	MOV X26, cParityRunsState_pos(X18)
 runs_done:
 	SUB X24, X21, X21
-	MOV X21, Parser_pos(X9)
+	MOV X21, ScanKernelState_pos(X9)
 	MOV nodesBase+24(FP), X11
 	SUB X11, X22, X22
 	SRL $4, X22, X22

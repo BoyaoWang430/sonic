@@ -51,8 +51,16 @@ var ParsingErrors = []string{
 }
 
 func (code ErrorCode) Error() string {
-	return ParsingErrors[code]
+	if code == errCodeNodeCapExhausted {
+		return "node capacity exhausted"
+	}
+	if code >= 0 && int(code) < len(ParsingErrors) {
+		return ParsingErrors[code]
+	}
+	return "unknown scan status"
 }
+
+const errCodeNodeCapExhausted ErrorCode = -2
 
 // scanStopReason classifies why a bounded scan pass returned to Go.
 type scanStopReason uint8
@@ -70,7 +78,7 @@ func classifyScanStop(code ErrorCode) scanStopReason {
 	switch code {
 	case SONIC_OK:
 		return scanStopDone
-	case SONIC_VISIT_FAILED:
+	case errCodeNodeCapExhausted:
 		return scanStopNodeCapExhausted
 	default:
 		return scanStopSyntaxError
@@ -82,13 +90,6 @@ type node struct {
 	val uint64
 }
 
-// Layout must match the assembly offsets in parse_cparity_runs_*.s.
-type _nospaceBlock struct {
-	_ [8]byte
-	_ [8]byte
-}
-
-// Layout must match the assembly offsets in parse_cparity_runs_*.s.
 type nodeBuf struct {
 	nlen   int
 	parent int64
@@ -104,7 +105,22 @@ func (self *nodeBuf) init(nodes []node) {
 	self.parent = -1
 }
 
-// Layout must match the assembly offsets in parse_cparity_runs_*.s.
+const (
+	scanKernelFlagRawNumber     uint64 = 1 << 1
+	scanKernelFlagRejectControl uint64 = 1 << 5
+)
+
+// ScanKernelState is the compact, pointer-free ABI boundary shared between Go
+// and the Runs assembly scanners via go_asm.h. Evolving Parser, DecodeContext,
+// Schema projection plans, or allocators never changes ScanKernelState layout.
+type ScanKernelState struct {
+	scanFlags uint64
+	pos       int
+	end       int
+	nbk       cParityNonspaceBlock
+	nbuf      nodeBuf
+}
+
 type Parser struct {
 	Json   string
 	padded []byte
@@ -113,13 +129,8 @@ type Parser struct {
 	backup []node
 
 	options uint64
-	// JSON cursor offsets (relative to JsonBytes()[0])
-	pos  int
-	end  int
-	_nbk _nospaceBlock
+	ScanKernelState
 
-	// node buffer cursor
-	nbuf          nodeBuf
 	Utf8Inv       bool
 	isEface       bool
 	paddedBackup  []byte
@@ -130,8 +141,6 @@ type Parser struct {
 	strSlabNext   int
 	ctx           Context
 
-	// Per-decode typed pointer slabs for optional *Scalar / *string struct fields.
-	// Placed after ctx so assembly-referenced Parser offsets remain unchanged.
 	hasProjHints       bool
 	strictURC          bool
 	keepUseNumber      bool
@@ -571,11 +580,8 @@ func (p *Parser) reset() {
 		p.nodes = p.backup
 		p.backup = nil
 	}
-	p.pos = 0
-	p.end = 0
 	p.Json = ""
-	p.nbuf = nodeBuf{}
-	p._nbk = _nospaceBlock{}
+	p.ScanKernelState = ScanKernelState{}
 	p.Utf8Inv = false
 	p.isEface = false
 	p.hasProjHints = false

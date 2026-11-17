@@ -80,10 +80,10 @@ func TestZeroCapParserAndStreamSessionBeginReset(t *testing.T) {
 	// 1. Bare Parser with zero-cap nodes slice must not underflow nodesLast in cParityParseRunsAsm.
 	src := `{"a":1,"b":"ok"}`
 	bare := &Parser{
-		Json:   src,
-		padded: append(append([]byte(nil), src...), padding...),
-		dbuf:   make([]byte, 800),
-		end:    len(src),
+		Json:            src,
+		padded:          append(append([]byte(nil), src...), padding...),
+		dbuf:            make([]byte, 800),
+		ScanKernelState: ScanKernelState{end: len(src)},
 	}
 	bare.nbuf.init(nil)
 	if code := cParityParseWithPadding(bare); code != SONIC_OK {
