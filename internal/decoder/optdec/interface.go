@@ -194,7 +194,7 @@ func (d *noCopyRawMessageDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *con
 		return nil
 	}
 	raw := node.AsRaw(ctx)
-	if ctx.Parser.options&(1<<_F_copy_string) != 0 {
+	if ctx.options&(1<<_F_copy_string) != 0 {
 		*(*[]byte)(vp) = []byte(raw)
 	} else {
 		*(*[]byte)(vp) = rt.Str2Mem(raw)

@@ -80,10 +80,14 @@ func TestZeroCapParserAndStreamSessionBeginReset(t *testing.T) {
 	// 1. Bare Parser with zero-cap nodes slice must not underflow nodesLast in cParityParseRunsAsm.
 	src := `{"a":1,"b":"ok"}`
 	bare := &Parser{
-		Json:            src,
-		padded:          append(append([]byte(nil), src...), padding...),
-		dbuf:            make([]byte, 800),
-		ScanKernelState: ScanKernelState{end: len(src)},
+		ScanContext: ScanContext{
+			ScanKernelState: ScanKernelState{end: len(src)},
+			padded:          append(append([]byte(nil), src...), padding...),
+			dbuf:            make([]byte, 800),
+		},
+		Document: Document{
+			Json: src,
+		},
 	}
 	bare.nbuf.init(nil)
 	if code := cParityParseWithPadding(bare); code != SONIC_OK {
@@ -93,15 +97,15 @@ func TestZeroCapParserAndStreamSessionBeginReset(t *testing.T) {
 		t.Fatalf("expected initialized nodes after zero-cap parse, nlen=%d cap=%d", bare.nbuf.nlen, cap(bare.nodes))
 	}
 
-	// 2. StreamSession.Begin must clear stale strSlab state even if a prior run aborted without Reset.
+	// 2. StreamSession.Begin must clear stale strSlab state in DecodeContext even if a prior run aborted without Reset.
 	sess := getStreamSession()
 	defer FreeStreamSession(sess)
-	p := sess.ensureParser()
-	p.strSlab = []byte("stale-slab")
-	p.strSlabOff = 5
-	p.strSlabNext = 2048
+	_ = sess.ensureParser()
+	sess.ctx.strSlab = []byte("stale-slab")
+	sess.ctx.strSlabOff = 5
+	sess.ctx.strSlabNext = 2048
 	sess.Begin(0, false)
-	if p.strSlab != nil || p.strSlabOff != 0 || p.strSlabNext != 0 {
-		t.Fatalf("StreamSession.Begin left stale strSlab state: len=%d off=%d next=%d", len(p.strSlab), p.strSlabOff, p.strSlabNext)
+	if sess.ctx.strSlab != nil || sess.ctx.strSlabOff != 0 || sess.ctx.strSlabNext != 0 {
+		t.Fatalf("StreamSession.Begin left stale strSlab state: len=%d off=%d next=%d", len(sess.ctx.strSlab), sess.ctx.strSlabOff, sess.ctx.strSlabNext)
 	}
 }

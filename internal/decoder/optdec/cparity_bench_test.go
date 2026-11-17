@@ -49,7 +49,7 @@ func armAnalysisParseStages[T any](b *testing.B, src string, eface bool) {
 		if p.Pos() != len(src) {
 			b.Fatalf("parser position=%d, want=%d", p.Pos(), len(src))
 		}
-		ctx := Context{Parser: p}
+		ctx := Context{Doc: p.snapshotDocument(), options: p.options, isEface: p.isEface}
 		var got T
 		if err := dec.FromDom(unsafe.Pointer(&got), ctx.Root(), &ctx); err != nil || !reflect.DeepEqual(got, want) {
 			b.Fatalf("parsed tape mismatch: %v", err)
@@ -73,7 +73,7 @@ func armAnalysisParseStages[T any](b *testing.B, src string, eface bool) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ctx := Context{Parser: p}
+			ctx := Context{Doc: p.snapshotDocument(), options: p.options, isEface: p.isEface}
 			var got T
 			if err := dec.FromDom(unsafe.Pointer(&got), ctx.Root(), &ctx); err != nil {
 				b.Fatal(err)

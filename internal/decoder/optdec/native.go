@@ -3,12 +3,11 @@
 package optdec
 
 import (
-	"math/bits"
+	"reflect"
 	"sync"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type ErrorCode int
@@ -120,44 +119,13 @@ type ScanKernelState struct {
 	nbuf      nodeBuf
 }
 
+// Parser is the pooled execution shell combining ScanContext, Document, and
+// DecodeContext without extra heap allocations. Materialization reads Document
+// and DecodeContext directly and never reaches back into ScanContext/Parser.
 type Parser struct {
-	Json   string
-	padded []byte
-	nodes  []node
-	dbuf   []byte
-	backup []node
-
-	options uint64
-	ScanKernelState
-
-	Utf8Inv       bool
-	isEface       bool
-	paddedBackup  []byte
-	sessionPadded []byte
-	unesc         []byte
-	strSlab       []byte
-	strSlabOff    int
-	strSlabNext   int
-	ctx           Context
-
-	hasProjHints       bool
-	strictURC          bool
-	keepUseNumber      bool
-	strictRawNum       bool
-	scalarSlab         []uint64
-	scalarSlabOff      int
-	scalarSlabNext     int
-	strPtrSlab         []string
-	strPtrSlabOff      int
-	strPtrSlabNext     int
-	ptrStructSlabs     [4]ptrStructSlabSlot
-	lazyPadded         bool
-	singleDoc          bool
-	deferFloatOverflow bool
-	strAnyMask         uint32
-	strAnyCache        [32]strAnySlot
-	unescBuf           []byte
-	tailBuf            [320]byte
+	ScanContext
+	Document
+	ctx Context
 }
 
 type strAnySlot struct {
@@ -197,10 +165,13 @@ const (
 var parsePool sync.Pool = sync.Pool{
 	New: func() interface{} {
 		return &Parser{
-			options: 0,
-			padded:  make([]byte, 0, defaultPaddedBufBytes),
-			nodes:   make([]node, defaultNodesCount, defaultNodesCount),
-			dbuf:    make([]byte, types.MaxDigitNums, types.MaxDigitNums),
+			ScanContext: ScanContext{
+				padded: make([]byte, 0, defaultPaddedBufBytes),
+				dbuf:   make([]byte, types.MaxDigitNums, types.MaxDigitNums),
+			},
+			Document: Document{
+				nodes: make([]node, defaultNodesCount, defaultNodesCount),
+			},
 		}
 	},
 }
@@ -219,14 +190,39 @@ func (p *Parser) JsonBytes() []byte {
 	return parserJSONBytes(p)
 }
 
-// rawSlice returns a zero-copy substring of the source JSON document [start:end].
-func (p *Parser) rawSlice(start, end int) string {
-	return p.Json[start:end]
+func (p *Parser) snapshotDocument() Document {
+	doc := p.Document
+	doc.inPlaceBytes = p.JsonBytes()
+	doc.stat = p.nbuf.stat
+	return doc
 }
 
-// strRefCommon returns a zero-copy string view of an unescaped JSON string token.
-func (p *Parser) strRefCommon(off, length int) string {
-	return p.Json[off : off+length]
+// scanDocument executes the scanning stage and returns the resulting Document
+// and scan status without initializing materialization arenas.
+func (p *Parser) scanDocument(opts uint64, root reflect.Type, proj *projPlan) (Document, ErrorCode) {
+	p.isEface = root == anyType || root == mapEfaceType || root == sliceEfaceType
+	p.strictURC = (opts & (1 << _F_disable_urc)) != 0
+	p.keepUseNumber = (opts & (1 << _F_use_number)) != 0
+	p.strictRawNum = true
+	p.deferFloatOverflow = !p.keepUseNumber
+
+	var ecode ErrorCode
+	if proj != nil {
+		ecode = parseWithSchemaOrFull(p, proj)
+	} else {
+		ecode = p.parse()
+	}
+	if ecode != SONIC_OK {
+		return Document{Json: p.Json, Utf8Inv: p.Utf8Inv}, ecode
+	}
+	return p.snapshotDocument(), SONIC_OK
+}
+
+// initDecodeContext prepares the pooled DecodeContext over an already-scanned
+// Document with zero scanning or route-switching side effects.
+func (p *Parser) initDecodeContext(doc Document, opts uint64, root reflect.Type) *Context {
+	p.ctx.initForDocument(doc, opts, root)
+	return &p.ctx
 }
 
 const (
@@ -237,242 +233,11 @@ const (
 	maxPtrSlabCap  = 64
 )
 
-func (p *Parser) clearStrAnyCache() {
-	for m := p.strAnyMask; m != 0; m &= m - 1 {
-		p.strAnyCache[bits.TrailingZeros32(m)] = strAnySlot{}
-	}
-	p.strAnyMask = 0
-}
-
-func (p *Parser) resetSlabs() {
-	p.strSlab = nil
-	p.strSlabOff = 0
-	p.strSlabNext = 0
-	p.scalarSlab = nil
-	p.scalarSlabOff = 0
-	p.scalarSlabNext = 0
-	p.strPtrSlab = nil
-	p.strPtrSlabOff = 0
-	p.strPtrSlabNext = 0
-	if p.ptrStructSlabs[0].sd != nil {
-		p.ptrStructSlabs = [4]ptrStructSlabSlot{}
-	}
-	if p.strAnyMask != 0 {
-		p.clearStrAnyCache()
-	}
-}
-
-func (p *Parser) allocScalarPtr(hint int) unsafe.Pointer {
-	off := p.scalarSlabOff
-	if off < len(p.scalarSlab) {
-		p.scalarSlabOff = off + 1
-		return unsafe.Pointer(&p.scalarSlab[off])
-	}
-	return p.allocScalarPtrSlow(hint)
-}
-
-//go:noinline
-func (p *Parser) allocScalarPtrSlow(hint int) unsafe.Pointer {
-	n := p.scalarSlabNext
-	if n == 0 {
-		if hint >= 1 && hint <= 16 {
-			n = hint
-		} else if hint > 16 {
-			n = 16
-		} else {
-			n = 4
-		}
-	}
-	next := n * 4
-	if next < 8 {
-		next = 8
-	} else if next > maxPtrSlabCap {
-		next = maxPtrSlabCap
-	}
-	p.scalarSlabNext = next
-	slab := make([]uint64, n)
-	p.scalarSlab = slab
-	p.scalarSlabOff = 1
-	return unsafe.Pointer(&slab[0])
-}
-
-func (p *Parser) allocStrPtr(hint int) *string {
-	off := p.strPtrSlabOff
-	if off < len(p.strPtrSlab) {
-		p.strPtrSlabOff = off + 1
-		return &p.strPtrSlab[off]
-	}
-	return p.allocStrPtrSlow(hint)
-}
-
-//go:noinline
-func (p *Parser) allocStrPtrSlow(hint int) *string {
-	n := p.strPtrSlabNext
-	if n == 0 {
-		if hint >= 1 && hint <= 16 {
-			n = hint
-		} else if hint > 16 {
-			n = 16
-		} else {
-			n = 4
-		}
-	}
-	next := n * 4
-	if next < 8 {
-		next = 8
-	} else if next > maxPtrSlabCap {
-		next = maxPtrSlabCap
-	}
-	p.strPtrSlabNext = next
-	slab := make([]string, n)
-	p.strPtrSlab = slab
-	p.strPtrSlabOff = 1
-	return &slab[0]
-}
-
-// strCommon returns an unescaped JSON string token, copying if copyStr is true.
-func (p *Parser) strCommon(off, length int, copyStr bool) string {
-	s := p.Json[off : off+length]
-	if !copyStr {
-		return s
-	}
-	return p.copyArenaString(s)
-}
-
-func (p *Parser) copyArenaHit(s string) (string, bool) {
-	n := len(s)
-	off := p.strSlabOff
-	if len(p.strSlab)-off >= n {
-		p.strSlabOff = off + n
-		dst := p.strSlab[off : off+n]
-		copy(dst, s)
-		return unsafe.String(&dst[0], n), true
-	}
-	return s, false
-}
-
-func (p *Parser) copyArenaString(s string) string {
-	if len(s) == 0 {
-		return ""
-	}
-	if out, ok := p.copyArenaHit(s); ok {
-		return out
-	}
-	return p.copyArenaStringSlow(s)
-}
-
-//go:noinline
-func (p *Parser) copyArenaStringSlow(s string) string {
-	n := len(s)
-	if n > maxArenaStrLen {
-		return string(rt.Str2Mem(s))
-	}
-	slab := p.allocStrSlab(n)
-	copy(slab[:n], s)
-	return unsafe.String(&slab[0], n)
-}
-
-//go:noinline
-func (p *Parser) copyArenaBytesSlow(b []byte) string {
-	n := len(b)
-	if n > maxArenaStrLen {
-		return string(b)
-	}
-	slab := p.allocStrSlab(n)
-	copy(slab[:n], b)
-	return unsafe.String(&slab[0], n)
-}
-
-func (p *Parser) allocStrSlab(n int) []byte {
-	jsonLen := len(p.Json)
-	slabMax := maxStrSlabCap
-	// Cap slabs at 4 KiB for <=32 KiB payloads so ~13 KiB docs don't jump from 6.5 KiB to 13 KiB.
-	if jsonLen <= 32768 {
-		slabMax = 4096
-	}
-	nextCap := p.strSlabNext
-	if nextCap == 0 {
-		if p.options&(1<<_F_copy_string) == 0 {
-			if jsonLen > 1024 {
-				nextCap = 512
-			} else {
-				nextCap = 128
-			}
-		} else if p.isEface {
-			nextCap = jsonLen / 2
-			if nextCap < minStrSlabCap {
-				nextCap = minStrSlabCap
-			} else if nextCap > slabMax {
-				nextCap = slabMax
-			}
-		} else if jsonLen <= 128 {
-			nextCap = minStrSlabCap
-		} else if jsonLen <= 1024 {
-			nextCap = 256
-		} else {
-			nextCap = jsonLen / 4
-			if nextCap < initStrSlabCap {
-				nextCap = initStrSlabCap
-			} else if nextCap > slabMax {
-				nextCap = slabMax
-			}
-		}
-	}
-	if nextCap < n*2 {
-		nextCap = n * 2
-	}
-	growCap := nextCap * 2
-	if growCap > slabMax {
-		growCap = slabMax
-	}
-	p.strSlabNext = growCap
-	slab := make([]byte, nextCap)
-	p.strSlab = slab
-	p.strSlabOff = n
-	return slab
-}
-
 const (
 	escapedInUnescFlag  uint64 = 1 << 63
 	maxPooledUnescCap   int    = 64 << 10
 	schemaTailWindowLen int    = 256
 )
-
-// bytesEscaped returns the decoded byte slice for an escaped JSON string token.
-func (p *Parser) bytesEscaped(off int, val uint64) []byte {
-	if val&escapedInUnescFlag != 0 {
-		u := val &^ escapedInUnescFlag
-		uoff := int(u >> 32)
-		ulen := int(uint32(u))
-		return p.unesc[uoff : uoff+ulen]
-	}
-	return p.JsonBytes()[off : off+int(val)]
-}
-
-// strRefEscaped returns a transient string view of a decoded escaped JSON string token.
-func (p *Parser) strRefEscaped(off int, val uint64) string {
-	return rt.Mem2Str(p.bytesEscaped(off, val))
-}
-
-// strEscaped returns a heap-copied string of a decoded escaped JSON string token.
-func (p *Parser) strEscaped(off int, val uint64) string {
-	return p.strEscapedBytes(p.bytesEscaped(off, val))
-}
-
-func (p *Parser) strEscapedBytes(b []byte) string {
-	n := len(b)
-	if n == 0 {
-		return ""
-	}
-	slabOff := p.strSlabOff
-	if len(p.strSlab)-slabOff >= n {
-		p.strSlabOff = slabOff + n
-		dst := p.strSlab[slabOff : slabOff+n]
-		copy(dst, b)
-		return unsafe.String(&dst[0], n)
-	}
-	return p.copyArenaBytesSlow(b)
-}
 
 //go:inline
 func calMaxNodeCap(jsonSize int) int {
@@ -530,6 +295,20 @@ func (p *Parser) parse() ErrorCode {
 }
 
 func (p *Parser) reset() {
+	// 1. First drop all references to user-returned allocations in DecodeContext;
+	// user-owned storage is never returned to any pool.
+	p.ctx.ownedParser = nil
+	p.ctx.resetMaterialization()
+
+	// 2. Clear Document views and restore bounded pooled node tape.
+	nodes := p.nodes
+	if p.backup != nil {
+		nodes = p.backup
+		p.backup = nil
+	}
+	p.Document = Document{nodes: nodes}
+
+	// 3. Recycle ScanContext scratch buffers within pool bounds.
 	p.options = 0
 	if p.paddedBackup != nil {
 		p.padded = p.paddedBackup[:0]
@@ -539,34 +318,20 @@ func (p *Parser) reset() {
 	} else {
 		p.padded = p.padded[:0]
 	}
-	// nodes is too large here, we will not reset it and use small backup nodes buffer
-	if p.backup != nil {
-		p.nodes = p.backup
-		p.backup = nil
-	}
-	p.Json = ""
 	p.ScanKernelState = ScanKernelState{}
-	p.Utf8Inv = false
 	p.isEface = false
-	p.hasProjHints = false
 	p.strictURC = false
 	p.keepUseNumber = false
 	p.strictRawNum = false
 	p.lazyPadded = false
 	p.singleDoc = false
 	p.deferFloatOverflow = false
-	if p.strAnyMask != 0 {
-		p.clearStrAnyCache()
-	}
 	p.sessionPadded = nil
-	p.unesc = nil
 	if cap(p.unescBuf) > maxPooledUnescCap {
 		p.unescBuf = nil
 	} else if p.unescBuf != nil {
 		p.unescBuf = p.unescBuf[:0]
 	}
-	p.resetSlabs()
-	p.ctx = Context{}
 }
 
 func (p *Parser) free() {

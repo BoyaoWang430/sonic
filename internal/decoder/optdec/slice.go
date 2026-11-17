@@ -55,10 +55,9 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 
 	var gerr error
 	if sd := d.structDec; sd != nil {
-		p := ctx.Parser
-		opts := p.options
+		opts := ctx.options
 		if sd.canFastObj(opts) {
-			jsonStr := p.Json
+			jsonStr := ctx.Doc.Json
 			copyStr := opts&(1<<_F_copy_string) != 0
 			for i := 0; i < size; i++ {
 				elem := unsafe.Add(elems, uintptr(i)*elemSize)
@@ -67,7 +66,7 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 				if vtyp == KObject {
 					next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
 					if uint32(vptr.val) != 0 {
-						err := sd.fromObjFast(elem, vptr, p, jsonStr, copyStr, ctx)
+						err := sd.fromObjFast(elem, vptr, jsonStr, copyStr, ctx)
 						if gerr == nil && err != nil {
 							gerr = err
 						}
@@ -93,11 +92,10 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 			next = val.Next()
 		}
 	} else if psd := d.ptrStructDec; psd != nil {
-		p := ctx.Parser
-		opts := p.options
+		opts := ctx.options
 		ptrs := unsafe.Slice((*unsafe.Pointer)(elems), size)
 		if psd.canFastObj(opts) {
-			jsonStr := p.Json
+			jsonStr := ctx.Doc.Json
 			copyStr := opts&(1<<_F_copy_string) != 0
 			for i := 0; i < size; i++ {
 				vptr := next
@@ -106,11 +104,11 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 					next = PtrOffset(vptr, int64(vptr.val>>ConLenBits))
 					dst := ptrs[i]
 					if dst == nil {
-						dst = psd.allocPtr(p)
+						dst = psd.allocPtr(ctx)
 						ptrs[i] = dst
 					}
 					if uint32(vptr.val) != 0 {
-						err := psd.fromObjFast(dst, vptr, p, jsonStr, copyStr, ctx)
+						err := psd.fromObjFast(dst, vptr, jsonStr, copyStr, ctx)
 						if gerr == nil && err != nil {
 							gerr = err
 						}

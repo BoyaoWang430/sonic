@@ -14,7 +14,7 @@ import (
 // must jump to the absolute bound instead of re-halving the remaining gap.
 func TestGrowNodeTapeEscalatesToHardBound(t *testing.T) {
 	src := strings.Repeat("[", 1<<16)
-	p := &Parser{Json: src}
+	p := &Parser{Document: Document{Json: src}}
 	fill := func(n int) {
 		p.nbuf.nlen = n
 		p.pos = n

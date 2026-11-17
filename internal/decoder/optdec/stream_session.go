@@ -23,8 +23,12 @@ var streamSessionPool = sync.Pool{
 	New: func() interface{} {
 		return &StreamSession{
 			p: &Parser{
-				nodes: make([]node, initialStreamNodesCount, initialStreamNodesCount),
-				dbuf:  make([]byte, types.MaxDigitNums, types.MaxDigitNums),
+				ScanContext: ScanContext{
+					dbuf: make([]byte, types.MaxDigitNums, types.MaxDigitNums),
+				},
+				Document: Document{
+					nodes: make([]node, initialStreamNodesCount, initialStreamNodesCount),
+				},
 			},
 			unesc: make([]byte, 0, 256),
 		}
@@ -84,8 +88,12 @@ type StreamSession struct {
 func (s *StreamSession) ensureParser() *Parser {
 	if s.p == nil {
 		s.p = &Parser{
-			nodes: make([]node, defaultNodesCount, defaultNodesCount),
-			dbuf:  make([]byte, types.MaxDigitNums, types.MaxDigitNums),
+			ScanContext: ScanContext{
+				dbuf: make([]byte, types.MaxDigitNums, types.MaxDigitNums),
+			},
+			Document: Document{
+				nodes: make([]node, defaultNodesCount, defaultNodesCount),
+			},
 		}
 	}
 	if s.unesc == nil {
@@ -96,6 +104,7 @@ func (s *StreamSession) ensureParser() *Parser {
 
 // Begin prepares or resets the session for scanning a new root JSON value.
 func (s *StreamSession) Begin(opts uint64, isEface bool) {
+	s.ctx.resetMaterialization()
 	p := s.ensureParser()
 	if p.backup != nil {
 		p.nodes = p.backup
@@ -107,7 +116,6 @@ func (s *StreamSession) Begin(opts uint64, isEface bool) {
 		s.unesc = s.unesc[:0]
 	}
 	p.nbuf = nodeBuf{parent: -1}
-	p.resetSlabs()
 	p.Utf8Inv = false
 	p.isEface = isEface
 	s.cur = 0
@@ -157,14 +165,16 @@ func (s *StreamSession) Reset() {
 		return
 	}
 	s.active = false
+	// 1. First drop user-returned allocation references in DecodeContext.
+	s.ctx.resetMaterialization()
+	// 2. Clear Document & ScanContext scratch.
 	if s.p != nil {
+		nodes := s.p.nodes
 		if s.p.backup != nil {
-			s.p.nodes = s.p.backup
+			nodes = s.p.backup
 			s.p.backup = nil
 		}
-		s.p.Json = ""
-		s.p.unesc = nil
-		s.p.resetSlabs()
+		s.p.Document = Document{nodes: nodes}
 		s.p.nbuf = nodeBuf{parent: -1}
 	}
 	if cap(s.unesc) > maxRetainedStreamUnescBytes {
@@ -244,21 +254,15 @@ func DecodeStream(buf *[]byte, scanp *int, f uint64, val interface{}, sessPtr **
 			}
 
 			p := sess.p
-			p.Json = rt.Mem2Str(rawVal)
-			p.unesc = sess.unesc
-			p.options = matOpts
-			sess.ctx.Parser = p
-			if canUseFastMap(matOpts, etp) {
-				sess.ctx.initSliceArena()
-			} else {
-				sess.ctx.sliceArena = nil
+			doc := Document{
+				Json:  rt.Mem2Str(rawVal),
+				unesc: sess.unesc,
+				nodes: p.nodes[:sess.nodeLen],
+				stat:  p.nbuf.stat,
 			}
+			sess.ctx.initForDocument(doc, matOpts, etp)
 			merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
-			sess.ctx.Parser = nil
-			sess.ctx.sliceArena = nil
-			p.Json = ""
-			p.unesc = nil
-			p.resetSlabs()
+			sess.ctx.resetMaterialization()
 			sess.active = false
 			if p.backup != nil {
 				p.nodes = p.backup
@@ -387,18 +391,15 @@ func decodeReadOnlyOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.P
 	}
 
 	p := sess.p
-	p.Json = s
-	p.unesc = sess.unesc
-	p.options = f
-	sess.ctx.Parser = p
-	if canUseFastMap(f, etp) {
-		sess.ctx.initSliceArena()
-	} else {
-		sess.ctx.sliceArena = nil
+	doc := Document{
+		Json:  s,
+		unesc: sess.unesc,
+		nodes: p.nodes[:sess.nodeLen],
+		stat:  p.nbuf.stat,
 	}
+	sess.ctx.initForDocument(doc, f, etp)
 	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
-	sess.ctx.Parser = nil
-	sess.ctx.sliceArena = nil
+	sess.ctx.resetMaterialization()
 	endPos := sess.cur
 	if endPos > len(s) {
 		endPos = len(s)
@@ -442,18 +443,15 @@ func decodeReadOnlyWithSessionCompiled(s *string, i *int, f uint64, etp reflect.
 	}
 
 	p := sess.p
-	p.Json = sub
-	p.unesc = sess.unesc
-	p.options = f
-	sess.ctx.Parser = p
-	if canUseFastMap(f, etp) {
-		sess.ctx.initSliceArena()
-	} else {
-		sess.ctx.sliceArena = nil
+	doc := Document{
+		Json:  sub,
+		unesc: sess.unesc,
+		nodes: p.nodes[:sess.nodeLen],
+		stat:  p.nbuf.stat,
 	}
+	sess.ctx.initForDocument(doc, f, etp)
 	merr := dec.FromDom(vp, sess.ctx.Root(), &sess.ctx)
-	sess.ctx.Parser = nil
-	sess.ctx.sliceArena = nil
+	sess.ctx.resetMaterialization()
 	err := fix_error(*s, origPos, merr)
 
 	newPos := origPos + sess.cur

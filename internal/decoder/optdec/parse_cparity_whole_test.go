@@ -41,7 +41,7 @@ func TestCParityWholeColdResumeGrowth(t *testing.T) {
 				p.isEface = true
 				code := p.parse()
 				var got interface{}
-				ctx := Context{Parser: p}
+				ctx := Context{Doc: p.snapshotDocument(), options: p.options, isEface: p.isEface}
 				if code != SONIC_OK || p.Pos() != len(src) {
 					t.Fatalf("capacity=%d options=%d code=%d pos=%d input=%q", capacity, options, code, p.Pos(), src)
 				}

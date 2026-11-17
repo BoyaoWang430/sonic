@@ -4,7 +4,6 @@ package optdec
 
 import (
 	"encoding/json"
-	stderrors "errors"
 	"reflect"
 	"unsafe"
 
@@ -172,8 +171,6 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 	return DecodeWithSession(s, i, f, val, nil)
 }
 
-var errLargeReadOnlyScan = stderrors.New("optdec: large read-only scan")
-
 // DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
 func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
@@ -199,14 +196,17 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	}
 	defer p.free()
 
-	ctx, err := newContextOnParserWithPlan(p, f, etp, activeProj)
-	if err == errLargeReadOnlyScan {
+	doc, ecode := p.scanDocument(f, etp, activeProj)
+	if ecode == errCodeLargeReadOnlyScan {
 		return decodeReadOnlyOneCompiled(s, f, etp, vp, dec)
 	}
-	if p.Utf8Inv {
-		s = p.Json
+	if doc.Utf8Inv {
+		s = doc.Json
 	}
-	if err == nil {
+	if ecode != SONIC_OK {
+		err = p.fixError(ecode)
+	} else {
+		ctx := p.initDecodeContext(doc, f, etp)
 		err = dec.FromDom(vp, ctx.Root(), ctx)
 	}
 	err = fix_error(s, 0, err)
@@ -253,21 +253,25 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	}
 	defer p.free()
 
-	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, activeProj)
-	if err == errLargeReadOnlyScan {
+	doc, ecode := p.scanDocument(uint64(f), etp, activeProj)
+	if ecode == errCodeLargeReadOnlyScan {
 		*i = origPos
 		return decodeReadOnlyWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
-	if p.Utf8Inv {
+	if doc.Utf8Inv {
 		*s = parserCorrectedSource(p, *s, origPos)
 	}
-	if err != nil {
+	if ecode != SONIC_OK {
+		err = p.fixError(ecode)
 		if sess != nil {
 			*sess = InputSession{}
 		}
 		goto fix_error
 	}
-	err = dec.FromDom(vp, ctx.Root(), ctx)
+	{
+		ctx := p.initDecodeContext(doc, uint64(f), etp)
+		err = dec.FromDom(vp, ctx.Root(), ctx)
+	}
 
 fix_error:
 	err = fix_error(*s, origPos, err)

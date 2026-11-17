@@ -30,8 +30,7 @@ func TestAsSliceEfacePropagatesElementError(t *testing.T) {
 		t.Fatalf("unexpected parse error code: %v", code)
 	}
 	p.options = 0
-	ctx := &p.ctx
-	ctx.Parser = p
+	ctx := p.initDecodeContext(p.snapshotDocument(), 0, sliceEfaceType)
 
 	root := ctx.Root()
 	var dst []interface{}
@@ -351,22 +350,22 @@ func decodeOneFullCopyForBench(s string, f uint64, val interface{}) error {
 	}
 	p := newParserImpl(s, 0, f)
 	defer p.free()
-	ctx, err := newContextOnParserWithPlan(p, f, etp, nil)
-	if err == nil {
-		err = dec.FromDom(vp, ctx.Root(), ctx)
+	doc, ecode := p.scanDocument(f, etp, nil)
+	if ecode != SONIC_OK {
+		return fix_error(s, 0, p.fixError(ecode))
 	}
+	ctx := p.initDecodeContext(doc, f, etp)
+	err = dec.FromDom(vp, ctx.Root(), ctx)
 	return fix_error(s, 0, err)
 }
 
 func decodeOneForceZeroCopyForBench(s string, f uint64, val interface{}) error {
-	_, vp, dec, proj, err := unpackAndCompileRoot(val)
+	etp, vp, dec, proj, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return err
 	}
 	p := newParserLazy(s, 0, f)
 	defer p.free()
-	ctx := &p.ctx
-	ctx.Parser = p
 	p.strictURC = (f & (1 << _F_disable_urc)) != 0
 	p.keepUseNumber = (f & (1 << _F_use_number)) != 0
 	ok, mutated := parseSchemaRoot(p, proj)
@@ -377,6 +376,7 @@ func decodeOneForceZeroCopyForBench(s string, f uint64, val interface{}) error {
 	if ecode != 0 {
 		return fix_error(s, 0, p.fixError(ecode))
 	}
+	ctx := p.initDecodeContext(p.snapshotDocument(), f, etp)
 	err = dec.FromDom(vp, ctx.Root(), ctx)
 	return fix_error(s, 0, err)
 }

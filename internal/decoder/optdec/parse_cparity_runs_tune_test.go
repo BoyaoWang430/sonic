@@ -17,7 +17,10 @@ func cParityRunsTuneParser(src string, offset, capacity int, options uint64) *Pa
 	storage := make([]byte, offset+len(src)+len(padding))
 	copy(storage[offset:], src)
 	copy(storage[offset+len(src):], padding)
-	p := &Parser{Json: src, padded: storage[offset:], nodes: make([]node, capacity), options: options, isEface: true}
+	p := &Parser{
+		ScanContext: ScanContext{padded: storage[offset:], options: options, isEface: true},
+		Document:    Document{Json: src, nodes: make([]node, capacity)},
+	}
 	p.pos, p.end = 0, len(src)
 	p.nbuf.init(p.nodes)
 	return p
@@ -143,7 +146,7 @@ func TestCParityRunsCloseChainsGrowth(t *testing.T) {
 						capacity, n, base, code, p.Pos(), p.nbuf.depth, p.nbuf.parent, p.nbuf.stat, stat)
 				}
 				var got interface{}
-				ctx := Context{Parser: p}
+				ctx := Context{Doc: p.snapshotDocument(), options: p.options, isEface: p.isEface}
 				if err := dec.FromDom(unsafe.Pointer(&got), ctx.Root(), &ctx); err != nil || !reflect.DeepEqual(got, want) {
 					t.Fatalf("capacity=%d whitespace=%d input=%q: decoded=%#v want=%#v err=%v", capacity, n, base, got, want, err)
 				}

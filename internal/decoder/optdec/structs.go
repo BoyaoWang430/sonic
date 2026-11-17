@@ -240,12 +240,12 @@ type structDecoder struct {
 	ptrStrHint    uint8
 }
 
-func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {
-	if d.maxPtrBatch < 2 || d.sliceType == nil || p == nil {
+func (d *structDecoder) allocPtr(ctx *Context) unsafe.Pointer {
+	if d.maxPtrBatch < 2 || d.sliceType == nil || ctx == nil {
 		return reflect.New(d.goType).UnsafePointer()
 	}
-	for i := range p.ptrStructSlabs {
-		slot := &p.ptrStructSlabs[i]
+	for i := range ctx.ptrStructSlabs {
+		slot := &ctx.ptrStructSlabs[i]
 		if slot.sd == d {
 			if slot.rem > 0 {
 				ptr := slot.base
@@ -265,8 +265,8 @@ func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {
 			return reflect.New(d.goType).UnsafePointer()
 		}
 	}
-	for i := range p.ptrStructSlabs {
-		slot := &p.ptrStructSlabs[i]
+	for i := range ctx.ptrStructSlabs {
+		slot := &ctx.ptrStructSlabs[i]
 		if slot.rem == 0 {
 			slot.sd = d
 			slot.next = 4
@@ -325,15 +325,14 @@ func (d *structDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 		return nil
 	}
 
-	p := ctx.Parser
-	opts := p.options
+	opts := ctx.options
 	if d.canFastObj(opts) {
-		return d.fromObjFast(vp, node.ptr, p, p.Json, opts&(1<<_F_copy_string) != 0, ctx)
+		return d.fromObjFast(vp, node.ptr, ctx.Doc.Json, opts&(1<<_F_copy_string) != 0, ctx)
 	}
-	return d.fromObjSlow(vp, node.ptr, p, opts, ctx)
+	return d.fromObjSlow(vp, node.ptr, opts, ctx)
 }
 
-func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnode *node, vtyp uint8, p *Parser, jsonStr string, copyStr bool) bool {
+func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnode *node, vtyp uint8, ctx *Context, jsonStr string, copyStr bool) bool {
 	switch fk {
 	case fieldKindPtrString:
 		if vtyp == KStringCommon {
@@ -341,10 +340,10 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			n := int(vnode.val)
 			s := jsonStr[off : off+n]
 			if copyStr && n != 0 {
-				if copied, ok := p.copyArenaHit(s); ok {
+				if copied, ok := ctx.copyArenaHit(s); ok {
 					s = copied
 				} else {
-					s = p.copyArenaStringSlow(s)
+					s = ctx.copyArenaStringSlow(s)
 				}
 			}
 			pp := (**string)(elem)
@@ -353,7 +352,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				if len(s) > maxArenaStrLen {
 					dst = new(string)
 				} else {
-					dst = p.allocStrPtr(int(d.ptrStrHint))
+					dst = ctx.allocStrPtr(int(d.ptrStrHint))
 				}
 				*pp = dst
 			}
@@ -361,14 +360,14 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			return true
 		}
 		if vtyp == KStringEscaped {
-			s := p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+			s := ctx.strEscaped(int(vnode.typ>>PosBits), vnode.val)
 			pp := (**string)(elem)
 			dst := *pp
 			if dst == nil {
 				if len(s) > maxArenaStrLen {
 					dst = new(string)
 				} else {
-					dst = p.allocStrPtr(int(d.ptrStrHint))
+					dst = ctx.allocStrPtr(int(d.ptrStrHint))
 				}
 				*pp = dst
 			}
@@ -380,7 +379,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**int64)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*int64)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*int64)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = int64(vnode.val)
@@ -391,7 +390,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**int)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*int)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*int)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = int(int64(vnode.val))
@@ -402,7 +401,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**int32)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*int32)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*int32)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = int32(vnode.val)
@@ -414,7 +413,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				pp := (**int32)(elem)
 				dst := *pp
 				if dst == nil {
-					dst = (*int32)(p.allocScalarPtr(int(d.ptrScalarHint)))
+					dst = (*int32)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 					*pp = dst
 				}
 				*dst = int32(iv)
@@ -426,7 +425,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**int16)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*int16)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*int16)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = int16(vnode.val)
@@ -438,7 +437,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				pp := (**int16)(elem)
 				dst := *pp
 				if dst == nil {
-					dst = (*int16)(p.allocScalarPtr(int(d.ptrScalarHint)))
+					dst = (*int16)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 					*pp = dst
 				}
 				*dst = int16(iv)
@@ -450,7 +449,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**int8)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*int8)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*int8)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = int8(vnode.val)
@@ -462,7 +461,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				pp := (**int8)(elem)
 				dst := *pp
 				if dst == nil {
-					dst = (*int8)(p.allocScalarPtr(int(d.ptrScalarHint)))
+					dst = (*int8)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 					*pp = dst
 				}
 				*dst = int8(iv)
@@ -474,7 +473,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**uint64)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*uint64)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*uint64)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = vnode.val
@@ -485,7 +484,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**uint)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*uint)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*uint)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = uint(vnode.val)
@@ -496,7 +495,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**uint32)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*uint32)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*uint32)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = uint32(vnode.val)
@@ -507,7 +506,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**uint16)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*uint16)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*uint16)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = uint16(vnode.val)
@@ -518,7 +517,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**uint8)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*uint8)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*uint8)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = uint8(vnode.val)
@@ -529,7 +528,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**bool)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*bool)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*bool)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = vtyp == KTrue
@@ -540,7 +539,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**float64)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*float64)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*float64)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*(*uint64)(unsafe.Pointer(dst)) = vnode.val
@@ -550,7 +549,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**float64)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*float64)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*float64)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = float64(vnode.val)
@@ -560,7 +559,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**float64)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*float64)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*float64)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = sintToFloat64(int64(vnode.val))
@@ -572,7 +571,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 				pp := (**float32)(elem)
 				dst := *pp
 				if dst == nil {
-					dst = (*float32)(p.allocScalarPtr(int(d.ptrScalarHint)))
+					dst = (*float32)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 					*pp = dst
 				}
 				*dst = f32
@@ -582,7 +581,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**float32)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*float32)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*float32)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = float32(vnode.val)
@@ -591,7 +590,7 @@ func (d *structDecoder) decodePtrScalarField(fk uint8, elem unsafe.Pointer, vnod
 			pp := (**float32)(elem)
 			dst := *pp
 			if dst == nil {
-				dst = (*float32)(p.allocScalarPtr(int(d.ptrScalarHint)))
+				dst = (*float32)(ctx.allocScalarPtr(int(d.ptrScalarHint)))
 				*pp = dst
 			}
 			*dst = sintToFloat32(int64(vnode.val))

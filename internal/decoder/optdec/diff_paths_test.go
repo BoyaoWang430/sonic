@@ -162,11 +162,14 @@ func decodeViaRunsWithInit[T any](s string, f uint64, initFn func(*T)) (T, error
 	}
 	p := newParserImpl(s, 0, f)
 	defer p.free()
-	ctx, err := newContextOnParserWithPlan(p, f, etp, nil)
-	if p.Utf8Inv {
-		s = p.Json
+	doc, ecode := p.scanDocument(f, etp, nil)
+	if doc.Utf8Inv {
+		s = doc.Json
 	}
-	if err == nil {
+	if ecode != SONIC_OK {
+		err = p.fixError(ecode)
+	} else {
+		ctx := p.initDecodeContext(doc, f, etp)
 		err = dec.FromDom(vp, ctx.Root(), ctx)
 	}
 	endPos := p.Pos()
@@ -181,7 +184,7 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	if initFn != nil {
 		initFn(&dst)
 	}
-	_, vp, dec, proj, err := unpackAndCompileRoot(&dst)
+	etp, vp, dec, proj, err := unpackAndCompileRoot(&dst)
 	if err != nil {
 		return dst, false, err
 	}
@@ -191,8 +194,7 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	}
 	p := newParserLazy(s, 0, f)
 	defer p.free()
-	ctx := &p.ctx
-	ctx.Parser = p
+	p.isEface = etp == anyType || etp == mapEfaceType || etp == sliceEfaceType
 	p.strictURC = (f & (1 << _F_disable_urc)) != 0
 	p.keepUseNumber = (f & (1 << _F_use_number)) != 0
 	p.strictRawNum = true
@@ -209,6 +211,7 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	} else if p.Utf8Inv {
 		s = p.Json
 	}
+	ctx := p.initDecodeContext(p.snapshotDocument(), f, etp)
 	err = dec.FromDom(vp, ctx.Root(), ctx)
 	endPos := p.Pos()
 	if endPos > len(s) {

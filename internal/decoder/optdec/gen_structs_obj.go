@@ -65,21 +65,21 @@ import (
 )
 {{range .}}
 {{if .Fast -}}
-func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, jsonStr string, copyStr bool, ctx *context) error {
+func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, jsonStr string, copyStr bool, ctx *context) error {
 	var gerr error
 	size := int(uint32(objPtr.val))
 {{- else -}}
-func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, opts uint64, ctx *context) error {
+func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, opts uint64, ctx *context) error {
 	var gerr error
 	size := int(uint32(objPtr.val))
 	caseSensitive := opts&uint64(consts.OptionCaseSensitive) != 0
 	disUnknown := Options(opts)&OptionDisableUnknown != 0
 	copyStr := opts&(1<<_F_copy_string) != 0
-	jsonStr := p.Json
+	jsonStr := ctx.Doc.Json
 {{end}}
 	fields := d.fields
 	nfields := len(fields)
-	hasHints := p.hasProjHints
+	hasHints := ctx.Doc.hasProjHints
 	expectedIdx := 0
 	next := PtrOffset(objPtr, 1)
 
@@ -109,7 +109,7 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 				key = jsonStr[off : off+int(knode.val)]
 			} else {
 {{- if .Fast}}
-				key = p.strRefEscaped(int(knode.typ>>PosBits), knode.val)
+				key = ctx.Doc.strRefEscaped(int(knode.typ>>PosBits), knode.val)
 {{- else}}
 				key, _ = NewNode(knode).AsStrRef(ctx)
 {{- end}}
@@ -195,7 +195,7 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 {{- else}}
 		} else if fe.kind >= fieldKindPtrString && fe.kind < fieldKindWideOffset {
 {{- end}}
-			if d.decodePtrScalarField(fe.kind, elem, vnode, vtyp, p, jsonStr, copyStr) {
+			if d.decodePtrScalarField(fe.kind, elem, vnode, vtyp, ctx, jsonStr, copyStr) {
 				continue
 			}
 		} else {
@@ -206,17 +206,17 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 					n := int(vnode.val)
 					s := jsonStr[off : off+n]
 					if copyStr && n != 0 {
-						if copied, ok := p.copyArenaHit(s); ok {
+						if copied, ok := ctx.copyArenaHit(s); ok {
 							s = copied
 						} else {
-							s = p.copyArenaStringSlow(s)
+							s = ctx.copyArenaStringSlow(s)
 						}
 					}
 					*(*string)(elem) = s
 					continue
 				}
 				if vtyp == KStringEscaped {
-					*(*string)(elem) = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+					*(*string)(elem) = ctx.strEscaped(int(vnode.typ>>PosBits), vnode.val)
 					continue
 				}
 			case fieldKindI64:
@@ -324,14 +324,14 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 					sd := (*structDecoder)(fe.subDec)
 					dst := *(*unsafe.Pointer)(elem)
 					if dst == nil {
-						dst = sd.allocPtr(p)
+						dst = sd.allocPtr(ctx)
 						*(*unsafe.Pointer)(elem) = dst
 					}
 {{- if .Fast}}
 					if uint32(vnode.val) != 0 {
 						var err error
 						if sd.fast {
-							err = sd.fromObjFast(dst, vptr, p, jsonStr, copyStr, ctx)
+							err = sd.fromObjFast(dst, vptr, jsonStr, copyStr, ctx)
 						} else {
 							err = sd.FromDom(dst, Node{ptr: vptr}, ctx)
 						}
@@ -354,7 +354,7 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 						sd := (*structDecoder)(fe.subDec)
 						var err error
 						if sd.fast {
-							err = sd.fromObjFast(elem, vptr, p, jsonStr, copyStr, ctx)
+							err = sd.fromObjFast(elem, vptr, jsonStr, copyStr, ctx)
 						} else {
 							err = sd.FromDom(elem, Node{ptr: vptr}, ctx)
 						}
@@ -387,10 +387,10 @@ func (d *structDecoder) {{.Name}}(vp unsafe.Pointer, objPtr *node, p *Parser, op
 				if *(*interface{})(elem) == nil {
 					switch vtyp {
 					case KStringCommon:
-						*(*interface{})(elem) = strCommonAny(p, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+						*(*interface{})(elem) = strCommonAny(ctx, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
 						continue
 					case KStringEscaped:
-						*(*interface{})(elem) = p.strEscaped(int(vnode.typ>>PosBits), vnode.val)
+						*(*interface{})(elem) = ctx.strEscaped(int(vnode.typ>>PosBits), vnode.val)
 						continue
 					case KTrue:
 						*(*interface{})(elem) = true

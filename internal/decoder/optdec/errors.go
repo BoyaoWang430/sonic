@@ -39,7 +39,7 @@ func error_type(vt reflect.Type) error {
 func error_mismatch(node Node, ctx *context, typ reflect.Type) error {
 	return MismatchTypeError{
 		Pos:  node.Position(),
-		Src:  ctx.Parser.Json,
+		Src:  ctx.Doc.Json,
 		Type: typ,
 	}
 }
