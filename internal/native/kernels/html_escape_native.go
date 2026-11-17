@@ -28,8 +28,5 @@ func HTMLEscapeBuffer(src *byte, size int, dst *byte, capacity int) (consumed, w
 	if cpu.UseScalar {
 		return htmlEscapeScalar(src, size, dst, capacity)
 	}
-	raceRead(src, size)
-	consumed, written = htmlEscape(src, size, dst, capacity)
-	raceWrite(dst, written)
-	return consumed, written
+	return htmlEscape(src, size, dst, capacity)
 }

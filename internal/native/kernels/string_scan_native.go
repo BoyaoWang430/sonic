@@ -28,13 +28,6 @@ func ScanString(src string, start int, validate bool) (end, escape, errorPos int
 	} else {
 		end, escape, errorPos, err = scanStringRelaxed(rt.StringData(tail), len(tail))
 	}
-	if !cpu.UseScalar {
-		readN := end
-		if err != 0 && readN < len(tail) {
-			readN++
-		}
-		raceRead(rt.StringData(tail), readN)
-	}
 	end += base
 	if escape >= 0 {
 		escape += base

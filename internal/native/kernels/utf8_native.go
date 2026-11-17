@@ -18,7 +18,6 @@ func ValidUTF8(src string) bool {
 		_, _, full := utf8ScanScalar(rt.StringData(src), len(src), 0, nil, 0)
 		return !full
 	}
-	raceRead(rt.StringData(src), len(src))
 	_, _, full := utf8Scan(rt.StringData(src), len(src), 0, nil, 0)
 	return !full
 }
@@ -37,11 +36,5 @@ func InvalidUTF8(src string, start int, positions []int) (next, count int, full 
 	if cpu.UseScalar {
 		return utf8ScanScalar(rt.StringData(tail), len(tail), start, rt.SliceData(positions), len(positions))
 	}
-	next, count, full = utf8Scan(rt.StringData(tail), len(tail), start, rt.SliceData(positions), len(positions))
-	scanned := next - start
-	if full && scanned < len(tail) {
-		scanned++
-	}
-	raceRead(rt.StringData(tail), scanned)
-	return next, count, full
+	return utf8Scan(rt.StringData(tail), len(tail), start, rt.SliceData(positions), len(positions))
 }

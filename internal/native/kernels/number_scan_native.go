@@ -24,11 +24,6 @@ func ScanNumber(src string, start int) (end int, err types.ParsingError) {
 		return start + end, err
 	}
 	end, err = numberScan(rt.StringData(tail), len(tail), 0)
-	readN := end
-	if readN < len(tail) {
-		readN++
-	}
-	raceRead(rt.StringData(tail), readN)
 	return start + end, err
 }
 
@@ -47,11 +42,6 @@ func ScanNumberStrict(src string, start int) (end int, err types.ParsingError) {
 		return start + end, err
 	}
 	end, err = numberScan(rt.StringData(tail), len(tail), 1)
-	readN := end
-	if readN < len(tail) {
-		readN++
-	}
-	raceRead(rt.StringData(tail), readN)
 	return start + end, err
 }
 
@@ -65,10 +55,5 @@ func SkipNumber(src string, start int) (end int) {
 		return start + end
 	}
 	end, _ = numberScan(rt.StringData(tail), len(tail), 2)
-	readN := end
-	if readN < len(tail) {
-		readN++
-	}
-	raceRead(rt.StringData(tail), readN)
 	return start + end
 }

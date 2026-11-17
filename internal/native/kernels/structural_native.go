@@ -56,7 +56,6 @@ func SkipContainer(src string, start int) (end int, err types.ParsingError) {
 				return base + (bits.TrailingZeros64(cm0) >> 3) + 1, 0
 			}
 			end, err = skipContainer(rt.StringData(tail), len(tail), uint64(open))
-			raceRead(rt.StringData(tail), end)
 			return base + end, err
 		}
 
@@ -109,6 +108,5 @@ func SkipContainer(src string, start int) (end int, err types.ParsingError) {
 		}
 	}
 	end, err = skipContainer(rt.StringData(tail), len(tail), uint64(open))
-	raceRead(rt.StringData(tail), end)
 	return base + end, err
 }

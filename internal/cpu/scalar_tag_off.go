@@ -1,4 +1,4 @@
-//go:build !sonic_scalar && !go1.28
+//go:build !sonic_scalar && !race && !go1.28
 
 package cpu
 

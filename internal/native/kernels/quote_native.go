@@ -29,10 +29,7 @@ func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (co
 	if cpu.UseScalar {
 		return quoteScalar(src, size, dst, capacity, flags)
 	}
-	raceRead(src, size)
-	consumed, written = quote(src, size, dst, capacity, flags)
-	raceWrite(dst, written)
-	return consumed, written
+	return quote(src, size, dst, capacity, flags)
 }
 
 // QuoteHTML escapes src into dst without surrounding quotes, performing both
@@ -55,8 +52,5 @@ func QuoteHTMLBuffer(src *byte, size int, dst *byte, capacity int) (consumed, wr
 	if cpu.UseScalar {
 		return quoteHTMLScalar(src, size, dst, capacity)
 	}
-	raceRead(src, size)
-	consumed, written = quoteHTML(src, size, dst, capacity)
-	raceWrite(dst, written)
-	return consumed, written
+	return quoteHTML(src, size, dst, capacity)
 }

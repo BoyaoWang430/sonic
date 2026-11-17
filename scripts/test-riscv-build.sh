@@ -50,7 +50,7 @@ internal = ["./internal/native/number", "./internal/decoder/optdec",
 # Native profiles share Go wrappers and select different assembly.
 operation_files = {
     "asm_entries.go", "html_escape_native.go", "nonspace_native.go", "number_scan_native.go",
-    "path_masks_native.go", "quote_native.go", "race_norace.go", "scalar_ref.go",
+    "path_masks_native.go", "quote_native.go", "scalar_ref.go",
     "skip_string_native.go", "space_native.go", "status.go", "string_decode_native.go",
     "string_scan_native.go", "structural_native.go", "traversal_masks_native.go",
     "unquote_native.go", "utf8_native.go", "min_native.go", "scanning_native.go",

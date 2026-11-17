@@ -58,22 +58,12 @@ func DecodeQuoted(tail *byte, size int, mode uint64) (end, written, escaped, err
 	if size <= 0 {
 		return 0, 0, 0, 0, StatusEOF
 	}
-	if cpu.UseScalar {
-		var code int
-		end, written, escaped, errorPos, code = stringDecodeScalar(tail, size, tail, mode)
-		status = decodeQuotedRawCodeToStatus(code)
-		return
-	}
 	var code int
-	end, written, escaped, errorPos, code = stringDecode(tail, size, tail, mode)
+	if cpu.UseScalar {
+		end, written, escaped, errorPos, code = stringDecodeScalar(tail, size, tail, mode)
+	} else {
+		end, written, escaped, errorPos, code = stringDecode(tail, size, tail, mode)
+	}
 	status = decodeQuotedRawCodeToStatus(code)
-	readN := end
-	if readN < size && status != StatusOK {
-		readN++
-	}
-	raceRead(tail, readN)
-	if escaped != 0 {
-		raceWrite(tail, written)
-	}
 	return
 }

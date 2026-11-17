@@ -44,8 +44,6 @@ func UnquoteBuffer(src *byte, size int, dst *byte, flags uint64) (written, error
 		_, written, _, errorPos, code := stringDecodeScalar(src, size, dst, flags&3)
 		return written, errorPos, types.ParsingError(code)
 	}
-	raceRead(src, size)
 	_, written, _, errorPos, code := stringDecode(src, size, dst, flags&3)
-	raceWrite(dst, written)
 	return written, errorPos, types.ParsingError(code)
 }
