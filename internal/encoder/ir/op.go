@@ -561,6 +561,39 @@ func (self Instr) Disassemble() string {
 
 type Program []Instr
 
+type RootKind uint8
+
+const (
+	RootGeneric RootKind = iota
+	RootPureStruct
+	RootDirectPtr
+	RootPureSlice
+	RootPurePtrSlice
+	RootBuiltinMap
+)
+
+// RootSpec carries explicit compile-time execution metadata for top-level values
+// so the VM never reverse-engineers compiled instruction sequences.
+type RootSpec struct {
+	Kind           RootKind
+	Addressable    bool
+	HasPureSpecs   bool
+	HasDenseSpecs  bool
+	AllowSizeHint  bool
+	BodyStartPC    int
+	BodyEndPC      int
+	ElemSize       uintptr
+	BuiltinMapKind int
+	PureSpecs      []StructFieldSpec
+	DenseSpecs     []StructFieldSpec
+}
+
+// CompiledEncoder pairs a compiled VM Program with its explicit RootSpec.
+type CompiledEncoder struct {
+	Program Program
+	Root    RootSpec
+}
+
 func (self Program) PC() int {
 	return len(self)
 }

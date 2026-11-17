@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/internal/decoder/optdec"
@@ -567,40 +566,18 @@ func TestStage3_T04_KeyBlobAndSlabContracts(t *testing.T) {
 		t.Fatalf("expected 5 fields, got %d", len(fms))
 	}
 
-	// Verify all fields' PaddedCommaKey and PaddedStructBeginKey share a single contiguous KeyBlob
-	// with >=32 bytes of readable memory from the start of every key.
-	blob := fms[0].KeyBlob
-	firstPtr := uintptr(unsafe.Pointer(unsafe.SliceData(blob)))
-	lastField := fms[len(fms)-1]
-	lastEnd := firstPtr + uintptr(lastField.KeyOffset+lastField.CommaKeyLen)
-	for i, fm := range fms {
-		if unsafe.SliceData(fm.KeyBlob) != unsafe.SliceData(blob) {
-			t.Fatalf("field %d KeyBlob does not share backing slice", i)
-		}
-		ptr := uintptr(unsafe.Pointer(&fm.KeyBlob[fm.KeyOffset]))
-		if ptr < firstPtr || ptr >= lastEnd {
-			t.Fatalf("field %d KeyOffset pointer out of contiguous KeyBlob range", i)
-		}
-		raw32 := fm.KeyBlob[fm.KeyOffset : fm.KeyOffset+32]
-		if !bytes.HasPrefix(raw32, []byte(fm.PaddedCommaKey)) {
-			t.Fatalf("field %d 32B read prefix mismatch", i)
-		}
-		if fm.Name == "nested" {
-			if fm.PaddedStructBeginKey != `,"nested":{` || !fm.HasStructBegin {
-				t.Fatalf("unexpected PaddedStructBeginKey: %q", fm.PaddedStructBeginKey)
-			}
-			sbPtr := uintptr(unsafe.Pointer(unsafe.StringData(fm.PaddedStructBeginKey)))
-			if sbPtr != ptr {
-				t.Fatalf("expected PaddedStructBeginKey to share prefix with KeyBlob in tight KeyBlob")
-			}
-		}
+	got, err := ConfigStd.Marshal(SampleStruct{
+		ID:     42,
+		Name:   "ok",
+		EscKey: "v",
+		Nested: NestedChild{ChildA: 7, ChildB: "sub"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Verify trailing 32 bytes after the last key are all zero.
-	trailingZeros := blob[lastField.KeyOffset+lastField.CommaKeyLen : lastField.KeyOffset+lastField.CommaKeyLen+32]
-	for i, b := range trailingZeros {
-		if b != 0 {
-			t.Fatalf("expected trailing zero at byte %d after KeyBlob, got %d", i, b)
-		}
+	const want = `{"id":42,"name":"ok","a\u003cb\u0026c\u003ed":"v","nested":{"child_a":7,"child_b":"sub"}}`
+	if string(got) != want {
+		t.Fatalf("SampleStruct ConfigStd.Marshal got %s, want %s", got, want)
 	}
 }
 

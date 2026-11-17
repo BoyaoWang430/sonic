@@ -39,11 +39,11 @@ func ForceUseVM() {
 var encodeValuePointer func(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars.Stack, fv uint64) error
 
 func makeEncoderVM(vt reflect.Type, ex ...interface{}) (interface{}, error) {
-	pp, err := NewCompiler().Compile(vt, ex[0].(bool))
+	ce, err := NewCompiler().CompileEncoder(vt, ex[0].(bool))
 	if err != nil {
 		return nil, err
 	}
-	return &pp, nil
+	return &ce, nil
 }
 
 var pretouchType func(_vt reflect.Type, opts option.CompileOptions, pv bool) (map[vmPretouchKey]struct{}, error)
@@ -52,11 +52,11 @@ func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, pv bool) (map[v
 	/* compile function */
 	compiler := NewCompiler().apply(opts)
 	encoder := func(vt reflect.Type, ex ...interface{}) (interface{}, error) {
-		pp, err := compiler.Compile(vt, ex[0].(bool))
+		ce, err := compiler.CompileEncoder(vt, ex[0].(bool))
 		if err != nil {
 			return nil, err
 		}
-		return &pp, nil
+		return &ce, nil
 	}
 
 	/* find or compile */
@@ -96,11 +96,11 @@ func pretouchRecVMBatch(vtm map[vmPretouchKey]struct{}, opts option.CompileOptio
 				continue
 			}
 			compiler := NewCompiler().apply(opts)
-			pp, err := compiler.Compile(key.vt, key.pv)
+			ce, err := compiler.CompileEncoder(key.vt, key.pv)
 			if err != nil {
 				return err
 			}
-			prog := &pp
+			prog := &ce
 			if key.pv {
 				batchPV = append(batchPV, caching.ProgramBatchItem{Vt: key.vt, Fn: prog})
 			} else {
@@ -146,11 +146,33 @@ func pretouchRec(vtm map[vmPretouchKey]struct{}, opts option.CompileOptions) err
 }
 
 type Compiler struct {
-	opts  option.CompileOptions
-	pv    bool
-	useVM bool
-	tab   map[reflect.Type]bool
-	rec   map[vmPretouchKey]struct{}
+	opts          option.CompileOptions
+	pv            bool
+	useVM         bool
+	tab           map[reflect.Type]bool
+	rec           map[vmPretouchKey]struct{}
+	root          ir.RootSpec
+	lastPureSpecs []ir.StructFieldSpec
+	lastPureOK    bool
+	lastPtrSpecs  []ir.StructFieldSpec
+	lastPtrOK     bool
+}
+
+func defaultAllowSizeHint(vt reflect.Type) bool {
+	if vt == nil {
+		return false
+	}
+	switch vt.Kind() {
+	case reflect.Struct:
+		return true
+	case reflect.Ptr:
+		return vt.Elem().Kind() == reflect.Struct
+	case reflect.Slice:
+		et := vt.Elem()
+		return et.Kind() == reflect.Struct || (et.Kind() == reflect.Ptr && et.Elem().Kind() == reflect.Struct)
+	default:
+		return false
+	}
 }
 
 func NewCompiler() *Compiler {
@@ -185,13 +207,32 @@ func (self *Compiler) rescue(ep *error) {
 	}
 }
 
-func (self *Compiler) Compile(vt reflect.Type, pv bool) (ret ir.Program, err error) {
+func (self *Compiler) CompileEncoder(vt reflect.Type, pv bool) (ret ir.CompiledEncoder, err error) {
 	defer self.rescue(&err)
-	self.compileOne(&ret, 0, vt, pv)
+	self.root = ir.RootSpec{
+		Kind:          ir.RootGeneric,
+		Addressable:   pv,
+		AllowSizeHint: defaultAllowSizeHint(vt),
+	}
+	self.lastPureSpecs = nil
+	self.lastPureOK = false
+	self.lastPtrSpecs = nil
+	self.lastPtrOK = false
+	self.compileOne(&ret.Program, 0, vt, pv)
+	ret.Root = self.root
 	return
 }
 
+func (self *Compiler) Compile(vt reflect.Type, pv bool) (ret ir.Program, err error) {
+	ce, err := self.CompileEncoder(vt, pv)
+	return ce.Program, err
+}
+
 func (self *Compiler) compileOne(p *ir.Program, sp int, vt reflect.Type, pv bool) {
+	self.lastPureSpecs = nil
+	self.lastPureOK = false
+	self.lastPtrSpecs = nil
+	self.lastPtrOK = false
 	if self.tab[vt] {
 		p.Vp(ir.OP_recurse, vt, pv)
 		if self.opts.RecursiveDepth > 0 {
@@ -332,8 +373,32 @@ func (self *Compiler) compilePtrBody(p *ir.Program, sp int, vt reflect.Type) {
 	p.Tag(sp)
 	p.Add(ir.OP_save)
 	p.Add(ir.OP_deref)
+	bodyStart := p.PC()
 	self.compileOne(p, sp+1, vt, true)
+	bodyEnd := p.PC()
+	innerPureSpecs, innerPureOK := self.lastPureSpecs, self.lastPureOK
 	p.Add(ir.OP_drop)
+
+	self.lastPtrSpecs = innerPureSpecs
+	self.lastPtrOK = innerPureOK
+	if sp == 0 && !self.pv {
+		var denseSpecs []ir.StructFieldSpec
+		var hasDense bool
+		if innerPureOK {
+			denseSpecs, hasDense = ir.BuildDenseSpecs(innerPureSpecs)
+		}
+		self.root = ir.RootSpec{
+			Kind:          ir.RootDirectPtr,
+			Addressable:   true,
+			HasPureSpecs:  innerPureOK,
+			HasDenseSpecs: hasDense,
+			AllowSizeHint: vt.Kind() == reflect.Struct,
+			BodyStartPC:   bodyStart,
+			BodyEndPC:     bodyEnd,
+			PureSpecs:     innerPureSpecs,
+			DenseSpecs:    denseSpecs,
+		}
+	}
 }
 
 func (self *Compiler) compileMap(p *ir.Program, sp int, vt reflect.Type) {
@@ -353,6 +418,12 @@ func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
 			p.Add(ir.OP_drop_2)
 			p.Pin(e)
 			p.Int(ir.OP_byte, '}')
+			if sp == 0 && !self.pv {
+				self.root = ir.RootSpec{
+					Kind:           ir.RootBuiltinMap,
+					BuiltinMapKind: kind,
+				}
+			}
 			return
 		}
 	}
@@ -484,6 +555,8 @@ func (self *Compiler) compileSliceArray(p *ir.Program, sp int, st reflect.Type) 
 	done := p.PC()
 	p.Rtt(ir.OP_slice_begin, st)
 	self.compileOne(p, sp+1, elem, true)
+	elemPureSpecs, elemPureOK := self.lastPureSpecs, self.lastPureOK
+	elemPtrSpecs, elemPtrOK := self.lastPtrSpecs, self.lastPtrOK
 	loop := p.PC()
 	p.Rtt(ir.OP_slice_next, elem)
 	self.compileOne(p, sp+1, elem, true)
@@ -492,6 +565,33 @@ func (self *Compiler) compileSliceArray(p *ir.Program, sp int, st reflect.Type) 
 	p.Add(ir.OP_drop)
 	p.Int(ir.OP_byte, ']')
 	p.Pin(done)
+
+	if sp == 0 && !self.pv {
+		if elem.Kind() == reflect.Struct && elemPureOK {
+			denseSpecs, hasDense := ir.BuildDenseSpecs(elemPureSpecs)
+			self.root = ir.RootSpec{
+				Kind:          ir.RootPureSlice,
+				Addressable:   true,
+				HasPureSpecs:  true,
+				HasDenseSpecs: hasDense,
+				AllowSizeHint: true,
+				ElemSize:      elem.Size(),
+				PureSpecs:     elemPureSpecs,
+				DenseSpecs:    denseSpecs,
+			}
+		} else if elem.Kind() == reflect.Ptr && elem.Elem().Kind() == reflect.Struct && elemPtrOK {
+			denseSpecs, hasDense := ir.BuildDenseSpecs(elemPtrSpecs)
+			self.root = ir.RootSpec{
+				Kind:          ir.RootPurePtrSlice,
+				Addressable:   true,
+				HasPureSpecs:  true,
+				HasDenseSpecs: hasDense,
+				AllowSizeHint: true,
+				PureSpecs:     elemPtrSpecs,
+				DenseSpecs:    denseSpecs,
+			}
+		}
+	}
 }
 
 func (self *Compiler) compileArray(p *ir.Program, sp int, vt reflect.Type, nb int) {
@@ -541,8 +641,23 @@ func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
 		if self.opts.RecursiveDepth > 0 {
 			self.rec[vmPretouchKey{vt: vt, pv: self.pv}] = struct{}{}
 		}
+		self.lastPureSpecs = nil
+		self.lastPureOK = false
 	} else {
-		self.compileStructBody(p, sp, vt)
+		pureSpecs, isPure := self.compileStructBody(p, sp, vt)
+		self.lastPureSpecs = pureSpecs
+		self.lastPureOK = isPure
+		if sp == 0 && !self.pv && isPure {
+			denseSpecs, hasDense := ir.BuildDenseSpecs(pureSpecs)
+			self.root = ir.RootSpec{
+				Kind:          ir.RootPureStruct,
+				HasPureSpecs:  true,
+				HasDenseSpecs: hasDense,
+				AllowSizeHint: true,
+				PureSpecs:     pureSpecs,
+				DenseSpecs:    denseSpecs,
+			}
+		}
 	}
 }
 
@@ -872,13 +987,14 @@ func (self *Compiler) tryFlattenNestedStruct(ef *encodedField, baseOffset uintpt
 	return offset, true
 }
 
-func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) ([]ir.StructFieldSpec, bool) {
 	p.Tag(sp)
 	p.Int(ir.OP_byte, '{')
 	p.Add(ir.OP_save)
 	p.Add(ir.OP_cond_set)
 
 	var specs []ir.StructFieldSpec
+	allSpecs := true
 	flushSpecs := func() {
 		if len(specs) > 0 {
 			p.Fields(specs)
@@ -929,6 +1045,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 				}
 				continue
 			}
+			allSpecs = false
 			flushSpecs()
 
 			/* index to the field relative to the saved root struct pointer */
@@ -999,11 +1116,17 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 	}
 
 	compileFields(vt, 0, sp)
+	hadSpecs := len(specs) > 0
 	flushSpecs()
+	var pureSpecs []ir.StructFieldSpec
+	if allSpecs && hadSpecs {
+		pureSpecs = (*p)[len(*p)-1].VFields()
+	}
 
 	/* end of object */
 	p.Add(ir.OP_drop)
 	p.Int(ir.OP_byte, '}')
+	return pureSpecs, allSpecs
 }
 
 func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Type, fieldCanAddr bool) {

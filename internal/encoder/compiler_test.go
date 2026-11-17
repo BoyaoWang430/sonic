@@ -34,6 +34,54 @@ func TestCompiler_Compile(t *testing.T) {
 	p.Disassemble()
 }
 
+type customRootMarshaler struct {
+	X int
+}
+
+func (c customRootMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`"custom"`), nil
+}
+
+func TestCompilerExplicitRootSpec(t *testing.T) {
+	type pureItem struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	type condItem struct {
+		ID   int    `json:"id"`
+		Name string `json:"name,omitempty"`
+	}
+
+	cePure, err := NewCompiler().CompileEncoder(reflect.TypeOf(pureItem{}), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootPureStruct, cePure.Root.Kind)
+	assert.True(t, cePure.Root.HasPureSpecs)
+	assert.True(t, cePure.Root.HasDenseSpecs)
+
+	ceCondPtr, err := NewCompiler().CompileEncoder(reflect.TypeOf((*condItem)(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootDirectPtr, ceCondPtr.Root.Kind)
+	assert.True(t, ceCondPtr.Root.HasPureSpecs)
+	assert.False(t, ceCondPtr.Root.HasDenseSpecs)
+
+	ceSlice, err := NewCompiler().CompileEncoder(reflect.TypeOf([]pureItem(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootPureSlice, ceSlice.Root.Kind)
+	assert.Equal(t, reflect.TypeOf(pureItem{}).Size(), ceSlice.Root.ElemSize)
+
+	cePtrSlice, err := NewCompiler().CompileEncoder(reflect.TypeOf([]*pureItem(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootPurePtrSlice, cePtrSlice.Root.Kind)
+
+	ceMap, err := NewCompiler().CompileEncoder(reflect.TypeOf(map[string]int(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootBuiltinMap, ceMap.Root.Kind)
+
+	ceCustom, err := NewCompiler().CompileEncoder(reflect.TypeOf((*customRootMarshaler)(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootGeneric, ceCustom.Root.Kind)
+}
+
 func TestReflectDirect(t *testing.T) {
 	type A struct {
 		A int

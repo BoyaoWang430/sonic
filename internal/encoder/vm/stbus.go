@@ -48,7 +48,8 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 	if err != nil {
 		return err
 	}
-	return Execute(buf, p, sb, fv, pp.(*ir.Program))
+	ce := pp.(*ir.CompiledEncoder)
+	return Execute(buf, p, sb, fv, &ce.Program)
 }
 
 const (
@@ -63,6 +64,8 @@ type rootEncPlan struct {
 	denseSpecs        []ir.StructFieldSpec
 	elemSize          uintptr
 	builtinMapKind    int
+	bodyStartPC       int
+	bodyEndPC         int
 	sizeHint          atomic.Uint32
 	isDirectPtr       bool
 	isDirectMap       bool
@@ -308,72 +311,6 @@ func encodePurePtrStructSliceRoot(b *[]byte, rv reflect.Value, specs []ir.Struct
 	return nil
 }
 
-// sliceArrayElemEnd locates the OP_slice_next instruction emitted by
-// Compiler.compileSliceArray: [0]=OP_slice_begin(done=n), [1:loop]=elem,
-// [loop]=OP_slice_next(exit=n-2), [loop+1:n-3]=elem, [n-3]=OP_goto(loop),
-// [n-2]=OP_drop, [n-1]=OP_byte(']').
-func sliceArrayElemEnd(prog *ir.Program) (int, bool) {
-	n := len(*prog)
-	if n < 7 || (*prog)[0].Op() != ir.OP_slice_begin || (*prog)[0].Vi() != n {
-		return 0, false
-	}
-	if (*prog)[n-3].Op() != ir.OP_goto || (*prog)[n-2].Op() != ir.OP_drop || (*prog)[n-1].Op() != ir.OP_byte || (*prog)[n-1].Byte() != ']' {
-		return 0, false
-	}
-	elemEnd := (*prog)[n-3].Vi()
-	if elemEnd <= 1 || elemEnd >= n-3 || (*prog)[elemEnd].Op() != ir.OP_slice_next || (*prog)[elemEnd].Vi() != n-2 {
-		return 0, false
-	}
-	return elemEnd, true
-}
-
-func extractPurePtrSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
-	elemEnd, ok := sliceArrayElemEnd(prog)
-	if !ok || elemEnd < 8 {
-		return nil, false
-	}
-	if (*prog)[1].Op() != ir.OP_is_nil || (*prog)[1].Vr() != nil ||
-		(*prog)[2].Op() != ir.OP_save || (*prog)[3].Op() != ir.OP_deref ||
-		(*prog)[elemEnd-3].Op() != ir.OP_drop || (*prog)[elemEnd-2].Op() != ir.OP_goto ||
-		(*prog)[elemEnd-1].Op() != ir.OP_null {
-		return nil, false
-	}
-	return extractPureStructSpecs(prog, 4, elemEnd-3)
-}
-
-func extractPureSliceSpecs(prog *ir.Program) ([]ir.StructFieldSpec, bool) {
-	elemEnd, ok := sliceArrayElemEnd(prog)
-	if !ok {
-		return nil, false
-	}
-	return extractPureStructSpecs(prog, 1, elemEnd)
-}
-
-func extractPureStructSpecs(prog *ir.Program, start, end int) ([]ir.StructFieldSpec, bool) {
-	if start < 0 || end > len(*prog) || start > end {
-		return nil, false
-	}
-	s := (*prog)[start:end]
-	if len(s) == 6 &&
-		s[0].Op() == ir.OP_byte && s[0].Byte() == '{' &&
-		s[1].Op() == ir.OP_save &&
-		s[2].Op() == ir.OP_cond_set &&
-		s[3].Op() == ir.OP_struct_fields &&
-		s[4].Op() == ir.OP_drop &&
-		s[5].Op() == ir.OP_byte && s[5].Byte() == '}' {
-		return s[3].VFields(), true
-	}
-	if len(s) == 5 &&
-		s[0].Op() == ir.OP_byte && s[0].Byte() == '{' &&
-		s[1].Op() == ir.OP_save &&
-		s[2].Op() == ir.OP_cond_set &&
-		s[3].Op() == ir.OP_drop &&
-		s[4].Op() == ir.OP_byte && s[4].Byte() == '}' {
-		return nil, true
-	}
-	return nil, false
-}
-
 func newValueBoxPool(vt reflect.Type) *sync.Pool {
 	return &sync.Pool{
 		New: func() any {
@@ -388,97 +325,71 @@ func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	prog := pp.(*ir.Program)
-	switch vt.Kind() {
-	case reflect.Ptr, reflect.UnsafePointer:
-		n := len(*prog)
-		isDirectPtr := vt.Kind() == reflect.Ptr &&
-			n >= 6 &&
-			(*prog)[0].Op() == ir.OP_is_nil &&
-			(*prog)[0].Vr() == nil &&
-			(*prog)[1].Op() == ir.OP_save &&
-			(*prog)[2].Op() == ir.OP_deref &&
-			(*prog)[n-3].Op() == ir.OP_drop &&
-			(*prog)[n-2].Op() == ir.OP_goto &&
-			(*prog)[n-1].Op() == ir.OP_null
-		var pureSpecs, denseSpecs []ir.StructFieldSpec
-		var hasPureSpecs, hasDenseSpecs bool
-		if isDirectPtr {
-			pureSpecs, hasPureSpecs = extractPureStructSpecs(prog, 3, n-3)
-			if hasPureSpecs {
-				denseSpecs, hasDenseSpecs = ir.BuildDenseSpecs(pureSpecs)
-			}
-		}
+	ce := pp.(*ir.CompiledEncoder)
+	prog := &ce.Program
+	spec := &ce.Root
+
+	switch spec.Kind {
+	case ir.RootDirectPtr:
 		return &rootEncPlan{
 			prog:          prog,
-			pureSpecs:     pureSpecs,
-			denseSpecs:    denseSpecs,
-			isDirectPtr:   isDirectPtr,
-			hasPureSpecs:  hasPureSpecs,
-			hasDenseSpecs: hasDenseSpecs,
-			allowSizeHint: vt.Kind() == reflect.Ptr && vt.Elem().Kind() == reflect.Struct,
+			pureSpecs:     spec.PureSpecs,
+			denseSpecs:    spec.DenseSpecs,
+			bodyStartPC:   spec.BodyStartPC,
+			bodyEndPC:     spec.BodyEndPC,
+			isDirectPtr:   true,
+			hasPureSpecs:  spec.HasPureSpecs,
+			hasDenseSpecs: spec.HasDenseSpecs,
+			allowSizeHint: spec.AllowSizeHint,
 		}, nil
-	case reflect.Slice:
-		if pureSpecs, ok := extractPureSliceSpecs(prog); ok {
-			denseSpecs, hasDenseSpecs := ir.BuildDenseSpecs(pureSpecs)
-			return &rootEncPlan{
-				prog:          prog,
-				pureSpecs:     pureSpecs,
-				denseSpecs:    denseSpecs,
-				elemSize:      vt.Elem().Size(),
-				hasDenseSpecs: hasDenseSpecs,
-				isPureSlice:   true,
-				allowSizeHint: true,
-			}, nil
-		}
-		if vt.Elem().Kind() == reflect.Ptr && vt.Elem().Elem().Kind() == reflect.Struct {
-			if pureSpecs, ok := extractPurePtrSliceSpecs(prog); ok {
-				denseSpecs, hasDenseSpecs := ir.BuildDenseSpecs(pureSpecs)
-				return &rootEncPlan{
-					prog:           prog,
-					pureSpecs:      pureSpecs,
-					denseSpecs:     denseSpecs,
-					hasDenseSpecs:  hasDenseSpecs,
-					isPurePtrSlice: true,
-					allowSizeHint:  true,
-				}, nil
-			}
-		}
+	case ir.RootPureSlice:
+		return &rootEncPlan{
+			prog:          prog,
+			pureSpecs:     spec.PureSpecs,
+			denseSpecs:    spec.DenseSpecs,
+			elemSize:      spec.ElemSize,
+			hasDenseSpecs: spec.HasDenseSpecs,
+			isPureSlice:   true,
+			allowSizeHint: spec.AllowSizeHint,
+		}, nil
+	case ir.RootPurePtrSlice:
+		return &rootEncPlan{
+			prog:           prog,
+			pureSpecs:      spec.PureSpecs,
+			denseSpecs:     spec.DenseSpecs,
+			hasDenseSpecs:  spec.HasDenseSpecs,
+			isPurePtrSlice: true,
+			allowSizeHint:  spec.AllowSizeHint,
+		}, nil
+	case ir.RootBuiltinMap:
+		return &rootEncPlan{
+			prog:           prog,
+			builtinMapKind: spec.BuiltinMapKind,
+			isDirectMap:    true,
+		}, nil
+	case ir.RootPureStruct:
 		return &rootEncPlan{
 			prog:          prog,
 			boxPool:       newValueBoxPool(vt),
-			allowSizeHint: vt.Elem().Kind() == reflect.Struct || (vt.Elem().Kind() == reflect.Ptr && vt.Elem().Elem().Kind() == reflect.Struct),
-			boxHasPtrs:    true,
-		}, nil
-	case reflect.Map:
-		if len(*prog) == 10 && (*prog)[5].Op() == ir.OP_map_string_any {
-			return &rootEncPlan{
-				prog:           prog,
-				builtinMapKind: (*prog)[5].Vi(),
-				isDirectMap:    true,
-			}, nil
-		}
-		return &rootEncPlan{
-			prog:       prog,
-			boxPool:    newValueBoxPool(vt),
-			boxHasPtrs: true,
+			pureSpecs:     spec.PureSpecs,
+			denseSpecs:    spec.DenseSpecs,
+			hasPureSpecs:  true,
+			hasDenseSpecs: spec.HasDenseSpecs,
+			allowSizeHint: spec.AllowSizeHint,
+			boxHasPtrs:    typeHasPointers(vt),
 		}, nil
 	default:
-		pureSpecs, hasPureSpecs := extractPureStructSpecs(prog, 0, len(*prog))
-		var denseSpecs []ir.StructFieldSpec
-		var hasDenseSpecs bool
-		if hasPureSpecs {
-			denseSpecs, hasDenseSpecs = ir.BuildDenseSpecs(pureSpecs)
+		var boxPool *sync.Pool
+		var boxHasPtrs bool
+		if vt.Kind() != reflect.Ptr && vt.Kind() != reflect.UnsafePointer {
+			boxPool = newValueBoxPool(vt)
+			boxHasPtrs = typeHasPointers(vt)
 		}
 		return &rootEncPlan{
 			prog:          prog,
-			boxPool:       newValueBoxPool(vt),
-			pureSpecs:     pureSpecs,
-			denseSpecs:    denseSpecs,
-			hasPureSpecs:  hasPureSpecs,
-			hasDenseSpecs: hasDenseSpecs,
-			allowSizeHint: vt.Kind() == reflect.Struct,
-			boxHasPtrs:    typeHasPointers(vt),
+			boxPool:       boxPool,
+			allowSizeHint: spec.AllowSizeHint,
+			boxHasPtrs:    boxHasPtrs,
 		}, nil
 	}
 }
@@ -825,7 +736,7 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 			if !sb.EnterDepth(1) {
 				return vars.ERR_too_deep
 			}
-			if err := ExecuteRange(buf, ptr, sb, fv, plan.prog, 3, len(*plan.prog)-3); err != nil {
+			if err := ExecuteRange(buf, ptr, sb, fv, plan.prog, plan.bodyStartPC, plan.bodyEndPC); err != nil {
 				return err
 			}
 			sb.LeaveDepth(1)
