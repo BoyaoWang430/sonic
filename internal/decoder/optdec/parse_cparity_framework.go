@@ -74,13 +74,13 @@ func (p *Parser) ensurePadded() {
 	// storage separate from p.Json, which still supplies raw strings, numbers, and corrected input.
 	needed := len(p.Json) + len(padding)
 	if needed > cap(p.padded) {
-		if uintptr(needed) > maxPooledJsonPaddedCap {
-			if cap(p.padded) > 0 && uintptr(cap(p.padded)) <= maxPooledJsonPaddedCap {
+		if needed > maxPooledPaddedBufBytes {
+			if cap(p.padded) > 0 && cap(p.padded) <= maxPooledPaddedBufBytes {
 				p.paddedBackup = p.padded[:0]
 			}
 			p.padded = make([]byte, 0, needed)
 		} else {
-			allocCap := int(maxPooledJsonPaddedCap)
+			allocCap := maxPooledPaddedBufBytes
 			if needed <= 4<<10 {
 				allocCap = 4 << 10
 			} else if needed <= 32<<10 {
@@ -194,10 +194,10 @@ func (p *Parser) growNodeTape(stage *nodeTapeGrowth) bool {
 	default:
 		return false
 	}
-	retainInPool := uintptr(nextCap) <= maxPooledNodesCap
+	retainInPool := nextCap <= maxPooledNodesCount
 	grown := make([]node, nextCap)
 	copy(grown[:curLen], p.nodes[:curLen])
-	if !retainInPool && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
+	if !retainInPool && p.backup == nil && cap(p.nodes) <= maxPooledNodesCount {
 		p.backup = p.nodes
 	}
 	p.nodes = grown

@@ -159,7 +159,7 @@ func TestParserPoolCapacityGovernance(t *testing.T) {
 		t.Fatalf("small parse failed: %v", code)
 	}
 	p.reset()
-	if uintptr(cap(p.padded)) > maxPooledJsonPaddedCap || uintptr(cap(p.nodes)) > maxPooledNodesCap {
+	if cap(p.padded) > maxPooledPaddedBufBytes || cap(p.nodes) > maxPooledNodesCount {
 		t.Fatalf("unexpected small cap: padded=%d nodes=%d", cap(p.padded), cap(p.nodes))
 	}
 	p.free()
@@ -167,18 +167,18 @@ func TestParserPoolCapacityGovernance(t *testing.T) {
 	hugeStr := strings.Repeat("a", (1<<20)+1024)
 	hugeJSON := `{"big":"` + hugeStr + `"}`
 	p2 := newParser(hugeJSON, 0, 0)
-	if uintptr(cap(p2.padded)) <= maxPooledJsonPaddedCap {
+	if cap(p2.padded) <= maxPooledPaddedBufBytes {
 		t.Fatalf("expected oversized padded buffer during parse, got %d", cap(p2.padded))
 	}
 	if code := p2.parse(); code != 0 {
 		t.Fatalf("huge parse failed: %v", code)
 	}
 	p2.reset()
-	if uintptr(cap(p2.padded)) > maxPooledJsonPaddedCap {
-		t.Fatalf("oversized padded buffer leaked into pool after reset: cap=%d > %d", cap(p2.padded), maxPooledJsonPaddedCap)
+	if cap(p2.padded) > maxPooledPaddedBufBytes {
+		t.Fatalf("oversized padded buffer leaked into pool after reset: cap=%d > %d", cap(p2.padded), maxPooledPaddedBufBytes)
 	}
-	if uintptr(cap(p2.nodes)) > maxPooledNodesCap {
-		t.Fatalf("oversized nodes buffer leaked into pool after reset: cap=%d > %d", cap(p2.nodes), maxPooledNodesCap)
+	if cap(p2.nodes) > maxPooledNodesCount {
+		t.Fatalf("oversized nodes buffer leaked into pool after reset: cap=%d > %d", cap(p2.nodes), maxPooledNodesCount)
 	}
 	p2.free()
 }
@@ -217,12 +217,12 @@ func TestSingleLongStringOnDemandTape(t *testing.T) {
 	if code := p.parse(); code != 0 {
 		t.Fatalf("long string parse failed: %v", code)
 	}
-	if cap(p.nodes) != initCap || uintptr(cap(p.nodes)) > maxPooledNodesCap {
-		t.Fatalf("long single string over-allocated node tape: cap=%d initCap=%d max=%d", cap(p.nodes), initCap, maxPooledNodesCap)
+	if cap(p.nodes) != initCap || cap(p.nodes) > maxPooledNodesCount {
+		t.Fatalf("long single string over-allocated node tape: cap=%d initCap=%d max=%d", cap(p.nodes), initCap, maxPooledNodesCount)
 	}
 	p.free()
 
-	// Also verify on a fresh unpooled Parser that cap(p.nodes) stays at defaultNodesCap (4096).
+	// Also verify on a fresh unpooled Parser that cap(p.nodes) stays at defaultNodesCount (4096).
 	fresh := parsePool.New().(*Parser)
 	fresh.Json = longStr
 	fresh.padded = append(fresh.padded[:0], longStr...)
@@ -233,14 +233,20 @@ func TestSingleLongStringOnDemandTape(t *testing.T) {
 	if code := fresh.parse(); code != 0 {
 		t.Fatalf("fresh long string parse failed: %v", code)
 	}
-	if uintptr(cap(fresh.nodes)) != defaultNodesCap {
-		t.Fatalf("fresh long single string grew node tape: cap=%d want=%d", cap(fresh.nodes), defaultNodesCap)
+	if cap(fresh.nodes) != defaultNodesCount {
+		t.Fatalf("fresh long single string grew node tape: cap=%d want=%d", cap(fresh.nodes), defaultNodesCount)
 	}
 
-	if !looksLikeJSONLPrefix(`{"a":1}` + "\n" + `{"a":2}`) {
-		t.Fatalf("expected looksLikeJSONLPrefix=true on NDJSON")
+	// Verify multi-value DecodeWithSession never presizes current-value nodes from
+	// the entire remaining stream tail, even without newline delimiters.
+	spaceDelimitedStream := strings.Repeat(`{"a":1} `, 40000) // ~320 KiB, no '\n'
+	var sess *InputSession
+	pos := 0
+	var item map[string]any
+	if err := DecodeWithSession(&spaceDelimitedStream, &pos, 0, &item, &sess); err != nil {
+		t.Fatalf("space-delimited multi-value DecodeWithSession failed: %v", err)
 	}
-	if looksLikeJSONLPrefix("{\n  \"items\": [\n    {\"a\": 1},\n    {\"a\": 2}\n  ]\n}") {
-		t.Fatalf("expected looksLikeJSONLPrefix=false on pretty-printed single JSON document")
+	if item["a"] != float64(1) || pos == 0 || pos >= len(spaceDelimitedStream) {
+		t.Fatalf("unexpected multi-value first decode state: item=%v pos=%d", item, pos)
 	}
 }

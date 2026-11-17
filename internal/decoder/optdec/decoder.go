@@ -172,9 +172,7 @@ func Decode(s *string, i *int, f uint64, val interface{}) error {
 	return DecodeWithSession(s, i, f, val, nil)
 }
 
-const giantReadOnlyScanThreshold uintptr = 4 << 20
-
-var errGiantStreamFallback = stderrors.New("optdec: giant stream fallback")
+var errLargeReadOnlyScan = stderrors.New("optdec: large read-only scan")
 
 // DecodeOne decodes a single JSON value starting at s[0] without heap-escaping a Decoder or Context.
 func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
@@ -182,8 +180,8 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	if err != nil {
 		return s, 0, err
 	}
-	if uintptr(len(s)+len(padding)) > giantReadOnlyScanThreshold && (proj == nil || !proj.hasRawSubtree || !proj.shouldUseOpts(len(s), f)) {
-		return decodeGiantOneCompiled(s, f, etp, vp, dec)
+	if len(s)+len(padding) > largeReadOnlyScanBytes && (proj == nil || !proj.hasRawSubtree || !proj.shouldUseOpts(len(s), f)) {
+		return decodeReadOnlyOneCompiled(s, f, etp, vp, dec)
 	}
 
 	var activeProj *projPlan
@@ -191,17 +189,19 @@ func DecodeOne(s string, f uint64, val interface{}) (string, int, error) {
 	if proj != nil && proj.shouldUseOpts(len(s), f) {
 		activeProj = proj
 		p = newParserLazy(s, 0, f)
+		p.singleDoc = true
 	} else {
 		p = newParserImpl(s, 0, f)
-		if len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) {
+		p.singleDoc = true
+		if len(p.Json) > presizeSingleDocBytes && (proj == nil || !proj.hasRawSubtree) {
 			p.presizeNodesOne()
 		}
 	}
 	defer p.free()
 
 	ctx, err := newContextOnParserWithPlan(p, f, etp, activeProj)
-	if err == errGiantStreamFallback {
-		return decodeGiantOneCompiled(s, f, etp, vp, dec)
+	if err == errLargeReadOnlyScan {
+		return decodeReadOnlyOneCompiled(s, f, etp, vp, dec)
 	}
 	if p.Utf8Inv {
 		s = p.Json
@@ -236,13 +236,13 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 	}
 	if (sess == nil || sess.padded == nil || sess.src != *s || origPos < sess.base || origPos > len(*s) ||
 		((f&(1<<_F_validate_string)) != 0 && !sess.utf8Checked)) &&
-		uintptr(len(*s)-origPos+len(padding)) > giantReadOnlyScanThreshold &&
+		len(*s)-origPos+len(padding) > largeReadOnlyScanBytes &&
 		(proj == nil || !proj.hasRawSubtree || !proj.shouldUseOpts(len(*s)-origPos, f)) {
 		*i = origPos
-		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
+		return decodeReadOnlyWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
 
-	/* parse into document */
+	/* parse into document: multi-value session never presizes from the remaining stream tail */
 	var activeProj *projPlan
 	var p *Parser
 	if proj != nil && proj.shouldUseOpts(len(*s)-origPos, f) {
@@ -250,16 +250,13 @@ func DecodeWithSession(s *string, i *int, f uint64, val interface{}, sessPtr **I
 		p = newParserLazyFromSession(*s, origPos, uint64(f), sess)
 	} else {
 		p = newParserFromSession(*s, origPos, uint64(f), sess)
-		if origPos == 0 && sess == nil && len(p.Json) > 128<<10 && (proj == nil || !proj.hasRawSubtree) && !looksLikeJSONLPrefix(p.Json) {
-			p.presizeNodesOne()
-		}
 	}
 	defer p.free()
 
 	ctx, err := newContextOnParserWithPlan(p, uint64(f), etp, activeProj)
-	if err == errGiantStreamFallback {
+	if err == errLargeReadOnlyScan {
 		*i = origPos
-		return decodeGiantWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
+		return decodeReadOnlyWithSessionCompiled(s, i, f, etp, vp, dec, sessPtr)
 	}
 	if p.Utf8Inv {
 		*s = parserCorrectedSource(p, *s, origPos)
@@ -309,7 +306,7 @@ fix_error:
 				p.paddedBackup = nil
 			}
 		} else if sess != nil {
-			if sess.padded != nil && uintptr(cap(sess.padded)) <= maxPooledJsonPaddedCap && p.padded == nil {
+			if sess.padded != nil && cap(sess.padded) <= maxPooledPaddedBufBytes && p.padded == nil {
 				p.padded = sess.padded[:0]
 			}
 			*sessPtr = nil

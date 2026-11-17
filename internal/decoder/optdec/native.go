@@ -4,7 +4,6 @@ package optdec
 
 import (
 	"math/bits"
-	"strings"
 	"sync"
 	"unsafe"
 
@@ -153,6 +152,7 @@ type Parser struct {
 	strPtrSlabNext     int
 	ptrStructSlabs     [4]ptrStructSlabSlot
 	lazyPadded         bool
+	singleDoc          bool
 	deferFloatOverflow bool
 	strAnyMask         uint32
 	strAnyCache        [32]strAnySlot
@@ -183,19 +183,23 @@ type jsonStat struct {
 	max_depth   uint32
 }
 
-var (
-	defaultJsonPaddedCap   uintptr = 64 << 10                           // 64 KB initial pool buffer
-	defaultNodesCap        uintptr = (64 << 10) / unsafe.Sizeof(node{}) // 4096 nodes (64 KB) initial pool buffer
-	maxPooledJsonPaddedCap uintptr = 1 << 20                            // 1 MB max pooled padded buffer
-	maxPooledNodesCap      uintptr = (1 << 20) / unsafe.Sizeof(node{})  // 65536 nodes (1 MB) max pooled node buffer
+const (
+	nodeByteSize            = int(unsafe.Sizeof(node{}))
+	defaultPaddedBufBytes   = 64 << 10                               // 64 KiB initial pooled padded buffer
+	maxPooledPaddedBufBytes = 1 << 20                                // 1 MiB max pooled padded buffer
+	presizeSingleDocBytes   = 128 << 10                              // 128 KiB threshold for single-doc node presize
+	largeReadOnlyScanBytes  = 4 << 20                                // 4 MiB threshold for read-only no-copy scan
+	defaultNodesCount       = defaultPaddedBufBytes / nodeByteSize   // 4096 nodes (64 KiB) initial pooled tape
+	maxPooledNodesCount     = maxPooledPaddedBufBytes / nodeByteSize // 65536 nodes (1 MiB) max pooled tape
+	maxInitialPresizeNodes  = 1 << 18                                // 262144 nodes (4 MiB) max initial presize
 )
 
 var parsePool sync.Pool = sync.Pool{
 	New: func() interface{} {
 		return &Parser{
 			options: 0,
-			padded:  make([]byte, 0, defaultJsonPaddedCap),
-			nodes:   make([]node, defaultNodesCap, defaultNodesCap),
+			padded:  make([]byte, 0, defaultPaddedBufBytes),
+			nodes:   make([]node, defaultNodesCount, defaultNodesCount),
 			dbuf:    make([]byte, types.MaxDigitNums, types.MaxDigitNums),
 		}
 	},
@@ -491,46 +495,6 @@ func firstContainerStart(s string) int {
 	return -1
 }
 
-// looksLikeJSONLPrefix checks up to the first 4 KiB for a newline-delimited
-// root boundary (`}\n{`, `}\n[`, `]\n[`, `]\n{`), avoiding whole-stream node
-// pre-sizing on multi-document JSONL streams passed to NewDecoder.
-func looksLikeJSONLPrefix(s string) bool {
-	limit := len(s)
-	if limit > 4096 {
-		limit = 4096
-	}
-	sub := s[:limit]
-	off := 0
-	for off < limit {
-		rel := strings.IndexByte(sub[off:], '\n')
-		if rel < 0 {
-			return false
-		}
-		i := off + rel
-		p := i - 1
-		for p >= 0 && (sub[p] == ' ' || sub[p] == '\r' || sub[p] == '\t') {
-			p--
-		}
-		if p >= 0 && (sub[p] == '}' || sub[p] == ']') {
-			q := i + 1
-			for q < limit && (sub[q] == ' ' || sub[q] == '\r' || sub[q] == '\t' || sub[q] == '\n') {
-				q++
-			}
-			if q < limit && (sub[q] == '{' || sub[q] == '[') {
-				return true
-			}
-		}
-		off = i + 1
-	}
-	return false
-}
-
-// maxPresizeNodesOne caps the initial up-front node reservation before any
-// scan runs, so pathological inputs (e.g. multi-MiB unclosed '[' or small
-// containers followed by huge trailing whitespace) never pre-allocate millions
-// of nodes up front before actual scanning/depth checks run.
-const maxPresizeNodesOne = 1 << 18
-
 func cappedInitialNodesCap(src string, start, divisor int) int {
 	if start < 0 || start >= len(src) {
 		return 1024
@@ -539,8 +503,8 @@ func cappedInitialNodesCap(src string, start, divisor int) int {
 		return 16
 	}
 	estNodes := (len(src)-start)/divisor + 1024
-	if estNodes > maxPresizeNodesOne {
-		return maxPresizeNodesOne
+	if estNodes > maxInitialPresizeNodes {
+		return maxInitialPresizeNodes
 	}
 	return estNodes
 }
@@ -554,7 +518,7 @@ func (p *Parser) presizeNodesOne() {
 	if estNodes <= cap(p.nodes) {
 		return
 	}
-	if uintptr(estNodes) > maxPooledNodesCap && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
+	if estNodes > maxPooledNodesCount && p.backup == nil && cap(p.nodes) <= maxPooledNodesCount {
 		p.backup = p.nodes
 	}
 	p.nodes = make([]node, estNodes)
@@ -570,7 +534,7 @@ func (p *Parser) reset() {
 	if p.paddedBackup != nil {
 		p.padded = p.paddedBackup[:0]
 		p.paddedBackup = nil
-	} else if uintptr(cap(p.padded)) > maxPooledJsonPaddedCap {
+	} else if cap(p.padded) > maxPooledPaddedBufBytes {
 		p.padded = nil
 	} else {
 		p.padded = p.padded[:0]
@@ -589,6 +553,7 @@ func (p *Parser) reset() {
 	p.keepUseNumber = false
 	p.strictRawNum = false
 	p.lazyPadded = false
+	p.singleDoc = false
 	p.deferFloatOverflow = false
 	if p.strAnyMask != 0 {
 		p.clearStrAnyCache()

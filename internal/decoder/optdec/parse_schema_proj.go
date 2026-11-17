@@ -48,12 +48,12 @@ type schemaScanner struct {
 	num            cParityNum
 }
 
-const errCodeGiantStreamFallback ErrorCode = -1
+const errCodeLargeReadOnlyScan ErrorCode = -1
 
 func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 	if plan == nil || plan.kind == projFull || plan.kind == projScalar || plan.kind == projBytes {
-		if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
-			return errCodeGiantStreamFallback
+		if p.end+len(padding) > largeReadOnlyScanBytes {
+			return errCodeLargeReadOnlyScan
 		}
 		return parseImpl(p)
 	}
@@ -62,8 +62,8 @@ func parseWithSchemaOrFull(p *Parser, plan *projPlan) ErrorCode {
 		runtime.KeepAlive(p)
 		return SONIC_OK
 	}
-	if uintptr(p.end+len(padding)) > giantReadOnlyScanThreshold {
-		return errCodeGiantStreamFallback
+	if p.end+len(padding) > largeReadOnlyScanBytes {
+		return errCodeLargeReadOnlyScan
 	}
 	return resetAndRunFullParse(p, mutated)
 }
@@ -93,7 +93,7 @@ func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
 	p.end = len(p.Json)
 	p.nbk = cParityNonspaceBlock{}
 	p.nbuf = nodeBuf{}
-	if wasLazy && len(p.Json) > 128<<10 && p.sessionPadded == nil && !looksLikeJSONLPrefix(p.Json) {
+	if wasLazy && p.singleDoc && len(p.Json) > presizeSingleDocBytes && p.sessionPadded == nil {
 		p.presizeNodesOne()
 	} else {
 		p.nbuf.init(p.nodes)
@@ -105,7 +105,7 @@ func parseSchemaRoot(p *Parser, plan *projPlan) (bool, bool) {
 	if len(p.nodes) == 0 {
 		n := cap(p.nodes)
 		if n == 0 {
-			n = int(defaultNodesCap)
+			n = defaultNodesCount
 			p.nodes = make([]node, n, n)
 		} else {
 			p.nodes = p.nodes[:n]
@@ -178,10 +178,10 @@ func (sc *schemaScanner) growTape(extra int) {
 	for nextCap < curLen+extra {
 		nextCap *= 2
 	}
-	retainInPool := uintptr(nextCap) <= maxPooledNodesCap
+	retainInPool := nextCap <= maxPooledNodesCount
 	grown := make([]node, nextCap)
 	copy(grown[:curLen], p.nodes[:curLen])
-	if !retainInPool && p.backup == nil && uintptr(cap(p.nodes)) <= maxPooledNodesCap {
+	if !retainInPool && p.backup == nil && cap(p.nodes) <= maxPooledNodesCount {
 		p.backup = p.nodes
 	}
 	p.nodes = grown

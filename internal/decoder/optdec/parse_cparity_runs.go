@@ -73,7 +73,7 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 	if len(p.nodes) == 0 {
 		n := cap(p.nodes)
 		if n == 0 {
-			n = int(defaultNodesCap)
+			n = defaultNodesCount
 			p.nodes = make([]node, n, n)
 		} else {
 			p.nodes = p.nodes[:n]

@@ -127,7 +127,7 @@ func TestPublicDecodeOneGiantPresizeBounded(t *testing.T) {
 	}
 
 	// 3. Public DecodeOne on small non-empty object + 16 MiB trailing spaces is
-	// capped by maxPresizeNodesOne (4 MiB).
+	// capped by maxInitialPresizeNodes (4 MiB).
 	smallPlusSpaces := `{"a":42}` + strings.Repeat(" ", 16<<20)
 	runtime.GC()
 	runtime.ReadMemStats(&before)

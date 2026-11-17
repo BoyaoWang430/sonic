@@ -84,8 +84,8 @@ func newContextOnParserWithPlan(p *Parser, opts uint64, root reflect.Type, proj 
 	} else {
 		ecode = p.parse()
 	}
-	if ecode == errCodeGiantStreamFallback {
-		return ctx, errGiantStreamFallback
+	if ecode == errCodeLargeReadOnlyScan {
+		return ctx, errLargeReadOnlyScan
 	}
 	if ecode != 0 {
 		return ctx, p.fixError(ecode)

@@ -226,7 +226,7 @@ func decodeViaGiantWithInit[T any](s string, f uint64, initFn func(*T)) (T, erro
 	if err != nil {
 		return dst, err
 	}
-	sOut, endPos, err := decodeGiantOneCompiled(s, f, etp, vp, dec)
+	sOut, endPos, err := decodeReadOnlyOneCompiled(s, f, etp, vp, dec)
 	return dst, checkSingleDocEnd(sOut, endPos, err)
 }
 
