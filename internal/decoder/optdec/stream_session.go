@@ -303,7 +303,8 @@ func decodeReadOnlyOneCompiled(s string, f uint64, etp reflect.Type, vp unsafe.P
 	if sess.utf8Invalid || (code != SONIC_OK && sess.validateStr && sess.cur < len(s) && !utf8.ValidateString(s[sess.cur:])) {
 		dbuf := utf8.CorrectWith(nil, rt.Str2Mem(s), "\ufffd")
 		s = rt.Mem2Str(dbuf)
-		sess.beginComplete(f&^(1<<_F_validate_string), isEface, s, true)
+		sess.beginComplete(f, isEface, s, true)
+		sess.utf8Checked = len(s)
 		_, code = sess.Step(s, true)
 	}
 	if code != SONIC_OK {
@@ -350,7 +351,8 @@ func decodeReadOnlyWithSessionCompiled(s *string, i *int, f uint64, etp reflect.
 		dbuf := utf8.CorrectWith(nil, rt.Str2Mem(sub), "\ufffd")
 		sub = rt.Mem2Str(dbuf)
 		*s = (*s)[:origPos] + sub
-		sess.beginComplete(f&^(1<<_F_validate_string), isEface, sub, false)
+		sess.beginComplete(f, isEface, sub, false)
+		sess.utf8Checked = len(sub)
 		_, code = sess.Step(sub, true)
 	}
 

@@ -637,7 +637,13 @@ func (s *StreamSession) Step(src string, eof bool) (scanStopReason, ErrorCode) {
 					}
 				}
 
-				end, perr := kernels.ScanNumberStrict(src, pos)
+				var end int
+				var perr types.ParsingError
+				if s.useNumber {
+					end, perr = kernels.ScanNumberStrict(src, pos)
+				} else {
+					end, perr = kernels.ScanNumber(src, pos)
+				}
 				if !eof && (end == len(src) || isValidNumberPrefixToEnd(src, pos)) {
 					return s.finishStep(src, scanStopNeedMore, SONIC_OK)
 				}

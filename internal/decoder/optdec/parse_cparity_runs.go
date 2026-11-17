@@ -170,24 +170,12 @@ func cParityRunsFinishNumber(p *Parser, state *cParityRunsState) ErrorCode {
 	} else {
 		cur, num, code = cParityParseNumberValue(cur, negative, p.dbuf)
 		if code == SONIC_FLOAT_INF && p.deferFloatOverflow {
-			cur = startCur
-			remain := p.end - p.pos
-			if !negative {
-				remain++
+			value := uint64(uintptr(cur) - uintptr(startCur))
+			if negative {
+				value++
 			}
-			length := cParitySkipPositive(&cur, remain)
-			if length < 0 {
-				code = ErrorCode(-length)
-			} else if negative && length == 0 {
-				code = SONIC_INVALID_NUM
-			} else {
-				value := uint64(length)
-				if negative {
-					value++
-				}
-				num = cParityNum{typ: KRawNumber, val: value}
-				code = SONIC_OK
-			}
+			num = cParityNum{typ: KRawNumber, val: value}
+			code = SONIC_OK
 		}
 	}
 	p.pos += int(uintptr(cur) - uintptr(startCur))

@@ -711,6 +711,9 @@ func diffSeedCorpus() []string {
 		`{"name":"invalid-utf8-` + "\xff\xfe" + `"}`,
 		`{"":-}`,
 		`[-]`,
+		`10000000000000000000+`,
+		`1e999+`,
+		"\"\x00\"\x80",
 		`{"id":1} trailing`,
 		`[1, 2, {"a": "b", "c": [true, false, null, -0, 1e-10]}]`,
 	}
