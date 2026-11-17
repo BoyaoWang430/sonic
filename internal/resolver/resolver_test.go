@@ -17,7 +17,12 @@
 package resolver
 
 import (
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +72,37 @@ type Foo struct {
 func TestResolver_ResolveStruct(t *testing.T) {
 	for _, fv := range ResolveStruct(reflect.TypeOf(Foo{})) {
 		println(fv.String())
+	}
+}
+
+func TestResolverHasNoEncoderOrKernelDependency(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	forbidden := []string{
+		"github.com/bytedance/sonic/internal/encoder",
+		"github.com/bytedance/sonic/internal/decoder",
+		"github.com/bytedance/sonic/internal/native",
+		"unsafe",
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			for _, bad := range forbidden {
+				if p == bad || strings.HasPrefix(p, bad+"/") {
+					t.Fatalf("resolver file %s imports forbidden package %q", name, p)
+				}
+			}
+		}
 	}
 }

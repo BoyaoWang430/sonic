@@ -21,9 +21,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	"unsafe"
-
-	"github.com/bytedance/sonic/internal/encoder/alg"
 )
 
 type FieldOpts int
@@ -47,23 +44,12 @@ type Offset struct {
 }
 
 type FieldMeta struct {
-	Name                 string
-	KeyBlob              []byte // explicit []byte owner with trailing 32-byte zero padding
-	KeyOffset            int
-	CommaKeyLen          int
-	HasStructBegin       bool
-	PaddedCommaKey       string // logical "," + Quote(Name) + ":"
-	PaddedStructBeginKey string // logical "," + Quote(Name) + ":{" (when <= 32B)
-	Path                 []Offset
-	Opts                 FieldOpts
-	Type                 reflect.Type
-	IsZero               func(reflect.Value) bool
-	PointerIsZero        bool
-	KeyNeedsSanitize     bool
-}
-
-func (self *FieldMeta) CommaKeyPtr() *byte {
-	return &self.KeyBlob[self.KeyOffset]
+	Name          string
+	Path          []Offset
+	Opts          FieldOpts
+	Type          reflect.Type
+	IsZero        func(reflect.Value) bool
+	PointerIsZero bool
 }
 
 func (self *FieldMeta) String() string {
@@ -197,10 +183,7 @@ func resolveFields(vt reflect.Type) []FieldMeta {
 		fm.Type = fvt
 		fm.Path = path
 		fm.Name = fv.name
-		fm.KeyNeedsSanitize = alg.NeedsSanitize(fm.Name)
 	}
-
-	populateKeyBlob(ret)
 
 	/* optimize the offsets */
 	for i := range ret {
@@ -256,64 +239,5 @@ func handleOmitZero(fv StdField, fm *FieldMeta) {
 		fm.Opts |= F_omitzero
 		fm.IsZero = fv.isZero
 		fm.PointerIsZero = fv.pointerIsZero
-	}
-}
-
-// populateKeyBlob packs all fields' quoted JSON keys (,"name": and ,"name":{)
-// into a single per-struct byte slice owner with a trailing 32-byte zero
-// safety zone so 16/32-byte loads from KeyBlob never cross the slice boundary.
-func populateKeyBlob(ret []FieldMeta) {
-	if len(ret) == 0 {
-		return
-	}
-	est := 32
-	for i := range ret {
-		est += len(ret[i].Name) + 8
-	}
-	blob := make([]byte, 0, est)
-	type keySpan struct {
-		start      int
-		commaLen   int
-		hasStructB bool
-	}
-	var stackSpans [32]keySpan
-	var spans []keySpan
-	if len(ret) <= len(stackSpans) {
-		spans = stackSpans[:len(ret)]
-	} else {
-		spans = make([]keySpan, len(ret))
-	}
-	for i := range ret {
-		fm := &ret[i]
-		start := len(blob)
-		blob = append(blob, ',')
-		blob = alg.Quote(blob, fm.Name, false)
-		blob = append(blob, ':')
-		commaKeyLen := len(blob) - start
-		hasStructB := false
-		if fm.Type.Kind() == reflect.Struct && !fm.KeyNeedsSanitize && commaKeyLen <= 254 {
-			blob = append(blob, '{')
-			hasStructB = true
-		}
-		spans[i] = keySpan{
-			start:      start,
-			commaLen:   commaKeyLen,
-			hasStructB: hasStructB,
-		}
-	}
-	logicalLen := len(blob)
-	var z32 [32]byte
-	blob = append(blob, z32[:]...)
-	blobStr := unsafe.String(unsafe.SliceData(blob), logicalLen)
-	for i := range ret {
-		sp := spans[i]
-		ret[i].KeyBlob = blob
-		ret[i].KeyOffset = sp.start
-		ret[i].CommaKeyLen = sp.commaLen
-		ret[i].HasStructBegin = sp.hasStructB
-		ret[i].PaddedCommaKey = blobStr[sp.start : sp.start+sp.commaLen]
-		if sp.hasStructB {
-			ret[i].PaddedStructBeginKey = blobStr[sp.start : sp.start+sp.commaLen+1]
-		}
 	}
 }

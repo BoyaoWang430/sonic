@@ -589,19 +589,21 @@ func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]i
 	var specs []ir.StructFieldSpec
 	var build func(curType reflect.Type, baseOffset uintptr, curDepth int) bool
 	build = func(curType reflect.Type, baseOffset uintptr, curDepth int) bool {
-		fvs := resolver.ResolveStruct(curType)
+		fvs := resolveEncodedStruct(curType)
 		hasGuaranteedField := false
-		for i, fv := range fvs {
+		for i := range fvs {
+			ef := &fvs[i]
+			fv := ef.meta
 			if fv.Type.Kind() == reflect.Array {
 				if fv.Type.Len() == 0 && (fv.Opts&resolver.F_omitempty) != 0 {
 					continue
 				}
 				return false
 			}
-			if childOffset, ok := self.tryFlattenNestedStruct(&fvs[i], baseOffset, curDepth); ok {
+			if childOffset, ok := self.tryFlattenNestedStruct(ef, baseOffset, curDepth); ok {
 				specs = append(specs, ir.StructFieldSpec{
-					Ptr:         unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset]),
-					KeyLen:      uint8(fv.CommaKeyLen + 1),
+					Ptr:         unsafe.Pointer(ef.commaKeyPtr()),
+					KeyLen:      uint8(ef.commaKeyLen + 1),
 					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 					Kind:        ir.OP_struct_begin,
 				})
@@ -617,7 +619,7 @@ func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]i
 				hasGuaranteedField = true
 				continue
 			}
-			spec, ok := self.tryCompileStructFieldSpec(&fvs[i], baseOffset, hasGuaranteedField, curDepth)
+			spec, ok := self.tryCompileStructFieldSpec(ef, baseOffset, hasGuaranteedField, curDepth)
 			if !ok {
 				return false
 			}
@@ -636,8 +638,9 @@ func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]i
 	return cp, true
 }
 
-func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffset uintptr, hasGuaranteedField bool, depth int) (ir.StructFieldSpec, bool) {
-	if !self.useVM || fv.KeyNeedsSanitize || fv.CommaKeyLen > 255 || len(fv.KeyBlob) == 0 {
+func (self *Compiler) tryCompileStructFieldSpec(ef *encodedField, baseOffset uintptr, hasGuaranteedField bool, depth int) (ir.StructFieldSpec, bool) {
+	fv := ef.meta
+	if !self.useVM || ef.keyNeedsSanitize || ef.commaKeyLen > 255 || len(ef.owner) == 0 {
 		return ir.StructFieldSpec{}, false
 	}
 	if (fv.Opts & resolver.F_omitzero) != 0 {
@@ -657,7 +660,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 	isPtr := false
 	isPtrStruct := false
 	var kind ir.Op
-	specPtr := unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset])
+	specPtr := unsafe.Pointer(ef.commaKeyPtr())
 	if ft.Kind() == reflect.Ptr && (fv.Opts&resolver.F_stringize) == 0 {
 		et := ft.Elem()
 		if !self.tab[et] && !self.isCustomMarshaler(ft, true) && !self.isCustomMarshaler(et, true) {
@@ -678,7 +681,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 				if ok {
 					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
 					specPtr = unsafe.Pointer(&ir.StructPtrSpec{
-						KeyPtr:     &fv.KeyBlob[fv.KeyOffset],
+						KeyPtr:     ef.commaKeyPtr(),
 						Specs:      elemSpecs,
 						DenseSpecs: denseSpecs,
 						IsDense:    isDense,
@@ -788,7 +791,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 					}
 					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
 					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
-						KeyPtr:     &fv.KeyBlob[fv.KeyOffset],
+						KeyPtr:     ef.commaKeyPtr(),
 						SliceType:  ft,
 						ElemSize:   et.Size(),
 						Specs:      elemSpecs,
@@ -807,7 +810,7 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 					}
 					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
 					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
-						KeyPtr:     &fv.KeyBlob[fv.KeyOffset],
+						KeyPtr:     ef.commaKeyPtr(),
 						SliceType:  ft,
 						ElemSize:   et.Size(),
 						Specs:      elemSpecs,
@@ -839,16 +842,17 @@ func (self *Compiler) tryCompileStructFieldSpec(fv *resolver.FieldMeta, baseOffs
 	return ir.StructFieldSpec{
 		Ptr:         specPtr,
 		Offset:      offset,
-		KeyLen:      uint8(fv.CommaKeyLen),
+		KeyLen:      uint8(ef.commaKeyLen),
 		NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 		Kind:        kind,
 		Flags:       flags,
 	}, true
 }
 
-func (self *Compiler) tryFlattenNestedStruct(fv *resolver.FieldMeta, baseOffset uintptr, sp int) (uintptr, bool) {
+func (self *Compiler) tryFlattenNestedStruct(ef *encodedField, baseOffset uintptr, sp int) (uintptr, bool) {
+	fv := ef.meta
 	maxDepth := self.effectiveMaxInlineDepth()
-	if !self.useVM || sp+1 >= maxDepth || !fv.HasStructBegin || len(fv.KeyBlob) == 0 {
+	if !self.useVM || sp+1 >= maxDepth || !ef.hasStructBegin || len(ef.owner) == 0 {
 		return 0, false
 	}
 	ft := fv.Type
@@ -884,10 +888,12 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 
 	var compileFields func(curType reflect.Type, baseOffset uintptr, depth int)
 	compileFields = func(curType reflect.Type, baseOffset uintptr, depth int) {
-		fvs := resolver.ResolveStruct(curType)
+		fvs := resolveEncodedStruct(curType)
 		hasPreviousField := false
 		hasGuaranteedField := false
-		for i, fv := range fvs {
+		for i := range fvs {
+			ef := &fvs[i]
+			fv := ef.meta
 			var s []int
 
 			/* "omitempty" for arrays */
@@ -897,10 +903,10 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 				}
 			}
 
-			if childOffset, ok := self.tryFlattenNestedStruct(&fvs[i], baseOffset, depth); ok {
+			if childOffset, ok := self.tryFlattenNestedStruct(ef, baseOffset, depth); ok {
 				specs = append(specs, ir.StructFieldSpec{
-					Ptr:         unsafe.Pointer(&fv.KeyBlob[fv.KeyOffset]),
-					KeyLen:      uint8(fv.CommaKeyLen + 1),
+					Ptr:         unsafe.Pointer(ef.commaKeyPtr()),
+					KeyLen:      uint8(ef.commaKeyLen + 1),
 					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
 					Kind:        ir.OP_struct_begin,
 				})
@@ -915,7 +921,7 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 				continue
 			}
 
-			if spec, ok := self.tryCompileStructFieldSpec(&fvs[i], baseOffset, hasGuaranteedField, depth); ok {
+			if spec, ok := self.tryCompileStructFieldSpec(ef, baseOffset, hasGuaranteedField, depth); ok {
 				specs = append(specs, spec)
 				hasPreviousField = true
 				if spec.Flags&(ir.SpecFlagOmitEmpty|ir.SpecFlagOmitNil) == 0 {
@@ -956,13 +962,13 @@ func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) 
 			/* check for "omitzero" option */
 			if fv.Opts&resolver.F_omitzero != 0 {
 				s = append(s, p.PC())
-				p.VFieldAddr(ir.OP_is_zero, &fvs[i], fieldCanAddr)
+				p.VFieldAddr(ir.OP_is_zero, fv, fieldCanAddr)
 			}
 
 			/* A non-skippable field guarantees a comma before every later field. */
-			key := fv.PaddedCommaKey[1:]
+			key := ef.paddedCommaKey[1:]
 			if hasGuaranteedField {
-				key = fv.PaddedCommaKey
+				key = ef.paddedCommaKey
 			} else if hasPreviousField || len(s) != 0 {
 				/* Earlier fields may all have been omitted. */
 				j := p.PC()

@@ -3,6 +3,7 @@ package vm
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
@@ -11,12 +12,15 @@ import (
 	"github.com/bytedance/sonic/internal/rt"
 )
 
-// rawSliceHeader mirrors Go's slice header layout so OP_slice_struct /
-// OP_slice_ptr_struct can inspect data pointer and len without reflect.NewAt.
-type rawSliceHeader struct {
-	data unsafe.Pointer
-	len  int
-	cap  int
+// inspectTypedSlice accesses an arbitrary struct/ptr-struct slice field via its
+// exact reflect.Type without mirroring Go's internal slice header layout.
+func inspectTypedSlice(sliceType reflect.Type, fp unsafe.Pointer) (dataPtr unsafe.Pointer, length int, nonNil bool) {
+	rv := reflect.NewAt(sliceType, fp).Elem()
+	length = rv.Len()
+	if length == 0 {
+		return nil, 0, !rv.IsNil()
+	}
+	return rv.UnsafePointer(), length, true
 }
 
 func encodePtrStructBody(buf []byte, subPtr unsafe.Pointer, ptrSpec *ir.StructPtrSpec, s *vars.Stack, flags uint64, sanitize uint64) ([]byte, error) {
@@ -89,12 +93,12 @@ func encodePtrStructCondField(buf []byte, fp unsafe.Pointer, spec *ir.StructFiel
 //go:noinline
 func encodePtrStructSliceDenseField(buf []byte, fp unsafe.Pointer, spec *ir.StructFieldSpec, s *vars.Stack, flags uint64, sanitize uint64) ([]byte, error) {
 	sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
-	sh := *(*rawSliceHeader)(fp)
-	if sh.len == 0 {
-		return appendKeyAndEmptySlice(buf, sliceSpec.KeyPtr, int(spec.KeyLen), sh.data != nil, flags), nil
+	dataPtr, n, nonNil := inspectTypedSlice(sliceSpec.SliceType, fp)
+	if n == 0 {
+		return appendKeyAndEmptySlice(buf, sliceSpec.KeyPtr, int(spec.KeyLen), nonNil, flags), nil
 	}
 	buf = appendPaddedKey(buf, sliceSpec.KeyPtr, int(spec.KeyLen))
-	return encodePtrStructSliceBody(buf, sh.data, sh.len, sliceSpec.Specs, sliceSpec.DenseSpecs, sliceSpec.IsDense, s, flags, sanitize)
+	return encodePtrStructSliceBody(buf, dataPtr, n, sliceSpec.Specs, sliceSpec.DenseSpecs, sliceSpec.IsDense, s, flags, sanitize)
 }
 
 // encodePtrStructSliceCondField encodes a conditional/omittable []*Struct field.
@@ -103,8 +107,8 @@ func encodePtrStructSliceDenseField(buf []byte, fp unsafe.Pointer, spec *ir.Stru
 //go:noinline
 func encodePtrStructSliceCondField(buf []byte, fp unsafe.Pointer, spec *ir.StructFieldSpec, f uint64, sflags uint8, s *vars.Stack, flags uint64, sanitize uint64) ([]byte, uint64, error) {
 	sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
-	sh := *(*rawSliceHeader)(fp)
-	if sh.len == 0 && sflags&ir.SpecFlagOmitEmpty != 0 {
+	dataPtr, n, nonNil := inspectTypedSlice(sliceSpec.SliceType, fp)
+	if n == 0 && sflags&ir.SpecFlagOmitEmpty != 0 {
 		return buf, f, nil
 	}
 	keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
@@ -112,12 +116,12 @@ func encodePtrStructSliceCondField(buf []byte, fp unsafe.Pointer, spec *ir.Struc
 		f &^= 1 << _S_cond
 		keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 	}
-	if sh.len == 0 {
-		return appendKeyAndEmptySlice(buf, keyPtr, keyLen, sh.data != nil, flags), f, nil
+	if n == 0 {
+		return appendKeyAndEmptySlice(buf, keyPtr, keyLen, nonNil, flags), f, nil
 	}
 	buf = appendPaddedKey(buf, keyPtr, keyLen)
 	var err error
-	buf, err = encodePtrStructSliceBody(buf, sh.data, sh.len, sliceSpec.Specs, sliceSpec.DenseSpecs, sliceSpec.IsDense, s, flags, sanitize)
+	buf, err = encodePtrStructSliceBody(buf, dataPtr, n, sliceSpec.Specs, sliceSpec.DenseSpecs, sliceSpec.IsDense, s, flags, sanitize)
 	return buf, f, err
 }
 
@@ -464,17 +468,15 @@ func encodeStructFieldsDense(buf []byte, base unsafe.Pointer, specs []ir.StructF
 			}
 		case ir.OP_slice_struct:
 			sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
-			sh := *(*rawSliceHeader)(fp)
-			n := sh.len
+			dataPtr, n, nonNil := inspectTypedSlice(sliceSpec.SliceType, fp)
 			if n == 0 {
-				buf = appendKeyAndEmptySlice(buf, sliceSpec.KeyPtr, int(spec.KeyLen), sh.data != nil, flags)
+				buf = appendKeyAndEmptySlice(buf, sliceSpec.KeyPtr, int(spec.KeyLen), nonNil, flags)
 				continue
 			}
 			buf = appendPaddedKey(buf, sliceSpec.KeyPtr, int(spec.KeyLen))
 			if !s.EnterDepth(2) {
 				return buf, vars.ERR_too_deep
 			}
-			dataPtr := sh.data
 			startOff := len(buf)
 			buf = append(buf, '[', '{')
 			var err error
@@ -720,17 +722,15 @@ func encodeStructFieldsSanitizedDense(buf []byte, base unsafe.Pointer, specs []i
 			}
 		case ir.OP_slice_struct:
 			sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
-			sh := *(*rawSliceHeader)(fp)
-			n := sh.len
+			dataPtr, n, nonNil := inspectTypedSlice(sliceSpec.SliceType, fp)
 			if n == 0 {
-				buf = appendKeyAndEmptySlice(buf, sliceSpec.KeyPtr, int(spec.KeyLen), sh.data != nil, flags)
+				buf = appendKeyAndEmptySlice(buf, sliceSpec.KeyPtr, int(spec.KeyLen), nonNil, flags)
 				continue
 			}
 			buf = appendPaddedKey(buf, sliceSpec.KeyPtr, int(spec.KeyLen))
 			if !s.EnterDepth(2) {
 				return buf, vars.ERR_too_deep
 			}
-			dataPtr := sh.data
 			startOff := len(buf)
 			buf = append(buf, '[', '{')
 			var err error
@@ -1038,8 +1038,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			}
 		case ir.OP_slice_struct:
 			sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
-			sh := *(*rawSliceHeader)(fp)
-			n := sh.len
+			dataPtr, n, nonNil := inspectTypedSlice(sliceSpec.SliceType, fp)
 			if n == 0 {
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
@@ -1049,7 +1048,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 				}
-				buf = appendKeyAndEmptySlice(buf, keyPtr, keyLen, sh.data != nil, flags)
+				buf = appendKeyAndEmptySlice(buf, keyPtr, keyLen, nonNil, flags)
 				continue
 			}
 			keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
@@ -1061,7 +1060,6 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if !s.EnterDepth(2) {
 				return buf, f, vars.ERR_too_deep
 			}
-			dataPtr := sh.data
 			startOff := len(buf)
 			buf = append(buf, '[', '{')
 			var err error
@@ -1590,8 +1588,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			}
 		case ir.OP_slice_struct:
 			sliceSpec := (*ir.StructSliceSpec)(spec.Ptr)
-			sh := *(*rawSliceHeader)(fp)
-			n := sh.len
+			dataPtr, n, nonNil := inspectTypedSlice(sliceSpec.SliceType, fp)
 			if n == 0 {
 				if sflags&ir.SpecFlagOmitEmpty != 0 {
 					continue
@@ -1601,7 +1598,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 					f &^= 1 << _S_cond
 					keyPtr, keyLen = spec.FirstSliceKey(keyPtr)
 				}
-				buf = appendKeyAndEmptySlice(buf, keyPtr, keyLen, sh.data != nil, flags)
+				buf = appendKeyAndEmptySlice(buf, keyPtr, keyLen, nonNil, flags)
 				continue
 			}
 			keyPtr, keyLen := sliceSpec.KeyPtr, int(spec.KeyLen)
@@ -1613,7 +1610,6 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if !s.EnterDepth(2) {
 				return buf, f, vars.ERR_too_deep
 			}
-			dataPtr := sh.data
 			startOff := len(buf)
 			buf = append(buf, '[', '{')
 			var err error
