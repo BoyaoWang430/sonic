@@ -50,28 +50,14 @@ type backoffProbeStripe struct {
 	_    [60]byte
 }
 
-// schemaProbeStripes and flatProbeStripes shard ~1-in-256 backoff recovery
-// probes across independent 128-entry cache-line-isolated tables. Mixing both
-// the target address and the plan/decoder pointer into the stripe index and
-// advancing by an odd golden-ratio Weyl step (checking the top 8 bits) avoids
-// false sharing, LOCK XADD hot spots, and periodic parity lock when multiple
-// fast paths or struct types alternate on the same target variable.
-var (
-	schemaProbeStripes [128]backoffProbeStripe
-	flatProbeStripes   [128]backoffProbeStripe
-)
+// schemaProbeStripes shards ~1-in-256 backoff recovery probes across a 128-entry
+// cache-line-isolated table.
+var schemaProbeStripes [128]backoffProbeStripe
 
 func hitSchemaBackoffProbe(seed uintptr, plan *projPlan) bool {
 	mixed := (uint64(seed) ^ (uint64(uintptr(unsafe.Pointer(plan))) * 0x517cc1b727220a95)) * 0x9e3779b97f4a7c15
 	idx := mixed >> 57
 	v := atomic.AddUint32(&schemaProbeStripes[idx].tick, probeWeylStep)
-	return (v >> 24) == 0
-}
-
-func hitFlatBackoffProbe(seed uintptr, sd *structDecoder) bool {
-	mixed := (uint64(seed) ^ (uint64(uintptr(unsafe.Pointer(sd))) * 0x517cc1b727220a95)) * 0x9e3779b97f4a7c15
-	idx := mixed >> 57
-	v := atomic.AddUint32(&flatProbeStripes[idx].tick, probeWeylStep)
 	return (v >> 24) == 0
 }
 

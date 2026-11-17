@@ -223,38 +223,21 @@ func newFieldEntry(name string, offset uintptr, ft reflect.Type, dec decFunc) fi
 	return fe
 }
 
-// flatKeyPrefix holds a pre-encoded host-endian byte representation of `name":`
-// (without the opening quote) for fast in-bounds ASCII key comparison up to 14 bytes;
-// longer field names leave n2 == 0 and fall back to exact length/name comparison.
-type flatKeyPrefix struct {
-	w0   uint64
-	w1   uint64
-	mask uint64
-	n2   uint8
-}
-
 type structDecoder struct {
-	fieldMap          *caching.FieldCache
-	fields            []fieldEntry
-	fieldDecs         []decFunc
-	wideOffsets       []uintptr
-	structName        string
-	typ               reflect.Type
-	goType            reflect.Type
-	sliceType         reflect.Type
-	elemSize          uintptr
-	maxPtrBatch       uint16
-	fast              bool
-	flatDirect        bool
-	flatPureASCIIKeys bool
-	noInterface       bool
-	ptrScalarHint     uint8
-	ptrStrHint        uint8
-	flatPtrMask       uint32
-	flatPlan          *flatStructPlan
-	flatKeyPrefixes   []flatKeyPrefix
-	_                 [64]byte
-	flatFailStreak    uint32
+	fieldMap      *caching.FieldCache
+	fields        []fieldEntry
+	fieldDecs     []decFunc
+	wideOffsets   []uintptr
+	structName    string
+	typ           reflect.Type
+	goType        reflect.Type
+	sliceType     reflect.Type
+	elemSize      uintptr
+	maxPtrBatch   uint16
+	fast          bool
+	noInterface   bool
+	ptrScalarHint uint8
+	ptrStrHint    uint8
 }
 
 func (d *structDecoder) allocPtr(p *Parser) unsafe.Pointer {

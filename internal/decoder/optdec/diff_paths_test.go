@@ -70,16 +70,12 @@ var (
 	diffStatsExecs          atomic.Uint64
 	diffStatsSchemaHit      atomic.Uint64
 	diffStatsSchemaFallback atomic.Uint64
-	diffStatsFlatHit        atomic.Uint64
-	diffStatsFlatBailout    atomic.Uint64
 )
 
 func resetDiffPathStats() {
 	diffStatsExecs.Store(0)
 	diffStatsSchemaHit.Store(0)
 	diffStatsSchemaFallback.Store(0)
-	diffStatsFlatHit.Store(0)
-	diffStatsFlatBailout.Store(0)
 }
 
 // hasStdPre127StrconvFloatBug reports whether s contains a >800-byte JSON number
@@ -160,7 +156,7 @@ func decodeViaRunsWithInit[T any](s string, f uint64, initFn func(*T)) (T, error
 	if initFn != nil {
 		initFn(&dst)
 	}
-	etp, vp, dec, _, _, err := unpackAndCompileRoot(&dst)
+	etp, vp, dec, _, err := unpackAndCompileRoot(&dst)
 	if err != nil {
 		return dst, err
 	}
@@ -185,7 +181,7 @@ func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (
 	if initFn != nil {
 		initFn(&dst)
 	}
-	_, vp, dec, proj, _, err := unpackAndCompileRoot(&dst)
+	_, vp, dec, proj, err := unpackAndCompileRoot(&dst)
 	if err != nil {
 		return dst, false, err
 	}
@@ -226,7 +222,7 @@ func decodeViaGiantWithInit[T any](s string, f uint64, initFn func(*T)) (T, erro
 	if initFn != nil {
 		initFn(&dst)
 	}
-	etp, vp, dec, _, _, err := unpackAndCompileRoot(&dst)
+	etp, vp, dec, _, err := unpackAndCompileRoot(&dst)
 	if err != nil {
 		return dst, err
 	}
@@ -320,7 +316,7 @@ func decodeViaStdGenericWithOptsAndInit[T any](s string, f uint64, initFn func(*
 	return dst, nil
 }
 
-func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkStd bool, withFlat bool, initFn func(*T)) {
+func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkStd bool, _ bool, initFn func(*T)) {
 	t.Helper()
 	diffStatsExecs.Add(1)
 
@@ -341,27 +337,6 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 	gotGiant, errGiant := decodeViaGiantWithInit[T](s, f, initFn)
 	gotStream, errStream := decodeViaChunkedStreamWithInit[T](s, f, 7, initFn)
 
-	var gotFlat T
-	var errFlat error
-	okFlat := false
-	if withFlat {
-		if initFn != nil {
-			initFn(&gotFlat)
-		}
-		_, vp, _, _, flatSD, err := unpackAndCompileRoot(&gotFlat)
-		if err != nil || flatSD == nil {
-			t.Fatalf("expected flatSD != nil for %T, err=%v", gotFlat, err)
-		}
-		var endFlat int
-		endFlat, okFlat = tryDecodeFlatStructForced(s, 0, f, unsafe.Pointer(vp), flatSD, false, true)
-		if okFlat {
-			diffStatsFlatHit.Add(1)
-			errFlat = checkSingleDocEnd(s, endFlat, nil)
-		} else {
-			diffStatsFlatBailout.Add(1)
-		}
-	}
-
 	noValSkip := (f & (1 << _F_no_validate_json)) != 0
 	if !noValSkip {
 		if (errRouter != nil) != (errRuns != nil) {
@@ -376,13 +351,10 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 		if (errStream != nil) != (errRuns != nil) {
 			t.Fatalf("%T stream vs runs err mismatch (f=0x%x) on %q:\n  stream=%v\n  runs=%v", gotRuns, f, s, errStream, errRuns)
 		}
-		if okFlat && (errFlat != nil) != (errRuns != nil) {
-			t.Fatalf("%T flat vs runs err mismatch (f=0x%x) on %q:\n  flat=%v\n  runs=%v", gotRuns, f, s, errFlat, errRuns)
-		}
 	} else if errRuns == nil {
-		if errRouter != nil || errSchema != nil || errGiant != nil || errStream != nil || (okFlat && errFlat != nil) {
-			t.Fatalf("%T NoValidateJSON failed on input accepted by runs (f=0x%x) on %q: router=%v schema=%v giant=%v stream=%v flat=%v",
-				gotRuns, f, s, errRouter, errSchema, errGiant, errStream, errFlat)
+		if errRouter != nil || errSchema != nil || errGiant != nil || errStream != nil {
+			t.Fatalf("%T NoValidateJSON failed on input accepted by runs (f=0x%x) on %q: router=%v schema=%v giant=%v stream=%v",
+				gotRuns, f, s, errRouter, errSchema, errGiant, errStream)
 		}
 	}
 
@@ -398,9 +370,6 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 		}
 		if !reflect.DeepEqual(gotStream, gotRuns) {
 			t.Fatalf("%T stream vs runs value mismatch (f=0x%x) on %q:\n  stream=%#v\n  runs=%#v", gotRuns, f, s, gotStream, gotRuns)
-		}
-		if okFlat && !reflect.DeepEqual(gotFlat, gotRuns) {
-			t.Fatalf("%T flat vs runs value mismatch (f=0x%x) on %q:\n  flat=%#v\n  runs=%#v", gotRuns, f, s, gotFlat, gotRuns)
 		}
 	}
 
@@ -684,21 +653,15 @@ func diffSeedCorpus() []string {
 
 func TestSixWayDifferentialCorpus(t *testing.T) {
 	resetDiffPathStats()
-	// Verify forced fast-path hit assertions on canonical eligible input before sweeping corpus.
 	cleanFlat := `{"id":42,"f32":1.0000000596046448,"name":"hit","ptr_int":7,"nums":[1,2]}`
 	var hitTarget diffFlatStruct
-	_, vpHit, _, _, flatSDHit, err := unpackAndCompileRoot(&hitTarget)
-	if err != nil || flatSDHit == nil {
-		t.Fatalf("unpackAndCompileRoot failed: %v", err)
+	if _, end, err := DecodeOne(cleanFlat, diffStdOpts, &hitTarget); checkSingleDocEnd(cleanFlat, end, err) != nil {
+		t.Fatalf("DecodeOne cleanFlat failed: %v", err)
 	}
-	if _, ok := tryDecodeFlatStructForced(cleanFlat, 0, diffStdOpts, vpHit, flatSDHit, false, true); !ok {
-		t.Fatal("expected forced Flat fast path to hit on cleanFlat")
-	}
-	// Disjoint Reuse target must also hit Flat fast path.
 	var reuseHit diffFlatStruct
 	flatInitializerModes()[0](&reuseHit)
-	if _, ok := tryDecodeFlatStructForced(cleanFlat, 0, diffStdOpts, unsafe.Pointer(&reuseHit), flatSDHit, false, true); !ok {
-		t.Fatal("expected forced Flat fast path to hit on disjoint reuse target")
+	if _, end, err := DecodeOne(cleanFlat, diffStdOpts, &reuseHit); checkSingleDocEnd(cleanFlat, end, err) != nil {
+		t.Fatalf("DecodeOne cleanFlat reuse failed: %v", err)
 	}
 	cleanSparse := `{"id":42,"name":"hit","skip_blob":"` + strings.Repeat("b", 400) + `"}`
 	if _, okSchema, err := decodeViaSchemaOrFullWithInit[diffFlatStruct](cleanSparse, diffStdOpts, nil); err != nil || !okSchema {
@@ -755,15 +718,12 @@ func TestSixWayDifferentialCorpus(t *testing.T) {
 		}
 	}
 
-	if diffStatsSchemaHit.Load() == 0 || diffStatsSchemaFallback.Load() == 0 ||
-		diffStatsFlatHit.Load() == 0 || diffStatsFlatBailout.Load() == 0 {
-		t.Fatalf("expected all fast-path hit/fallback counters > 0, got schemaHit=%d schemaFallback=%d flatHit=%d flatBailout=%d",
-			diffStatsSchemaHit.Load(), diffStatsSchemaFallback.Load(),
-			diffStatsFlatHit.Load(), diffStatsFlatBailout.Load())
+	if diffStatsSchemaHit.Load() == 0 || diffStatsSchemaFallback.Load() == 0 {
+		t.Fatalf("expected schema hit/fallback counters > 0, got schemaHit=%d schemaFallback=%d",
+			diffStatsSchemaHit.Load(), diffStatsSchemaFallback.Load())
 	}
-	t.Logf("[corpus-stats] execs=%d schemaHit=%d schemaFallback=%d flatHit=%d flatBailout=%d",
-		diffStatsExecs.Load(), diffStatsSchemaHit.Load(), diffStatsSchemaFallback.Load(),
-		diffStatsFlatHit.Load(), diffStatsFlatBailout.Load())
+	t.Logf("[corpus-stats] execs=%d schemaHit=%d schemaFallback=%d",
+		diffStatsExecs.Load(), diffStatsSchemaHit.Load(), diffStatsSchemaFallback.Load())
 }
 
 func TestExtensionPresetsExplicitContracts(t *testing.T) {
@@ -806,13 +766,11 @@ func FuzzSixWayDifferential(f *testing.F) {
 	resetDiffPathStats()
 	if os.Getenv("SONIC_FUZZ_STATS") == "1" {
 		f.Cleanup(func() {
-			fmt.Fprintf(os.Stderr, "[fuzz-stats pid=%d] execs=%d schemaHit=%d schemaFallback=%d flatHit=%d flatBailout=%d\n",
+			fmt.Fprintf(os.Stderr, "[fuzz-stats pid=%d] execs=%d schemaHit=%d schemaFallback=%d\n",
 				os.Getpid(),
 				diffStatsExecs.Load(),
 				diffStatsSchemaHit.Load(),
-				diffStatsSchemaFallback.Load(),
-				diffStatsFlatHit.Load(),
-				diffStatsFlatBailout.Load())
+				diffStatsSchemaFallback.Load())
 		})
 	}
 	for idx, s := range diffSeedCorpus() {

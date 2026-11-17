@@ -248,7 +248,6 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 		ptrScalarHint: uint8(ptrScalarCount),
 		ptrStrHint:    uint8(ptrStrCount),
 	}
-	sd.initFlatDirect()
 	return sd
 }
 

@@ -9,9 +9,7 @@ import (
 	"math"
 	"reflect"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"unsafe"
 )
 
 func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
@@ -20,21 +18,14 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		A *int `json:"a"`
 		B *int `json:"b"`
 	}
-	_, _, _, _, flatSD, err := unpackAndCompileRoot(&SharedPtrStruct{})
-	if err != nil || flatSD == nil {
-		t.Fatalf("expected flatSD != nil, err=%v", err)
-	}
-	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
-
-	// Zero-init and disjoint pre-populated targets MUST hit Flat fast path.
 	var zeroHit SharedPtrStruct
-	if _, ok := tryDecodeFlatStructForced(`{"b":2,"a":1}`, 0, diffStdOpts, unsafe.Pointer(&zeroHit), flatSD, false, true); !ok {
-		t.Fatal("expected zero-initialized SharedPtrStruct to hit Flat fast path")
+	if _, end, err := DecodeOne(`{"b":2,"a":1}`, diffStdOpts, &zeroHit); checkSingleDocEnd(`{"b":2,"a":1}`, end, err) != nil || *zeroHit.A != 1 || *zeroHit.B != 2 {
+		t.Fatalf("zero-initialized SharedPtrStruct failed: err=%v got=%+v", err, zeroHit)
 	}
 	disjointA, disjointB := 10, 20
 	disjointHit := SharedPtrStruct{A: &disjointA, B: &disjointB}
-	if _, ok := tryDecodeFlatStructForced(`{"b":2,"a":1}`, 0, diffStdOpts, unsafe.Pointer(&disjointHit), flatSD, false, true); !ok {
-		t.Fatal("expected disjoint pre-populated SharedPtrStruct to hit Flat Reuse fast path")
+	if _, end, err := DecodeOne(`{"b":2,"a":1}`, diffStdOpts, &disjointHit); checkSingleDocEnd(`{"b":2,"a":1}`, end, err) != nil || disjointA != 1 || disjointB != 2 {
+		t.Fatalf("disjoint pre-populated SharedPtrStruct failed: err=%v a=%d b=%d", err, disjointA, disjointB)
 	}
 
 	for _, src := range []string{
@@ -43,26 +34,34 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		`{"b":2,"a":null}`,
 		`{"a":null,"b":2}`,
 	} {
-		xForced := 99
-		forcedAlias := SharedPtrStruct{A: &xForced, B: &xForced}
-		if _, ok := tryDecodeFlatStructForced(src, 0, diffStdOpts, unsafe.Pointer(&forcedAlias), flatSD, false, true); ok {
-			t.Fatalf("expected forced Flat alias guard to reject shared pointer on %s", src)
-		}
-		xGot, xStd := 99, 99
+		xGot, xRuns, xSchema, xGiant, xStream, xStd := 99, 99, 99, 99, 99, 99
 		got := SharedPtrStruct{A: &xGot, B: &xGot}
 		want := SharedPtrStruct{A: &xStd, B: &xStd}
 		_, end, errGot := DecodeOne(src, diffStdOpts, &got)
 		errGot = checkSingleDocEnd(src, end, errGot)
+		gotRuns, errRuns := decodeViaRunsWithInit[SharedPtrStruct](src, diffStdOpts, func(d *SharedPtrStruct) { d.A, d.B = &xRuns, &xRuns })
+		gotSchema, _, errSchema := decodeViaSchemaOrFullWithInit[SharedPtrStruct](src, diffStdOpts, func(d *SharedPtrStruct) { d.A, d.B = &xSchema, &xSchema })
+		gotGiant, errGiant := decodeViaGiantWithInit[SharedPtrStruct](src, diffStdOpts, func(d *SharedPtrStruct) { d.A, d.B = &xGiant, &xGiant })
+		gotStream, errStream := decodeViaChunkedStreamWithInit[SharedPtrStruct](src, diffStdOpts, 5, func(d *SharedPtrStruct) { d.A, d.B = &xStream, &xStream })
 		errStd := json.Unmarshal([]byte(src), &want)
-		if (errGot != nil) != (errStd != nil) {
-			t.Fatalf("err mismatch on %s: got=%v std=%v", src, errGot, errStd)
+		if (errGot != nil) != (errStd != nil) || errRuns != nil || errSchema != nil || errGiant != nil || errStream != nil {
+			t.Fatalf("err mismatch on %s: got=%v runs=%v schema=%v giant=%v stream=%v std=%v",
+				src, errGot, errRuns, errSchema, errGiant, errStream, errStd)
 		}
-		if xGot != xStd || (got.A == nil) != (want.A == nil) || (got.B == nil) != (want.B == nil) {
-			t.Fatalf("shared ptr mismatch on %s: xGot=%d xStd=%d got=%+v want=%+v", src, xGot, xStd, got, want)
+		for name, pair := range map[string]struct {
+			x int
+			s SharedPtrStruct
+		}{
+			"router": {xGot, got},
+			"runs":   {xRuns, gotRuns},
+			"schema": {xSchema, gotSchema},
+			"giant":  {xGiant, gotGiant},
+			"stream": {xStream, gotStream},
+		} {
+			if pair.x != xStd || (pair.s.A == nil) != (want.A == nil) || (pair.s.B == nil) != (want.B == nil) {
+				t.Fatalf("%s shared ptr mismatch on %s: x=%d xStd=%d got=%+v want=%+v", name, src, pair.x, xStd, pair.s, want)
+			}
 		}
-	}
-	if streak := atomic.LoadUint32(&flatSD.flatFailStreak); streak != 0 {
-		t.Fatalf("alias guard bailout must not increment flatFailStreak, got %d", streak)
 	}
 
 	// 2. Self-referential pointer into sibling field of same struct.
@@ -70,14 +69,7 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		A *int `json:"a"`
 		B int  `json:"b"`
 	}
-	_, selfFlatSD := mustCompileFlatSD[SelfPtrStruct](t)
-	atomic.StoreUint32(&selfFlatSD.flatFailStreak, 0)
 	for _, src := range []string{`{"b":20,"a":10}`, `{"a":10,"b":20}`} {
-		var forcedSelf SelfPtrStruct
-		forcedSelf.A = &forcedSelf.B
-		if _, ok := tryDecodeFlatStructForced(src, 0, diffStdOpts, unsafe.Pointer(&forcedSelf), selfFlatSD, false, true); ok {
-			t.Fatalf("expected forced Flat alias guard to reject self-referential pointer on %s", src)
-		}
 		var got, want SelfPtrStruct
 		got.B, want.B = 7, 7
 		got.A = &got.B
@@ -93,9 +85,6 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 			t.Fatalf("self ptr mismatch on %s: got.B=%d want.B=%d", src, got.B, want.B)
 		}
 	}
-	if streak := atomic.LoadUint32(&selfFlatSD.flatFailStreak); streak != 0 {
-		t.Fatalf("self-ptr alias bailout incremented flatFailStreak: %d", streak)
-	}
 
 	// 3. Shared backing array across two slice fields + pointer into slice backing array.
 	type SharedSliceStruct struct {
@@ -103,19 +92,12 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		X []int `json:"x"`
 		Y []int `json:"y"`
 	}
-	_, sliceFlatSD := mustCompileFlatSD[SharedSliceStruct](t)
-	atomic.StoreUint32(&sliceFlatSD.flatFailStreak, 0)
 	for _, src := range []string{
 		`{"y":[9,8],"x":[1,2]}`,
 		`{"x":[1,2],"y":[9,8]}`,
 		`{"p":77,"x":[1,2,3]}`,
 		`{"x":[1,2,3],"p":77}`,
 	} {
-		bForced := []int{5, 6, 7, 8}
-		forcedShared := SharedSliceStruct{P: &bForced[1], X: bForced[:2:4], Y: bForced[:2:4]}
-		if _, ok := tryDecodeFlatStructForced(src, 0, diffStdOpts, unsafe.Pointer(&forcedShared), sliceFlatSD, false, true); ok {
-			t.Fatalf("expected forced Flat alias guard to reject overlapping slice/ptr backing on %s", src)
-		}
 		bGot := []int{5, 6, 7, 8}
 		bStd := []int{5, 6, 7, 8}
 		got := SharedSliceStruct{P: &bGot[1], X: bGot[:2:4], Y: bGot[:2:4]}
@@ -130,9 +112,6 @@ func TestFlatPrePopulatedAliasPreservesWriteOrder(t *testing.T) {
 		if !reflect.DeepEqual(bGot, bStd) || !reflect.DeepEqual(got.X, want.X) || !reflect.DeepEqual(got.Y, want.Y) || *got.P != *want.P {
 			t.Fatalf("shared slice/ptr backing mismatch on %s:\n  bGot=%v bStd=%v\n  got=%+v want=%+v", src, bGot, bStd, got, want)
 		}
-	}
-	if streak := atomic.LoadUint32(&sliceFlatSD.flatFailStreak); streak != 0 {
-		t.Fatalf("shared-slice alias bailout incremented flatFailStreak: %d", streak)
 	}
 }
 
@@ -308,25 +287,25 @@ func TestFloat32SingleRoundingAllShapes(t *testing.T) {
 			}
 		}
 
-		// Flat struct (Val, *float32, []float32, [1]float32)
+		// Compact struct (Val, *float32, []float32, [1]float32) via DecodeOne
 		flatDoc := fmt.Sprintf(`{"val":%s,"ptr":%s,"slc":[%s],"arr":[%s]}`, lit, lit, lit, lit)
 		var gotFlat f32FlatOnly
-		_, flatSD := mustCompileFlatSD[f32FlatOnly](t)
-		endFlat, okFlat := tryDecodeFlatStructForced(flatDoc, 0, diffStdOpts, unsafe.Pointer(&gotFlat), flatSD, false, true)
+		_, endFlat, errFlat := DecodeOne(flatDoc, diffStdOpts, &gotFlat)
+		errFlat = checkSingleDocEnd(flatDoc, endFlat, errFlat)
 		if errStd == nil {
-			if !okFlat || endFlat != len(flatDoc) {
-				t.Fatalf("expected flat path to accept %s, okFlat=%v end=%d", lit, okFlat, endFlat)
+			if errFlat != nil {
+				t.Fatalf("expected DecodeOne to accept %s, err=%v", lit, errFlat)
 			}
 			if math.Float32bits(gotFlat.Val) != wantBits ||
 				math.Float32bits(*gotFlat.Ptr) != wantBits ||
 				math.Float32bits(gotFlat.Slc[0]) != wantBits ||
 				math.Float32bits(gotFlat.Arr[0]) != wantBits {
-				t.Fatalf("flat bits mismatch on %s: val=0x%08x ptr=0x%08x slc=0x%08x arr=0x%08x want=0x%08x",
+				t.Fatalf("compact struct bits mismatch on %s: val=0x%08x ptr=0x%08x slc=0x%08x arr=0x%08x want=0x%08x",
 					lit, math.Float32bits(gotFlat.Val), math.Float32bits(*gotFlat.Ptr),
 					math.Float32bits(gotFlat.Slc[0]), math.Float32bits(gotFlat.Arr[0]), wantBits)
 			}
-		} else if okFlat {
-			t.Fatalf("expected flat path to reject overflowing float32 %s", lit)
+		} else if errFlat == nil {
+			t.Fatalf("expected DecodeOne to reject overflowing float32 %s", lit)
 		}
 
 		// Full struct (Val, Ptr, Slc, Arr, Map, ,string) across Schema, Runs, Giant, and Stream
@@ -367,46 +346,14 @@ func TestFlatAndSchemaBackoffIndependentRecovery(t *testing.T) {
 		B string `json:"b"`
 	}
 	var dst InterleavedTarget
-	_, _, _, proj, flatSD, err := unpackAndCompileRoot(&dst)
-	if err != nil || proj == nil || flatSD == nil {
-		t.Fatalf("expected both proj and flatSD, err=%v proj=%v flatSD=%v", err, proj, flatSD)
+	_, _, _, proj, err := unpackAndCompileRoot(&dst)
+	if err != nil || proj == nil {
+		t.Fatalf("expected non-nil proj, err=%v proj=%v", err, proj)
 	}
-
-	// Force both Flat and Schema into backoff simultaneously on the exact same &dst address.
-	atomic.StoreUint32(&flatSD.flatFailStreak, flatBackoffThreshold)
-	atomic.StoreUint32(&proj.denseStreak, 4)
 
 	cleanSparse := `{"a":1,"b":"ok","skip":"` + strings.Repeat("s", 400) + `"}`
-	flatRecovered := false
-	schemaRecovered := false
-
-	// Alternate calls on the same &dst: first check Flat (which if still backed off
-	// would let DecodeOne try Schema on the exact same &dst in lockstep!).
-	for i := 0; i < 512 && (!flatRecovered || !schemaRecovered); i++ {
-		// Interleave both probes on &dst in the same iteration (the exact parity-lock scenario).
-		if !flatRecovered {
-			if _, ok := tryDecodeFlatStruct(cleanSparse, 0, diffStdOpts, unsafe.Pointer(&dst), flatSD, false, true); ok {
-				if atomic.LoadUint32(&flatSD.flatFailStreak) == 0 {
-					flatRecovered = true
-				}
-			}
-		}
-		if !schemaRecovered {
-			if proj.shouldUseSeededOpts(len(cleanSparse), diffStdOpts, uintptr(unsafe.Pointer(&dst))) {
-				p := newParserLazy(cleanSparse, 0, diffStdOpts)
-				ok, _ := parseSchemaRoot(p, proj)
-				p.free()
-				if ok && atomic.LoadUint32(&proj.denseStreak) == 0 {
-					schemaRecovered = true
-				}
-			}
-		}
-	}
-
-	if !flatRecovered || !schemaRecovered {
-		t.Fatalf("backoff failed to recover within 512 interleaved calls: flatRecovered=%v (streak=%d) schemaRecovered=%v (streak=%d)",
-			flatRecovered, atomic.LoadUint32(&flatSD.flatFailStreak),
-			schemaRecovered, atomic.LoadUint32(&proj.denseStreak))
+	if _, end, err := DecodeOne(cleanSparse, diffStdOpts, &dst); checkSingleDocEnd(cleanSparse, end, err) != nil || dst.A != 1 || dst.B != "ok" {
+		t.Fatalf("DecodeOne cleanSparse failed: err=%v dst=%+v", err, dst)
 	}
 
 	// Verify specific review case: 1.0000000596046448 exact bits check
@@ -416,16 +363,6 @@ func TestFlatAndSchemaBackoffIndependentRecovery(t *testing.T) {
 		t.Fatalf("expected 0x3f800001, got 0x%08x (err=%v)", math.Float32bits(f), err)
 	}
 	_ = bytes.Equal
-}
-
-func mustCompileFlatSD[T any](t *testing.T) (T, *structDecoder) {
-	t.Helper()
-	var zero T
-	_, _, _, _, flatSD, err := unpackAndCompileRoot(&zero)
-	if err != nil || flatSD == nil {
-		t.Fatalf("expected flatSD for %T, err=%v", zero, err)
-	}
-	return zero, flatSD
 }
 
 type siblingMutatorHook struct {

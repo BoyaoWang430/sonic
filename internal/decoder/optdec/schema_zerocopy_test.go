@@ -57,12 +57,9 @@ func TestSchemaProjBytesFieldZeroFallback(t *testing.T) {
 	}
 
 	var probe bytesEnvelope
-	_, _, _, proj, flatSD, err := unpackAndCompileRoot(&probe)
+	_, _, _, proj, err := unpackAndCompileRoot(&probe)
 	if err != nil {
 		t.Fatalf("unpackAndCompileRoot failed: %v", err)
-	}
-	if flatSD != nil {
-		t.Fatalf("bytesEnvelope must not be flatSD, got %+v", flatSD)
 	}
 	if proj == nil {
 		t.Fatalf("expected non-nil projPlan for bytesEnvelope")
@@ -101,49 +98,6 @@ func TestSchemaProjBytesFieldZeroFallback(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("case %d mismatch: got %+v, want %+v", idx, got, want)
 		}
-	}
-}
-
-func TestFlatStructAdaptiveBackoff(t *testing.T) {
-	type backoffFlat struct {
-		ID   int64  `json:"id"`
-		Name string `json:"name"`
-		Note string `json:"note"`
-	}
-
-	var dst backoffFlat
-	_, _, _, _, flatSD, err := unpackAndCompileRoot(&dst)
-	if err != nil || flatSD == nil {
-		t.Fatalf("expected flatSD for backoffFlat, err=%v", err)
-	}
-	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
-
-	escapedJSON := `{"id":7,"name":"hello\nworld","note":"line1\tline2"}`
-	for i := 0; i < int(flatBackoffThreshold)+2; i++ {
-		if _, _, err := DecodeOne(escapedJSON, 0, &dst); err != nil {
-			t.Fatalf("iter %d DecodeOne failed: %v", i, err)
-		}
-		if dst.Name != "hello\nworld" {
-			t.Fatalf("iter %d unexpected dst.Name=%q", i, dst.Name)
-		}
-	}
-	streak := atomic.LoadUint32(&flatSD.flatFailStreak)
-	if streak < flatBackoffThreshold {
-		t.Fatalf("expected flatFailStreak >= %d after repeated escaped failures, got %d", flatBackoffThreshold, streak)
-	}
-
-	// Clean inputs should eventually hit the ~1-in-256 Weyl probe (worst-case gap <= 377) and reset flatFailStreak to 0.
-	cleanJSON := `{"id":99,"name":"plain-ascii","note":"ok"}`
-	for i := 0; i < 400; i++ {
-		if _, _, err := DecodeOne(cleanJSON, 0, &dst); err != nil {
-			t.Fatalf("clean iter %d failed: %v", i, err)
-		}
-		if atomic.LoadUint32(&flatSD.flatFailStreak) == 0 {
-			break
-		}
-	}
-	if gotStreak := atomic.LoadUint32(&flatSD.flatFailStreak); gotStreak != 0 {
-		t.Fatalf("expected flatFailStreak to reset to 0 after probe success, got %d", gotStreak)
 	}
 }
 
@@ -310,12 +264,8 @@ func TestFlatStructExtendedTypesAndNested(t *testing.T) {
 	}
 
 	var probe extendedFlat
-	_, _, _, _, flatSD, err := unpackAndCompileRoot(&probe)
-	if err != nil {
+	if _, _, _, _, err := unpackAndCompileRoot(&probe); err != nil {
 		t.Fatalf("unpackAndCompileRoot failed: %v", err)
-	}
-	if flatSD == nil || !flatSD.flatDirect || flatSD.flatPlan == nil {
-		t.Fatalf("expected extendedFlat to compile with flatDirect + flatPlan, got flatSD=%+v", flatSD)
 	}
 
 	bigVal := strings.Repeat("B", 1500)
@@ -376,7 +326,7 @@ func TestFlatStructExtendedTypesAndNested(t *testing.T) {
 		t.Fatalf("expected non-nulled pre-existing pointer to be reused in place, keepPointee=%d", keepPointee)
 	}
 
-	// Verify syntax error after staging pointer & nested fields leaves pre-populated struct 100% untouched.
+	// Verify syntax error leaves pre-populated struct 100% untouched.
 	untouchedVal := int64(555)
 	guardDst := extendedFlat{
 		I8:   12,
@@ -386,17 +336,16 @@ func TestFlatStructExtendedTypesAndNested(t *testing.T) {
 			Name: "keep-author",
 		},
 	}
-	_, ok := tryDecodeFlatStruct(`{"i8":99,"pi64":null,"author":{"id":1,"name":"mutated"}, broken}`, 0, 0, unsafe.Pointer(&guardDst), flatSD, false, true)
-	if ok {
-		t.Fatalf("expected tryDecodeFlatStruct to return false on syntax error")
+	if _, _, err := DecodeOne(`{"i8":99,"pi64":null,"author":{"id":1,"name":"mutated"}, broken}`, 0, &guardDst); err == nil {
+		t.Fatalf("expected DecodeOne to return error on syntax error")
 	}
 	if guardDst.I8 != 12 || guardDst.PI64 != &untouchedVal || untouchedVal != 555 || guardDst.Author.ID != 888 || guardDst.Author.Name != "keep-author" {
-		t.Fatalf("speculative bailout mutated target: %+v", guardDst)
+		t.Fatalf("syntax error mutated target: %+v", guardDst)
 	}
 }
 
 func decodeOneFullCopyForBench(s string, f uint64, val interface{}) error {
-	etp, vp, dec, _, _, err := unpackAndCompileRoot(val)
+	etp, vp, dec, _, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return err
 	}
@@ -410,7 +359,7 @@ func decodeOneFullCopyForBench(s string, f uint64, val interface{}) error {
 }
 
 func decodeOneForceZeroCopyForBench(s string, f uint64, val interface{}) error {
-	_, vp, dec, proj, _, err := unpackAndCompileRoot(val)
+	_, vp, dec, proj, err := unpackAndCompileRoot(val)
 	if err != nil {
 		return err
 	}
@@ -712,7 +661,7 @@ func BenchmarkDecoder_Binding_ShouldUseCalibration(b *testing.B) {
 			b.SetBytes(int64(len(js)))
 			b.ReportAllocs()
 			dst := newDst()
-			if _, _, _, proj, _, err := unpackAndCompileRoot(dst); err == nil && proj != nil {
+			if _, _, _, proj, err := unpackAndCompileRoot(dst); err == nil && proj != nil {
 				atomic.StoreUint32(&proj.denseStreak, 0)
 			}
 			for w := 0; w < 4; w++ {
@@ -777,12 +726,9 @@ func TestSchemaProjDenseStreakRecovery(t *testing.T) {
 		S29, S30, S31, S32, S33, S34, S35, S36           string
 	}
 	var dst wideBounded36
-	_, _, _, proj, flatSD, err := unpackAndCompileRoot(&dst)
+	_, _, _, proj, err := unpackAndCompileRoot(&dst)
 	if err != nil {
 		t.Fatalf("unpackAndCompileRoot: %v", err)
-	}
-	if flatSD != nil {
-		t.Fatalf("expected wideBounded36 (>32 fields) not to use flatDirect")
 	}
 	if proj == nil || !proj.isBounded || proj.totalFields != 36 {
 		t.Fatalf("unexpected projPlan: %+v", proj)
@@ -851,16 +797,13 @@ func TestFlatStructPreNullPointeeSemantics(t *testing.T) {
 		Child nestedPtrChild `json:"child"`
 	}
 
-	// Verify both structs use flatDirect (root path and nested plan path respectively).
 	var r0 rootOnlyPtr
-	_, _, _, _, flatRoot, err := unpackAndCompileRoot(&r0)
-	if err != nil || flatRoot == nil || !flatRoot.flatDirect || flatRoot.flatPlan != nil {
-		t.Fatalf("expected rootOnlyPtr to use flatDirect root path, got %+v (err=%v)", flatRoot, err)
+	if _, _, _, _, err := unpackAndCompileRoot(&r0); err != nil {
+		t.Fatalf("unpackAndCompileRoot rootOnlyPtr: %v", err)
 	}
 	var n0 nestedPlanPtr
-	_, _, _, _, flatPlanSD, err := unpackAndCompileRoot(&n0)
-	if err != nil || flatPlanSD == nil || !flatPlanSD.flatDirect || flatPlanSD.flatPlan == nil {
-		t.Fatalf("expected nestedPlanPtr to use flatDirect plan path, got %+v (err=%v)", flatPlanSD, err)
+	if _, _, _, _, err := unpackAndCompileRoot(&n0); err != nil {
+		t.Fatalf("unpackAndCompileRoot nestedPlanPtr: %v", err)
 	}
 
 	rootCases := []string{
@@ -914,14 +857,14 @@ func TestFlatStructPreNullPointeeSemantics(t *testing.T) {
 		}
 	}
 
-	// Verify syntax error after {"p": 1, "p": null, ...} leaves pre-existing pointee 100% untouched on bailout.
+	// Verify syntax error after {"p": 1, "p": null, ...} leaves pre-existing pointee 100% untouched.
 	guardInt := int64(555)
 	guard := rootOnlyPtr{P: &guardInt}
-	if _, ok := tryDecodeFlatStruct(`{"p":1,"p":null, broken}`, 0, 0, unsafe.Pointer(&guard), flatRoot, false, true); ok {
-		t.Fatalf("expected tryDecodeFlatStruct to fail on syntax error")
+	if _, _, err := DecodeOne(`{"p":1,"p":null, broken}`, 0, &guard); err == nil {
+		t.Fatalf("expected DecodeOne to fail on syntax error")
 	}
 	if guard.P != &guardInt || guardInt != 555 {
-		t.Fatalf("preNull bailout mutated guard: P=%v guardInt=%d", guard.P, guardInt)
+		t.Fatalf("syntax error mutated guard: P=%v guardInt=%d", guard.P, guardInt)
 	}
 }
 
@@ -947,12 +890,9 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 	}
 
 	var c concreteTapeStruct
-	_, _, decConcrete, _, flatConcrete, err := unpackAndCompileRoot(&c)
+	_, _, decConcrete, _, err := unpackAndCompileRoot(&c)
 	if err != nil {
 		t.Fatalf("unpackAndCompileRoot concrete: %v", err)
-	}
-	if flatConcrete != nil {
-		t.Fatalf("expected concreteTapeStruct (has slice) not to use flatDirect")
 	}
 	sdConcrete := decConcrete.(*structDecoder)
 	if !sdConcrete.fast || !sdConcrete.noInterface {
@@ -960,7 +900,7 @@ func TestFromObjFastUseNumberAndUseInt64(t *testing.T) {
 	}
 
 	var o outerWithNestedAny
-	_, _, decAny, _, _, err := unpackAndCompileRoot(&o)
+	_, _, decAny, _, err := unpackAndCompileRoot(&o)
 	if err != nil {
 		t.Fatalf("unpackAndCompileRoot any: %v", err)
 	}
@@ -1127,12 +1067,12 @@ func TestNoValidateJSONSkipOptdec(t *testing.T) {
 		Payload []byte   `json:"payload"`
 	}
 	var probe projTarget
-	_, _, _, proj, flatSD, err := unpackAndCompileRoot(&probe)
+	_, _, _, proj, err := unpackAndCompileRoot(&probe)
 	if err != nil {
 		t.Fatalf("unpackAndCompileRoot failed: %v", err)
 	}
-	if flatSD != nil || proj == nil {
-		t.Fatalf("expected proj != nil and flatSD == nil, got flatSD=%v proj=%v", flatSD, proj)
+	if proj == nil {
+		t.Fatalf("expected proj != nil, got nil")
 	}
 	schemaJSON := fmt.Sprintf(`{"id":55,"tags":["t1","t2"],"audit":%s%q%s,"long_note":%q,"name":"schema-ok"}`,
 		deepOpen, longStr, deepClose, longStr)
@@ -1211,12 +1151,8 @@ func TestFlatContainersComprehensive(t *testing.T) {
 		Auth []author  `json:"authors"`
 	}
 	var c0 containerAll
-	_, _, _, _, flatSD, err := unpackAndCompileRoot(&c0)
-	if err != nil {
+	if _, _, _, _, err := unpackAndCompileRoot(&c0); err != nil {
 		t.Fatalf("unpackAndCompileRoot containerAll: %v", err)
-	}
-	if flatSD == nil || flatSD.flatPlan == nil || !flatSD.flatPlan.hasContainers {
-		t.Fatalf("expected containerAll to use flatPlan with hasContainers=true, got flatSD=%v", flatSD)
 	}
 
 	// 1. Decode all scalar slices, strings (CopyString + zero-copy), fixed arrays, and flat []Struct.
@@ -1250,9 +1186,6 @@ func TestFlatContainersComprehensive(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotCopy, want1) || !math.Signbit(gotCopy.F64[1]) {
 		t.Fatalf("unexpected containerAll decode:\ngot:  %+v\nwant: %+v", gotCopy, want1)
-	}
-	if flatSD.flatFailStreak != 0 {
-		t.Fatalf("expected flatFailStreak=0, got %d", flatSD.flatFailStreak)
 	}
 
 	// CopyString must detach backing memory from bMut, whereas zero-copy borrows.
@@ -1366,32 +1299,29 @@ func TestFlatContainersComprehensive(t *testing.T) {
 	if _, _, err := DecodeOne(`{"authors":[`+auth17+`]}`, 0, &gotBig); err != nil || len(gotBig.Auth) != 17 || gotBig.Auth[16].Name != "last" {
 		t.Fatalf("expected fallback success on 17 authors, got err=%v len=%d", err, len(gotBig.Auth))
 	}
-	// Scalar slices & arrays containing null elements stay on flatContainer direct fast path without fallback.
-	flatSD.flatFailStreak = 0
+	// Scalar slices & arrays containing null elements decode accurately.
 	var gotNullElem containerAll
 	nullElemJSON := `{"i64":[1,null,3],"s":["a",null,"c"],"b":[true,null],"f64":[1.5,null],"arri":[10,null,30],"arrs":[null,"mid"]}`
 	if _, _, err := DecodeOne(nullElemJSON, 1<<_F_copy_string, &gotNullElem); err != nil ||
-		flatSD.flatFailStreak != 0 ||
 		!reflect.DeepEqual(gotNullElem.I64, []int64{1, 0, 3}) ||
 		!reflect.DeepEqual(gotNullElem.S, []string{"a", "", "c"}) ||
 		!reflect.DeepEqual(gotNullElem.B, []bool{true, false}) ||
 		!reflect.DeepEqual(gotNullElem.F64, []float64{1.5, 0}) ||
 		gotNullElem.ArrI != [4]int32{10, 0, 30, 0} ||
 		gotNullElem.ArrS != [3]string{"", "mid", ""} {
-		t.Fatalf("unexpected direct null-element decode (streak=%d): %+v", flatSD.flatFailStreak, gotNullElem)
+		t.Fatalf("unexpected null-element decode (err=%v): %+v", err, gotNullElem)
 	}
-	// Escaped string in slice falls back cleanly.
+	// Escaped string in slice decodes cleanly.
 	var gotEsc containerAll
 	if _, _, err := DecodeOne(`{"s":["a\nb"]}`, 0, &gotEsc); err != nil || !reflect.DeepEqual(gotEsc.S, []string{"a\nb"}) {
-		t.Fatalf("expected escaped slice string fallback, got err=%v vals=%#v", err, gotEsc.S)
+		t.Fatalf("expected escaped slice string decode, got err=%v vals=%#v", err, gotEsc.S)
 	}
-	// Overflow and syntax errors must return error cleanly and must NOT mutate caller struct during direct bailout.
-	badInputs := []string{
-		`{"s":["mutated"],"i32":[2147483648]}`,
+	// Overflow and syntax errors: syntax errors leave caller struct untouched; range overflow matches encoding/json sequential materialization.
+	syntaxBadInputs := []string{
 		`{"s":["mutated"],"i64":[1,2],"arri":[9],}`,
 		`{"s":["mutated"],"authors":[{"name":"x"}],"i64":[1,2] bad}`,
 	}
-	for _, bad := range badInputs {
+	for _, bad := range syntaxBadInputs {
 		cp := containerAll{
 			I64:  append([]int64(nil), sentinel.I64...),
 			S:    append([]string(nil), sentinel.S...),
@@ -1399,32 +1329,43 @@ func TestFlatContainersComprehensive(t *testing.T) {
 			Auth: append([]author(nil), sentinel.Auth...),
 		}
 		if _, _, err := DecodeOne(bad, 0, &cp); err == nil {
-			t.Fatalf("expected error on %s", bad)
-		}
-	}
-	// Verify tryDecodeFlatContainerPlanBody itself leaves vp untouched on overflow, syntax errors, and trailing invalid UTF-8.
-	badWithTrailingUTF8 := []string{
-		`{"s":["mutated"],"i32":[2147483648]}`,
-		`{"s":["mutated"],"i64":[1,2],"arri":[9],}`,
-		`{"s":["mutated"],"authors":[{"name":"x"}],"i64":[1,2] bad}`,
-		"{\"s\":[\"mutated\"]} \xff",
-	}
-	for _, bad := range badWithTrailingUTF8 {
-		cp := containerAll{
-			I64:  append([]int64(nil), sentinel.I64...),
-			S:    append([]string(nil), sentinel.S...),
-			ArrI: sentinel.ArrI,
-			Auth: append([]author(nil), sentinel.Auth...),
-		}
-		if _, ok := tryDecodeFlatContainerPlanBody(bad, 0, len(bad), 1<<_F_validate_string, unsafe.Pointer(&cp), flatSD.flatPlan, false, true); ok {
-			t.Fatalf("expected direct bailout on %q", bad)
+			t.Fatalf("expected syntax error on %s", bad)
 		}
 		if !reflect.DeepEqual(cp, sentinel) {
-			t.Fatalf("direct bailout mutated caller struct on %q:\ngot:  %+v\nwant: %+v", bad, cp, sentinel)
+			t.Fatalf("syntax error mutated caller struct on %q:\ngot:  %+v\nwant: %+v", bad, cp, sentinel)
 		}
 	}
+	overflowInput := `{"s":["mutated"],"i32":[2147483648]}`
+	cpGot := containerAll{
+		I64:  append([]int64(nil), sentinel.I64...),
+		S:    append([]string(nil), sentinel.S...),
+		ArrI: sentinel.ArrI,
+		Auth: append([]author(nil), sentinel.Auth...),
+	}
+	cpStd := containerAll{
+		I64:  append([]int64(nil), sentinel.I64...),
+		S:    append([]string(nil), sentinel.S...),
+		ArrI: sentinel.ArrI,
+		Auth: append([]author(nil), sentinel.Auth...),
+	}
+	_, _, errGotOvf := DecodeOne(overflowInput, 1<<_F_copy_string, &cpGot)
+	errStdOvf := json.Unmarshal([]byte(overflowInput), &cpStd)
+	if errGotOvf == nil || errStdOvf == nil || !reflect.DeepEqual(cpGot, cpStd) {
+		t.Fatalf("overflow state mismatch vs stdlib: errGot=%v errStd=%v\ngot: %+v\nstd: %+v", errGotOvf, errStdOvf, cpGot, cpStd)
+	}
+	trailingBadUTF8 := "{\"s\":[\"mutated\"]} \xff"
+	cpTrail := containerAll{
+		I64:  append([]int64(nil), sentinel.I64...),
+		S:    append([]string(nil), sentinel.S...),
+		ArrI: sentinel.ArrI,
+		Auth: append([]author(nil), sentinel.Auth...),
+	}
+	sTrail, endTrail, errTrail := DecodeOne(trailingBadUTF8, 1<<_F_validate_string, &cpTrail)
+	if checkSingleDocEnd(sTrail, endTrail, errTrail) == nil {
+		t.Fatalf("expected trailing invalid UTF-8 check failure on %q", trailingBadUTF8)
+	}
 
-	// 5. Verify benchBook layout hits flatDirect + hasContainers with 0 fallback.
+	// 5. Verify benchBook layout decodes cleanly.
 	type benchAuthor struct {
 		Name string `json:"name"`
 		Age  int    `json:"age"`
@@ -1443,22 +1384,13 @@ func TestFlatContainersComprehensive(t *testing.T) {
 		Authors []benchAuthor `json:"authors"`
 		Weights []int64       `json:"weights"`
 	}
-	var b0 benchBook
-	_, _, _, _, bookSD, err := unpackAndCompileRoot(&b0)
-	if err != nil {
-		t.Fatalf("unpackAndCompileRoot benchBook: %v", err)
-	}
-	if bookSD == nil || bookSD.flatPlan == nil || !bookSD.flatPlan.hasContainers {
-		t.Fatalf("expected benchBook to use flatPlan with hasContainers=true, got bookSD=%v", bookSD)
-	}
 	bookJSON := `{"book_id":123,"book_ids":[1,2,3],"title":"Go Programming","titles":["a","b"],"price":49.5,"prices":[1.1,2.2],"hot":true,"hots":[true,false],"author":{"name":"Alice","age":30,"male":false},"authors":[{"name":"Bob","age":25,"male":true}],"weights":[10,20,30]}`
-	bookSD.flatFailStreak = 0
 	var gotBook benchBook
 	if _, _, err := DecodeOne(bookJSON, 1<<_F_copy_string, &gotBook); err != nil {
 		t.Fatalf("DecodeOne benchBook: %v", err)
 	}
-	if bookSD.flatFailStreak != 0 || gotBook.BookId != 123 || len(gotBook.Authors) != 1 || gotBook.Authors[0].Name != "Bob" {
-		t.Fatalf("unexpected benchBook result (streak=%d): %+v", bookSD.flatFailStreak, gotBook)
+	if gotBook.BookId != 123 || len(gotBook.Authors) != 1 || gotBook.Authors[0].Name != "Bob" {
+		t.Fatalf("unexpected benchBook result: %+v", gotBook)
 	}
 }
 
@@ -1485,14 +1417,12 @@ func TestFlatContainersSliceAndNullParity(t *testing.T) {
 	}
 
 	var b0 containerBase
-	_, _, _, _, fastSD, err := unpackAndCompileRoot(&b0)
-	if err != nil || fastSD == nil || fastSD.flatPlan == nil || !fastSD.flatPlan.hasContainers {
-		t.Fatalf("expected containerBase to use flatContainerPlan, err=%v sd=%v", err, fastSD)
+	if _, _, _, _, err := unpackAndCompileRoot(&b0); err != nil {
+		t.Fatalf("unpackAndCompileRoot containerBase: %v", err)
 	}
 	var t0 containerTapeOnly
-	_, _, _, _, tapeFlatSD, err := unpackAndCompileRoot(&t0)
-	if err != nil || tapeFlatSD != nil {
-		t.Fatalf("expected containerTapeOnly not to use flatDirect, err=%v sd=%v", err, tapeFlatSD)
+	if _, _, _, _, err := unpackAndCompileRoot(&t0); err != nil {
+		t.Fatalf("unpackAndCompileRoot containerTapeOnly: %v", err)
 	}
 
 	type prefillAliases struct {
@@ -1608,39 +1538,26 @@ func TestFlatContainersSliceAndNullParity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, opts := range []uint64{0, 1 << _F_copy_string} {
 				fast := makePrefilled(tc.initLen, tc.initCap)
-				fastDirectOnly := makePrefilled(tc.initLen, tc.initCap)
 				tape := makePrefilled(tc.initLen, tc.initCap)
 				stdlib := makePrefilled(tc.initLen, tc.initCap)
 
-				// 1. Direct tryDecodeFlatContainerPlanBody must succeed without fallback.
-				if endPos, ok := tryDecodeFlatContainerPlanBody(tc.input, 0, len(tc.input), opts, unsafe.Pointer(&fastDirectOnly.base), fastSD.flatPlan, false, true); !ok || endPos != len(tc.input) {
-					t.Fatalf("opts=%#x tryDecodeFlatContainerPlanBody failed (ok=%v end=%d/%d)", opts, ok, endPos, len(tc.input))
-				}
-
-				// 2. Full DecodeOne (fast path).
-				fastSD.flatFailStreak = 0
+				// 1. DecodeOne into containerBase.
 				if _, _, err := DecodeOne(tc.input, opts, &fast.base); err != nil {
 					t.Fatalf("opts=%#x DecodeOne fast: %v", opts, err)
 				}
-				if fastSD.flatFailStreak != 0 {
-					t.Fatalf("opts=%#x expected 0 fallback streak, got %d", opts, fastSD.flatFailStreak)
-				}
 
-				// 3. optdec Tape FromDom path.
+				// 2. DecodeOne into containerTapeOnly (embedded struct + map).
 				tapeDst := containerTapeOnly{containerBase: tape.base}
 				if _, _, err := DecodeOne(tc.input, opts, &tapeDst); err != nil {
 					t.Fatalf("opts=%#x DecodeOne tape: %v", opts, err)
 				}
 				tape.base = tapeDst.containerBase
 
-				// 4. encoding/json.
+				// 3. encoding/json.
 				if err := json.Unmarshal([]byte(tc.input), &stdlib.base); err != nil {
 					t.Fatalf("encoding/json: %v", err)
 				}
 
-				if !reflect.DeepEqual(fastDirectOnly.base, stdlib.base) {
-					t.Fatalf("opts=%#x direct vs stdlib mismatch:\ndirect: %#v\nstdlib: %#v", opts, fastDirectOnly.base, stdlib.base)
-				}
 				if !reflect.DeepEqual(fast.base, tape.base) || !reflect.DeepEqual(fast.base, stdlib.base) {
 					t.Fatalf("opts=%#x fast vs tape vs stdlib mismatch:\nfast:   %#v\ntape:   %#v\nstdlib: %#v", opts, fast.base, tape.base, stdlib.base)
 				}
@@ -1690,76 +1607,43 @@ func TestFlatLongFieldKeyFastMatchParity(t *testing.T) {
 		ForceTape map[string]int `json:"_force_tape"`
 	}
 
-	var r0 longRoot
-	_, _, _, _, rSD, err := unpackAndCompileRoot(&r0)
-	if err != nil || rSD == nil || !rSD.flatDirect || !rSD.flatPureASCIIKeys || len(rSD.flatKeyPrefixes) != 5 {
-		t.Fatalf("unexpected longRoot flat decoder: %+v err=%v", rSD, err)
-	}
-	if rSD.flatKeyPrefixes[1].n2 != 16 || rSD.flatKeyPrefixes[2].n2 != 0 || rSD.flatKeyPrefixes[3].n2 != 0 {
-		t.Fatalf("unexpected prefix lengths: %+v", rSD.flatKeyPrefixes)
-	}
-	var n0 longNested
-	_, _, _, _, nSD, err := unpackAndCompileRoot(&n0)
-	if err != nil || nSD == nil || !nSD.flatDirect || nSD.flatPlan == nil {
-		t.Fatalf("unexpected longNested flat decoder: %+v err=%v", nSD, err)
-	}
-	var c0 longContainer
-	_, _, _, _, cSD, err := unpackAndCompileRoot(&c0)
-	if err != nil || cSD == nil || !cSD.flatDirect || cSD.flatPlan == nil || !cSD.flatPlan.hasContainers {
-		t.Fatalf("unexpected longContainer flat decoder: %+v err=%v", cSD, err)
-	}
-
 	rootInputs := []string{
 		`{"id":7,"exact_14_bytes":"fourteen_chars","exact_15_bytess":15,"created_at_timestamp":1700000001,"user_display_name":"Alice"}`,
 		`{"id":8,"created_at_timestamz":999,"created_at_timestamp" : 1700000002,"user_display_name":"Bob","exact_15_bytess":16,"exact_14_bytes":"ok"}`,
 	}
 	for _, js := range rootInputs {
 		for _, opts := range []uint64{0, 1 << _F_copy_string, uint64(consts.OptionCaseSensitive)} {
-			var gotDirect, gotFull, want longRoot
-			if endPos, ok := tryDecodeFlatStruct(js, 0, opts, unsafe.Pointer(&gotDirect), rSD, false, true); !ok || endPos != len(js) {
-				t.Fatalf("tryDecodeFlatStruct(%s, %#x) failed ok=%v end=%d/%d", js, opts, ok, endPos, len(js))
-			}
-			rSD.flatFailStreak = 0
+			var gotFull, want longRoot
 			if _, _, err := DecodeOne(js, opts, &gotFull); err != nil {
 				t.Fatalf("DecodeOne root(%s, %#x): %v", js, opts, err)
-			}
-			if rSD.flatFailStreak != 0 {
-				t.Fatalf("expected 0 fallback streak, got %d", rSD.flatFailStreak)
 			}
 			if err := json.Unmarshal([]byte(js), &want); err != nil {
 				t.Fatalf("stdlib: %v", err)
 			}
-			if gotDirect != want || gotFull != want {
-				t.Fatalf("root mismatch opts=%#x:\ndirect: %+v\nfull:   %+v\nwant:   %+v", opts, gotDirect, gotFull, want)
+			if gotFull != want {
+				t.Fatalf("root mismatch opts=%#x:\nfull: %+v\nwant: %+v", opts, gotFull, want)
 			}
 		}
 	}
 
 	nestedJS := `{"created_at_timestamp":123,"nested_long_child_struct":{"id":9,"exact_14_bytes":"14","exact_15_bytess":15,"created_at_timestamp":456,"user_display_name":"Nested"}}`
-	var nDirect, nWant longNested
-	if endPos, ok := tryDecodeFlatStruct(nestedJS, 0, 1<<_F_copy_string, unsafe.Pointer(&nDirect), nSD, false, true); !ok || endPos != len(nestedJS) {
-		t.Fatalf("tryDecodeFlatStruct nested failed ok=%v end=%d/%d", ok, endPos, len(nestedJS))
+	var nGot, nWant longNested
+	if _, _, err := DecodeOne(nestedJS, 1<<_F_copy_string, &nGot); err != nil {
+		t.Fatalf("DecodeOne nested failed: %v", err)
 	}
 	if err := json.Unmarshal([]byte(nestedJS), &nWant); err != nil {
 		t.Fatalf("stdlib nested: %v", err)
 	}
-	if nDirect != nWant {
-		t.Fatalf("nested mismatch:\ngot:  %+v\nwant: %+v", nDirect, nWant)
+	if nGot != nWant {
+		t.Fatalf("nested mismatch:\ngot:  %+v\nwant: %+v", nGot, nWant)
 	}
 
 	contJS := `{"created_at_timestamp":10,"subscriber_account_ids":[1,2,3],"detailed_audit_items":[{"user_display_name":"U1","created_at_timestamp":101},{"created_at_timestamp":102,"user_display_name":"U2"}]}`
 	for _, opts := range []uint64{0, 1 << _F_copy_string, uint64(consts.OptionCaseSensitive) | (1 << _F_copy_string)} {
-		var cDirect, cFull, cWant longContainer
+		var cFull, cWant longContainer
 		var cTape longContainerTapeOnly
-		if endPos, ok := tryDecodeFlatStruct(contJS, 0, opts, unsafe.Pointer(&cDirect), cSD, false, true); !ok || endPos != len(contJS) {
-			t.Fatalf("tryDecodeFlatStruct container opts=%#x failed ok=%v end=%d/%d", opts, ok, endPos, len(contJS))
-		}
-		cSD.flatFailStreak = 0
 		if _, _, err := DecodeOne(contJS, opts, &cFull); err != nil {
 			t.Fatalf("DecodeOne container opts=%#x: %v", opts, err)
-		}
-		if cSD.flatFailStreak != 0 {
-			t.Fatalf("container expected 0 fallback streak, got %d", cSD.flatFailStreak)
 		}
 		if _, _, err := DecodeOne(contJS, opts, &cTape); err != nil {
 			t.Fatalf("DecodeOne tape opts=%#x: %v", opts, err)
@@ -1767,9 +1651,9 @@ func TestFlatLongFieldKeyFastMatchParity(t *testing.T) {
 		if err := json.Unmarshal([]byte(contJS), &cWant); err != nil {
 			t.Fatalf("stdlib container: %v", err)
 		}
-		if !reflect.DeepEqual(cDirect, cWant) || !reflect.DeepEqual(cFull, cWant) || !reflect.DeepEqual(cTape.longContainer, cWant) {
-			t.Fatalf("container mismatch opts=%#x:\ndirect: %+v\nfull:   %+v\ntape:   %+v\nwant:   %+v",
-				opts, cDirect, cFull, cTape.longContainer, cWant)
+		if !reflect.DeepEqual(cFull, cWant) || !reflect.DeepEqual(cTape.longContainer, cWant) {
+			t.Fatalf("container mismatch opts=%#x:\nfull: %+v\ntape: %+v\nwant: %+v",
+				opts, cFull, cTape.longContainer, cWant)
 		}
 	}
 }
@@ -1845,26 +1729,12 @@ func TestFlatDirectStreamingOver1MiBBuffer(t *testing.T) {
 		ID   int64  `json:"id"`
 		Name string `json:"name"`
 	}
+	const oneMiB = 1 << 20
 	line := `{"id":42,"name":"ndjson-record"}` + "\n"
-	reps := (flatMaxInputLen / len(line)) + 128
+	reps := (oneMiB / len(line)) + 128
 	stream := strings.Repeat(line, reps)
-	if len(stream) <= flatMaxInputLen {
-		t.Fatalf("expected stream > %d bytes, got %d", flatMaxInputLen, len(stream))
-	}
-
-	var item streamItem
-	_, vp, _, _, flatSD, err := unpackAndCompileRoot(&item)
-	if err != nil || flatSD == nil {
-		t.Fatalf("expected flatSD for streamItem, err=%v", err)
-	}
-	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
-
-	nextPos, ok := tryDecodeFlatStruct(stream, 0, 0, vp, flatSD, false, false)
-	if !ok || nextPos != len(line)-1 {
-		t.Fatalf("tryDecodeFlatStruct at stream start: ok=%v nextPos=%d want=%d", ok, nextPos, len(line)-1)
-	}
-	if item.ID != 42 || item.Name != "ndjson-record" {
-		t.Fatalf("unexpected decoded item: %+v", item)
+	if len(stream) <= oneMiB {
+		t.Fatalf("expected stream > %d bytes, got %d", oneMiB, len(stream))
 	}
 
 	// Verify DecodeWithSession advances cleanly across multiple records in a >1MiB stream.
@@ -1887,25 +1757,16 @@ func TestFlatDirect20DigitUint64(t *testing.T) {
 		Arr []uint64 `json:"arr"`
 	}
 	var dst u64Holder
-	_, vp, _, _, flatSD, err := unpackAndCompileRoot(&dst)
-	if err != nil || flatSD == nil {
-		t.Fatalf("expected flatSD for u64Holder, err=%v", err)
-	}
-	atomic.StoreUint32(&flatSD.flatFailStreak, 0)
-
 	doc := `{"v":18446744073709551615,"arr":[10000000000000000000,18446744073709551615]}`
-	endPos, ok := tryDecodeFlatStruct(doc, 0, 0, vp, flatSD, false, true)
-	if !ok || endPos != len(doc) {
-		t.Fatalf("expected 20-digit uint64 to stay on flat path, ok=%v endPos=%d", ok, endPos)
+	_, endPos, err := DecodeOne(doc, 0, &dst)
+	if err != nil || endPos != len(doc) {
+		t.Fatalf("expected 20-digit uint64 to decode cleanly, err=%v endPos=%d", err, endPos)
 	}
 	if dst.V != math.MaxUint64 || len(dst.Arr) != 2 || dst.Arr[0] != 10000000000000000000 || dst.Arr[1] != math.MaxUint64 {
 		t.Fatalf("unexpected decoded u64Holder: %+v", dst)
 	}
 
 	overflowDoc := `{"v":18446744073709551616}`
-	if _, ok := tryDecodeFlatStruct(overflowDoc, 0, 0, vp, flatSD, false, true); ok {
-		t.Fatalf("expected uint64 overflow to bail from flat path")
-	}
 	var out u64Holder
 	if _, _, err := DecodeOne(overflowDoc, 0, &out); err == nil {
 		t.Fatalf("expected DecodeOne error on uint64 overflow")
