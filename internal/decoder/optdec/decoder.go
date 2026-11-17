@@ -49,7 +49,7 @@ type rootPtrInfo struct {
 }
 
 var (
-	rootPtrCache      = caching.CreateProgramCache()
+	rootPtrCache      = caching.CreateTypedCache[*rootPtrInfo]()
 	efaceRootDec      = &efaceDecoder{}
 	mapEfaceRootDec   = &mapEfaceDecoder{}
 	sliceEfaceRootDec = &sliceEfaceDecoder{}
@@ -120,8 +120,7 @@ func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer,
 
 	rv := reflect.ValueOf(val)
 	vt := rv.Type()
-	if cached := rootPtrCache.Get(vt); cached != nil {
-		info := cached.(*rootPtrInfo)
+	if info, ok := rootPtrCache.Get(vt); ok {
 		vp = rv.UnsafePointer()
 		if vp == nil {
 			return nil, nil, nil, nil, &json.InvalidUnmarshalError{Type: vt}
@@ -155,9 +154,9 @@ func unpackAndCompileRoot(val interface{}) (etp reflect.Type, vp unsafe.Pointer,
 		return nil, nil, nil, nil, err
 	}
 	proj = compileProjPlan(dec)
-	rootPtrCache.PutMany([]caching.ProgramBatchItem{{
+	rootPtrCache.PutMany([]caching.TypedBatchItem[*rootPtrInfo]{{
 		Vt: vt,
-		Fn: &rootPtrInfo{
+		Val: &rootPtrInfo{
 			etp:     etp,
 			dec:     dec,
 			proj:    proj,
@@ -369,8 +368,8 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 }
 
 func ResetProgramCache() {
-	programCache.Reset()
-	rootPtrCache.Reset()
+	programCache.ResetForDiagnostic()
+	rootPtrCache.ResetForDiagnostic()
 }
 
 func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
@@ -378,7 +377,7 @@ func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 		return nil
 	}
 	seen := make(map[reflect.Type]struct{}, len(vtm))
-	var batch []caching.ProgramBatchItem
+	var batch []caching.TypedBatchItem[decFunc]
 	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
 		next := make(map[reflect.Type]bool)
 		for vt := range vtm {
@@ -386,7 +385,7 @@ func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 				continue
 			}
 			seen[vt] = struct{}{}
-			if programCache.Get(vt) != nil {
+			if _, ok := programCache.Get(vt); ok {
 				continue
 			}
 			compiler := newCompiler().apply(opts)
@@ -394,7 +393,7 @@ func pretouchRec(vtm map[reflect.Type]bool, opts option.CompileOptions) error {
 			if err != nil {
 				return err
 			}
-			batch = append(batch, caching.ProgramBatchItem{Vt: vt, Fn: f})
+			batch = append(batch, caching.TypedBatchItem[decFunc]{Vt: vt, Val: f})
 			for svt := range compiler.visited {
 				next[svt] = true
 			}

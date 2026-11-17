@@ -26,13 +26,8 @@ type projPlan struct {
 	kind           projKind
 	hasRawSubtree  bool
 	isBounded      bool
-	allASCIIKeys   bool
-	hasLongKey     bool
 	totalFields    int
 	maxStructWidth int
-	keyLenMask     uint64
-	firstLo        uint64
-	firstHi        uint64
 	sd             *structDecoder
 	elem           *projPlan
 	fields         []*projPlan
@@ -56,14 +51,6 @@ func compileProjPlan(dec decFunc) *projPlan {
 		return nil
 	}
 	return plan
-}
-
-func addKeyFirstByteBit(lo, hi *uint64, ch byte) {
-	if ch < 64 {
-		*lo |= uint64(1) << uint(ch)
-	} else if ch < 128 {
-		*hi |= uint64(1) << uint(ch-64)
-	}
 }
 
 func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int) *projPlan {
@@ -116,34 +103,9 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 		fplans := make([]*projPlan, n)
 		hasRaw := false
 		bounded := true
-		allASCII := true
-		hasLong := false
-		var lenMask, fLo, fHi uint64
 		total := n
 		maxW := n
 		for i := 0; i < n; i++ {
-			name := d.fields[i].name
-			if len(name) >= 64 {
-				hasLong = true
-			} else {
-				lenMask |= uint64(1) << uint(len(name))
-			}
-			for j := 0; j < len(name); j++ {
-				if name[j] >= 0x80 {
-					allASCII = false
-					break
-				}
-			}
-			if len(name) > 0 && name[0] < 0x80 {
-				b := name[0]
-				addKeyFirstByteBit(&fLo, &fHi, b)
-				if b >= 'A' && b <= 'Z' {
-					addKeyFirstByteBit(&fLo, &fHi, b|0x20)
-				} else if b >= 'a' && b <= 'z' {
-					addKeyFirstByteBit(&fLo, &fHi, b&^0x20)
-				}
-			}
-
 			fp := buildProjPlan(d.fieldDecs[i], visited, depth+1)
 			fplans[i] = fp
 			if fp.hasRawSubtree {
@@ -163,13 +125,8 @@ func buildProjPlan(dec decFunc, visited map[*structDecoder]*projPlan, depth int)
 			kind:           projStruct,
 			hasRawSubtree:  hasRaw,
 			isBounded:      bounded,
-			allASCIIKeys:   allASCII,
-			hasLongKey:     hasLong,
 			totalFields:    total,
 			maxStructWidth: maxW,
-			keyLenMask:     lenMask,
-			firstLo:        fLo,
-			firstHi:        fHi,
 			sd:             d,
 			fields:         fplans,
 		}

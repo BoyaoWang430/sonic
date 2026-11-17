@@ -12,21 +12,15 @@ import (
 )
 
 var (
-	programCache = caching.CreateProgramCache()
+	programCache = caching.CreateTypedCache[decFunc]()
 )
 
+func compileDefaultDecoder(vt reflect.Type) (decFunc, error) {
+	return newCompiler().compileType(vt)
+}
+
 func findOrCompile(vt reflect.Type) (decFunc, error) {
-	makeDecoder := func(vt reflect.Type, _ ...interface{}) (interface{}, error) {
-		ret, err := newCompiler().compileType(vt)
-		return ret, err
-	}
-	if val := programCache.Get(vt); val != nil {
-		return val.(decFunc), nil
-	} else if ret, err := programCache.Compute(vt, makeDecoder); err == nil {
-		return ret.(decFunc), nil
-	} else {
-		return nil, err
-	}
+	return programCache.FindOrCompute(vt, compileDefaultDecoder)
 }
 
 type compiler struct {

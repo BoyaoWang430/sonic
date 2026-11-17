@@ -52,7 +52,7 @@ func (d *structDecoder) fromObjFast(vp unsafe.Pointer, objPtr *node, jsonStr str
 				idx = expectedIdx
 				expectedIdx++
 			} else {
-				idx = d.fieldMap.GetInsensitive(key)
+				idx = d.fieldMap.Get(key, false)
 				if idx == -1 {
 					continue
 				}

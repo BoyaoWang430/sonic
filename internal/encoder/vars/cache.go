@@ -31,7 +31,6 @@ type Encoder func(
 	fv uint64,
 ) error
 
-var legacyOmitNullMarker = new(byte)
 var hasAnyLegacyOmitNull atomic.Bool
 
 func init() {
@@ -51,13 +50,6 @@ func cacheForMode(pv, omitNull bool) *caching.ProgramCache {
 		return programCachePV
 	}
 	return programCache
-}
-
-func rootCacheForMode(omitNull bool) *caching.ProgramCache {
-	if omitNull {
-		return rootEncCacheOmitNull
-	}
-	return rootEncCache
 }
 
 func FindOrCompile(vt reflect.Type, pv bool, compiler func(reflect.Type, ...interface{}) (interface{}, error)) (interface{}, error) {
@@ -99,22 +91,6 @@ func PutProgramsMode(items []caching.ProgramBatchItem, pv, omitNull bool) {
 	cacheForMode(pv, omitNull).PutMany(items)
 }
 
-func GetRootPlan(vt reflect.Type) interface{} {
-	return GetRootPlanMode(vt, false)
-}
-
-func GetRootPlanMode(vt reflect.Type, omitNull bool) interface{} {
-	return rootCacheForMode(omitNull).Get(vt)
-}
-
-func ComputeRootPlan(vt reflect.Type, compute func(reflect.Type, ...interface{}) (interface{}, error)) (interface{}, error) {
-	return ComputeRootPlanMode(vt, false, compute)
-}
-
-func ComputeRootPlanMode(vt reflect.Type, omitNull bool, compute func(reflect.Type, ...interface{}) (interface{}, error)) (interface{}, error) {
-	return rootCacheForMode(omitNull).Compute(vt, compute, omitNull)
-}
-
 // RegisterLegacyOmitNullType records explicit root types passed to deprecated
 // Pretouch(..., WithCompileEncOnlyOmitNull(true)) without polluting unrelated
 // shared nested types or default-mode plans.
@@ -122,13 +98,13 @@ func RegisterLegacyOmitNullType(vt reflect.Type) {
 	if vt == nil {
 		return
 	}
-	items := []caching.ProgramBatchItem{
-		{Vt: vt, Fn: legacyOmitNullMarker},
+	items := []caching.TypedBatchItem[bool]{
+		{Vt: vt, Val: true},
 	}
 	if vt.Kind() == reflect.Ptr {
-		items = append(items, caching.ProgramBatchItem{Vt: vt.Elem(), Fn: legacyOmitNullMarker})
+		items = append(items, caching.TypedBatchItem[bool]{Vt: vt.Elem(), Val: true})
 	} else {
-		items = append(items, caching.ProgramBatchItem{Vt: reflect.PtrTo(vt), Fn: legacyOmitNullMarker})
+		items = append(items, caching.TypedBatchItem[bool]{Vt: reflect.PtrTo(vt), Val: true})
 	}
 	legacyOmitNullTypes.PutMany(items)
 	hasAnyLegacyOmitNull.Store(true)
@@ -138,5 +114,6 @@ func HasLegacyOmitNull(vt reflect.Type) bool {
 	if !hasAnyLegacyOmitNull.Load() || vt == nil {
 		return false
 	}
-	return legacyOmitNullTypes.Get(vt) != nil
+	v, ok := legacyOmitNullTypes.Get(vt)
+	return ok && v
 }

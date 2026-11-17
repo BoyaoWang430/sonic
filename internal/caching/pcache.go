@@ -352,3 +352,73 @@ func (self *ProgramCache) PutMany(items []ProgramBatchItem) {
 	self.hasStaging.Store(false)
 	self.m.Unlock()
 }
+
+// TypedBatchItem pairs a reflect.Type key with a strongly typed immutable plan.
+type TypedBatchItem[V any] struct {
+	Vt  reflect.Type
+	Val V
+}
+
+// TypedCache encapsulates ProgramCache behind a strongly typed read-only plan
+// interface so upper layers do not perform interface assertions or depend on
+// staging/singleflight internals.
+//
+// Invariants:
+//   - Distinct types compile concurrently outside the cache mutex.
+//   - Concurrent lookups for the same uncompiled type deduplicate via per-type
+//     singleflight; panics release waiters cleanly so callers never deadlock.
+//   - Recursive compilation of nested types inside compute may safely re-enter
+//     FindOrCompute for distinct nested types without lock contention.
+//   - Diagnostic/test cache resets are isolated via ResetForDiagnostic (epoch
+//     fencing prevents stale in-flight compilations from publishing across resets).
+type TypedCache[V any] struct {
+	raw ProgramCache
+}
+
+func CreateTypedCache[V any]() *TypedCache[V] {
+	tc := &TypedCache[V]{}
+	tc.raw.p.Store(newProgramMap())
+	return tc
+}
+
+func (tc *TypedCache[V]) Get(vt reflect.Type) (V, bool) {
+	if rawVal := tc.raw.Get(vt); rawVal != nil {
+		return rawVal.(V), true
+	}
+	var zero V
+	return zero, false
+}
+
+func (tc *TypedCache[V]) FindOrCompute(vt reflect.Type, compute func(reflect.Type) (V, error)) (V, error) {
+	if v, ok := tc.Get(vt); ok {
+		return v, nil
+	}
+	rawVal, err := tc.raw.Compute(vt, func(t reflect.Type, _ ...interface{}) (interface{}, error) {
+		return compute(t)
+	})
+	if err != nil {
+		var zero V
+		return zero, err
+	}
+	return rawVal.(V), nil
+}
+
+func (tc *TypedCache[V]) PutMany(items []TypedBatchItem[V]) {
+	if len(items) == 0 {
+		return
+	}
+	rawItems := make([]ProgramBatchItem, len(items))
+	for i := range items {
+		rawItems[i] = ProgramBatchItem{
+			Vt: items[i].Vt,
+			Fn: items[i].Val,
+		}
+	}
+	tc.raw.PutMany(rawItems)
+}
+
+// ResetForDiagnostic clears cached plans and bumps the compilation epoch for
+// test/diagnostic hooks without exposing internal staging state to production paths.
+func (tc *TypedCache[V]) ResetForDiagnostic() {
+	tc.raw.Reset()
+}

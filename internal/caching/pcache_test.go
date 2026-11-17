@@ -332,3 +332,70 @@ func BenchmarkPcacheWarmGet(b *testing.B) {
 		}
 	}
 }
+
+func TestTypedCachePanicAndRecursiveSafety(t *testing.T) {
+	type leaf struct{ X int }
+	type outer struct{ L leaf }
+	leafType := reflect.TypeOf(leaf{})
+	outerType := reflect.TypeOf(outer{})
+
+	tc := CreateTypedCache[string]()
+
+	// 1. Recursive sub-type compilation inside FindOrCompute does not deadlock.
+	got, err := tc.FindOrCompute(outerType, func(vt reflect.Type) (string, error) {
+		sub, serr := tc.FindOrCompute(leafType, func(st reflect.Type) (string, error) {
+			return "plan:" + st.Name(), nil
+		})
+		if serr != nil {
+			return "", serr
+		}
+		return "outer(" + sub + ")", nil
+	})
+	if err != nil || got != "outer(plan:leaf)" {
+		t.Fatalf("unexpected recursive FindOrCompute result: %q, %v", got, err)
+	}
+
+	// 2. A panicking compilation releases concurrent singleflight waiters cleanly.
+	tc.ResetForDiagnostic()
+	var attempt atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	doneWaiter := make(chan string, 1)
+
+	go func() {
+		defer func() { _ = recover() }()
+		_, _ = tc.FindOrCompute(outerType, func(vt reflect.Type) (string, error) {
+			if attempt.Add(1) == 1 {
+				close(entered)
+				<-release
+				panic("synthetic compile panic")
+			}
+			return "recovered", nil
+		})
+	}()
+
+	<-entered
+	go func() {
+		v, werr := tc.FindOrCompute(outerType, func(vt reflect.Type) (string, error) {
+			attempt.Add(1)
+			return "recovered", nil
+		})
+		if werr != nil {
+			t.Errorf("waiter unexpected err: %v", werr)
+			return
+		}
+		doneWaiter <- v
+	}()
+
+	time.Sleep(5 * time.Millisecond)
+	close(release)
+
+	select {
+	case v := <-doneWaiter:
+		if v != "recovered" {
+			t.Fatalf("waiter got %q, want recovered", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter deadlocked after leader panic")
+	}
+}

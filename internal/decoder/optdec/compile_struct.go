@@ -138,7 +138,7 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 		return dec
 	}
 	if c.depth > 1 && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth {
-		if val := programCache.Get(vt); val != nil {
+		if val, ok := programCache.Get(vt); ok {
 			if sd, ok := val.(*structDecoder); ok {
 				c.compiled[vt] = sd
 				return sd

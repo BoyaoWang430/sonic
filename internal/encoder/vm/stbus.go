@@ -24,6 +24,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/encoder/ir"
 	"github.com/bytedance/sonic/internal/encoder/prim"
@@ -31,7 +32,18 @@ import (
 	"github.com/bytedance/sonic/internal/rt"
 )
 
-var compiler func(reflect.Type, ...interface{}) (interface{}, error)
+var (
+	compiler            func(reflect.Type, ...interface{}) (interface{}, error)
+	rootPlanCache       = caching.CreateTypedCache[*rootEncPlan]()
+	rootPlanCacheOmitNl = caching.CreateTypedCache[*rootEncPlan]()
+)
+
+func init() {
+	vars.RegisterCacheReset(func() {
+		rootPlanCache.ResetForDiagnostic()
+		rootPlanCacheOmitNl.ResetForDiagnostic()
+	})
+}
 
 func SetCompiler(c func(reflect.Type, ...interface{}) (interface{}, error)) {
 	compiler = c
@@ -241,11 +253,15 @@ func newValueBoxPool(vt reflect.Type) *sync.Pool {
 	}
 }
 
-func buildRootEncPlan(vt reflect.Type, ex ...interface{}) (interface{}, error) {
-	omitNull := false
-	if len(ex) > 0 {
-		omitNull = ex[0].(bool)
-	}
+func buildRootEncPlanDefault(vt reflect.Type) (*rootEncPlan, error) {
+	return buildRootEncPlanForMode(vt, false)
+}
+
+func buildRootEncPlanOmitNull(vt reflect.Type) (*rootEncPlan, error) {
+	return buildRootEncPlanForMode(vt, true)
+}
+
+func buildRootEncPlanForMode(vt reflect.Type, omitNull bool) (*rootEncPlan, error) {
 	pp, err := vars.FindOrCompileMode(vt, false, omitNull, compiler)
 	if err != nil {
 		return nil, err
@@ -596,15 +612,9 @@ func getOrBuildRootPlan(vt reflect.Type, fv *uint64) (*rootEncPlan, error) {
 	omitNull := (*fv&(1<<alg.BitOnlyOmitNull)) != 0 || vars.HasLegacyOmitNull(vt)
 	if omitNull {
 		*fv |= 1 << alg.BitOnlyOmitNull
+		return rootPlanCacheOmitNl.FindOrCompute(vt, buildRootEncPlanOmitNull)
 	}
-	if cached := vars.GetRootPlanMode(vt, omitNull); cached != nil {
-		return cached.(*rootEncPlan), nil
-	}
-	computed, err := vars.ComputeRootPlanMode(vt, omitNull, buildRootEncPlan)
-	if err != nil {
-		return nil, err
-	}
-	return computed.(*rootEncPlan), nil
+	return rootPlanCache.FindOrCompute(vt, buildRootEncPlanDefault)
 }
 
 func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *vars.Stack, fv uint64) error {

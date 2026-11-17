@@ -18,8 +18,6 @@ package caching
 
 import (
 	"strings"
-	"sync/atomic"
-	"unsafe"
 
 	"github.com/bytedance/sonic/internal/resolver"
 )
@@ -32,22 +30,31 @@ type fieldCacheEntry struct {
 	idxPlus1 int32
 }
 
-type foldedCache struct {
+// FieldCache is a read-only struct field lookup index constructed once during
+// plan compilation. Both exact and case-folded lookup tables are populated
+// eagerly in NewFieldCache so published plans perform zero runtime mutations.
+type FieldCache struct {
+	exact           []fieldCacheEntry
 	folded          []fieldCacheEntry
 	caseInsensitive map[string]int
+	mask            uint32
+	lenMask         uint64
+	foldFirst0      uint64
+	foldFirst1      uint64
+	foldLast0       uint64
+	foldLast1       uint64
+	allASCII        bool
 }
 
-type FieldCache struct {
-	exact      []fieldCacheEntry
-	mask       uint32
-	numFields  uint32
-	lenMask    uint64
-	foldFirst0 uint64
-	foldFirst1 uint64
-	foldLast0  uint64
-	foldLast1  uint64
-	allASCII   bool
-	foldedPtr  atomic.Pointer[foldedCache]
+func readU32LE(s string, off int) uint32 {
+	_ = s[off+3]
+	return uint32(s[off]) | uint32(s[off+1])<<8 | uint32(s[off+2])<<16 | uint32(s[off+3])<<24
+}
+
+func readU64LE(s string, off int) uint64 {
+	_ = s[off+7]
+	return uint64(s[off]) | uint64(s[off+1])<<8 | uint64(s[off+2])<<16 | uint64(s[off+3])<<24 |
+		uint64(s[off+4])<<32 | uint64(s[off+5])<<40 | uint64(s[off+6])<<48 | uint64(s[off+7])<<56
 }
 
 //go:nosplit
@@ -58,9 +65,8 @@ func strSig(s string) (n, lo, hi uint32) {
 		return
 	}
 	if l >= 4 {
-		p := unsafe.Pointer(unsafe.StringData(s))
-		lo = *(*uint32)(p)
-		hi = *(*uint32)(unsafe.Add(p, l-4))
+		lo = readU32LE(s, 0)
+		hi = readU32LE(s, l-4)
 		return
 	}
 	b0 := uint32(s[0])
@@ -99,16 +105,15 @@ func foldASCII8(w uint64) uint64 {
 
 func isPureASCII(s string) bool {
 	l := len(s)
-	p := unsafe.Pointer(unsafe.StringData(s))
 	off := 0
 	for off+8 <= l {
-		if *(*uint64)(unsafe.Add(p, off))&0x8080808080808080 != 0 {
+		if readU64LE(s, off)&0x8080808080808080 != 0 {
 			return false
 		}
 		off += 8
 	}
 	for off < l {
-		if *(*uint8)(unsafe.Add(p, off)) >= 0x80 {
+		if s[off] >= 0x80 {
 			return false
 		}
 		off++
@@ -121,17 +126,16 @@ func equalMiddle(a, b string, n uint32) bool {
 	if n <= 8 {
 		return true
 	}
-	pa := unsafe.Pointer(unsafe.StringData(a))
-	pb := unsafe.Pointer(unsafe.StringData(b))
 	if n <= 12 {
-		return *(*uint32)(unsafe.Add(pa, 4)) == *(*uint32)(unsafe.Add(pb, 4))
+		return readU32LE(a, 4) == readU32LE(b, 4)
 	}
 	if n <= 16 {
-		return *(*uint64)(unsafe.Add(pa, 4)) == *(*uint64)(unsafe.Add(pb, 4))
+		return readU64LE(a, 4) == readU64LE(b, 4)
 	}
 	if n <= 24 {
-		return *(*uint64)(unsafe.Add(pa, 4)) == *(*uint64)(unsafe.Add(pb, 4)) &&
-			*(*uint64)(unsafe.Add(pa, uintptr(n)-12)) == *(*uint64)(unsafe.Add(pb, uintptr(n)-12))
+		last := int(n) - 12
+		return readU64LE(a, 4) == readU64LE(b, 4) &&
+			readU64LE(a, last) == readU64LE(b, last)
 	}
 	return a == b
 }
@@ -143,21 +147,38 @@ func foldASCIIByte(b byte) byte {
 	return b
 }
 
+// NewFieldCache constructs an immutable FieldCache with both exact and
+// case-folded indices eagerly built. Exact matches take priority over folded
+// matches, and folded collisions resolve to the earliest field in fields.
 func NewFieldCache(fields []resolver.FieldMeta) *FieldCache {
 	if len(fields) == 0 {
 		return &FieldCache{allASCII: true}
 	}
-	cap := uint32(8)
-	for cap < uint32(len(fields))*4 {
-		cap <<= 1
+	tableCap := uint32(8)
+	for tableCap < uint32(len(fields))*4 {
+		tableCap <<= 1
 	}
-	mask := cap - 1
+	mask := tableCap - 1
 	f := &FieldCache{
-		exact:     make([]fieldCacheEntry, cap),
-		mask:      mask,
-		numFields: uint32(fieldsLen(fields)),
-		allASCII:  true,
+		exact:           make([]fieldCacheEntry, tableCap),
+		folded:          make([]fieldCacheEntry, tableCap),
+		caseInsensitive: make(map[string]int, len(fields)),
+		mask:            mask,
+		allASCII:        true,
 	}
+
+	// Track canonical exact winners first (in case fields ever repeats an exact name,
+	// matching exact-table overwrite semantics before building folded entries).
+	canonical := make([]bool, len(fields))
+	exactSeen := make(map[string]int, len(fields))
+	for i, field := range fields {
+		if prev, ok := exactSeen[field.Name]; ok {
+			canonical[prev] = false
+		}
+		exactSeen[field.Name] = i
+		canonical[i] = true
+	}
+
 	for i, field := range fields {
 		name := field.Name
 		l := len(name)
@@ -182,6 +203,7 @@ func NewFieldCache(fields []resolver.FieldMeta) *FieldCache {
 				f.foldLast1 |= uint64(1) << (lb - 64)
 			}
 		}
+
 		n, lo, hi := strSig(name)
 		idx := hashSig(n, lo, hi) & mask
 		for {
@@ -198,44 +220,18 @@ func NewFieldCache(fields []resolver.FieldMeta) *FieldCache {
 			}
 			idx = (idx + 1) & mask
 		}
-	}
-	return f
-}
 
-func fieldsLen(fields []resolver.FieldMeta) int {
-	return len(fields)
-}
-
-//go:noinline
-func (f *FieldCache) initFolded() *foldedCache {
-	cap := uint32(len(f.exact))
-	mask := f.mask
-	fc := &foldedCache{
-		folded:          make([]fieldCacheEntry, cap),
-		caseInsensitive: make(map[string]int, f.numFields),
-	}
-	ordered := make([]string, f.numFields)
-	valid := make([]bool, f.numFields)
-	for idx := range f.exact {
-		e := &f.exact[idx]
-		if e.idxPlus1 > 0 {
-			i := int(e.idxPlus1 - 1)
-			ordered[i] = e.name
-			valid[i] = true
-		}
-	}
-	for i, name := range ordered {
-		if !valid[i] {
+		if !canonical[i] {
 			continue
 		}
 		lowerName := strings.ToLower(name)
-		if existingIdx, ok := fc.caseInsensitive[lowerName]; !ok || i < existingIdx {
-			fc.caseInsensitive[lowerName] = i
+		if existingIdx, ok := f.caseInsensitive[lowerName]; !ok || i < existingIdx {
+			f.caseInsensitive[lowerName] = i
 			if isPureASCII(lowerName) {
 				ln, llo, lhi := strSig(lowerName)
 				lidx := hashSig(ln, llo, lhi) & mask
 				for {
-					e := &fc.folded[lidx]
+					e := &f.folded[lidx]
 					if e.idxPlus1 == 0 || (e.n == ln && e.lo == llo && e.hi == lhi && e.name == lowerName) {
 						*e = fieldCacheEntry{
 							name:     lowerName,
@@ -251,40 +247,12 @@ func (f *FieldCache) initFolded() *foldedCache {
 			}
 		}
 	}
-	f.foldedPtr.Store(fc)
-	return fc
+	return f
 }
 
-func (f *FieldCache) GetInsensitive(name string) int {
-	exact := f.exact
-	if len(exact) == 0 {
-		return -1
-	}
-	n, lo, hi := strSig(name)
-	mask := uint32(len(exact) - 1)
-	idx := hashSig(n, lo, hi) & mask
-	for {
-		e := &exact[idx]
-		if e.idxPlus1 == 0 {
-			break
-		}
-		if e.n == n && e.lo == lo && e.hi == hi && equalMiddle(name, e.name, n) {
-			return int(e.idxPlus1) - 1
-		}
-		idx = (idx + 1) & mask
-	}
-	bit := uint(n)
-	if bit > 63 {
-		bit = 63
-	}
-	if (f.lenMask & (uint64(1) << bit)) == 0 {
-		if f.allASCII && (lo|hi)&0x80808080 == 0 && (n <= 8 || isPureASCII(name)) {
-			return -1
-		}
-	}
-	return f.getCaseInsensitive(name, n, lo, hi)
-}
-
+// Get is the sole authoritative field lookup entry for all struct decoders.
+// Exact matches always win; when caseSensitive is false, folded lookup preserves
+// strings.ToLower semantics and first-declared conflict precedence.
 func (f *FieldCache) Get(name string, caseSensitive bool) int {
 	exact := f.exact
 	if len(exact) == 0 {
@@ -318,7 +286,7 @@ func (f *FieldCache) Get(name string, caseSensitive bool) int {
 	return f.getCaseInsensitive(name, n, lo, hi)
 }
 
-func (f *FieldCache) asciiFoldCandidate(name string, n, lo, hi uint32) bool {
+func (f *FieldCache) asciiFoldCandidate(name string, n uint32) bool {
 	if n == 0 {
 		return (f.lenMask & 1) != 0
 	}
@@ -353,14 +321,10 @@ func (f *FieldCache) asciiFoldCandidate(name string, n, lo, hi uint32) bool {
 }
 
 func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
-	if f.allASCII && (lo|hi)&0x80808080 == 0 && !f.asciiFoldCandidate(name, n, lo, hi) {
+	if f.allASCII && (lo|hi)&0x80808080 == 0 && !f.asciiFoldCandidate(name, n) {
 		if n <= 8 || isPureASCII(name) {
 			return -1
 		}
-	}
-	fc := f.foldedPtr.Load()
-	if fc == nil {
-		fc = f.initFolded()
 	}
 	if (lo|hi)&0x80808080 != 0 {
 		goto unicode
@@ -372,7 +336,7 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 		idx := hashSig(n, loFold, hiFold) & mask
 		if n <= 8 {
 			for {
-				e := &fc.folded[idx]
+				e := &f.folded[idx]
 				if e.idxPlus1 == 0 {
 					return -1
 				}
@@ -382,23 +346,21 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 				idx = (idx + 1) & mask
 			}
 		}
-		p := unsafe.Pointer(unsafe.StringData(name))
-		midLen := uintptr(n - 8)
+		midEnd := int(n) - 4
 		for {
-			e := &fc.folded[idx]
+			e := &f.folded[idx]
 			if e.idxPlus1 == 0 {
 				break
 			}
 			if e.n == n && e.lo == loFold && e.hi == hiFold {
-				ep := unsafe.Pointer(unsafe.StringData(e.name))
-				off := uintptr(4)
+				off := 4
 				matched := true
-				for off+8 <= 4+midLen {
-					w := *(*uint64)(unsafe.Add(p, off))
+				for off+8 <= midEnd {
+					w := readU64LE(name, off)
 					if w&0x8080808080808080 != 0 {
 						goto unicode
 					}
-					ew := *(*uint64)(unsafe.Add(ep, off))
+					ew := readU64LE(e.name, off)
 					if foldASCII8(w) != ew {
 						matched = false
 						break
@@ -406,15 +368,15 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 					off += 8
 				}
 				if matched {
-					for off < 4+midLen {
-						b := *(*uint8)(unsafe.Add(p, off))
+					for off < midEnd {
+						b := name[off]
 						if b >= 0x80 {
 							goto unicode
 						}
 						if b >= 'A' && b <= 'Z' {
 							b += 'a' - 'A'
 						}
-						if b != *(*uint8)(unsafe.Add(ep, off)) {
+						if b != e.name[off] {
 							matched = false
 							break
 						}
@@ -428,15 +390,15 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 			idx = (idx + 1) & mask
 		}
 		// Candidate missed in folded table; verify middle bytes are ASCII before returning -1.
-		off := uintptr(4)
-		for off+8 <= 4+midLen {
-			if *(*uint64)(unsafe.Add(p, off))&0x8080808080808080 != 0 {
+		off := 4
+		for off+8 <= midEnd {
+			if readU64LE(name, off)&0x8080808080808080 != 0 {
 				goto unicode
 			}
 			off += 8
 		}
-		for off < 4+midLen {
-			if *(*uint8)(unsafe.Add(p, off)) >= 0x80 {
+		for off < midEnd {
+			if name[off] >= 0x80 {
 				goto unicode
 			}
 			off++
@@ -446,7 +408,7 @@ func (f *FieldCache) getCaseInsensitive(name string, n, lo, hi uint32) int {
 
 unicode:
 	// Preserve strings.ToLower's Unicode and invalid-UTF-8 behavior.
-	if idx, ok := fc.caseInsensitive[strings.ToLower(name)]; ok {
+	if idx, ok := f.caseInsensitive[strings.ToLower(name)]; ok {
 		return idx
 	}
 	return -1

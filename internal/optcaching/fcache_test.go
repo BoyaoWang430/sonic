@@ -3,6 +3,7 @@ package caching
 import (
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic/internal/resolver"
@@ -74,6 +75,34 @@ func TestFieldCacheShortASCIIFoldAllocations(t *testing.T) {
 			t.Errorf("Get(%q) allocated %g times", query, n)
 		}
 	}
+}
+
+func TestFieldCacheReadOnlyConcurrentColdAccess(t *testing.T) {
+	// Freshly constructed FieldCache has folded indices prebuilt and performs
+	// zero writes under concurrent first-use case-insensitive queries (verified under -race).
+	f := fieldCacheForNames([]string{"Alpha", "ALPHA", "beta_long_field_name", "Σigma"})
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				if got := f.Get("ALPHA", false); got != 1 {
+					t.Errorf("exact priority failed: got %d", got)
+				}
+				if got := f.Get("alpha", false); got != 0 {
+					t.Errorf("folded conflict order failed: got %d", got)
+				}
+				if got := f.Get("BETA_LONG_FIELD_NAME", false); got != 2 {
+					t.Errorf("long folded match failed: got %d", got)
+				}
+				if got := f.Get("σIGMA", false); got != 3 {
+					t.Errorf("unicode folded match failed: got %d", got)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 var fieldCacheResult int

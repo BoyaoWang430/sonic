@@ -357,11 +357,6 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 	fields := sd.fields
 	nfields := len(fields)
 	fplans := plan.fields
-	allASCIIKeys := plan.allASCIIKeys
-	hasLongKey := plan.hasLongKey
-	keyLenMask := plan.keyLenMask
-	firstLo := plan.firstLo
-	firstHi := plan.firstHi
 	validateStr := sc.validateStr
 	caseSensitive := sc.caseSensitive
 	disUnknown := sc.disUnknown
@@ -379,7 +374,6 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 		var keyTyp uint64
 		var keyVal uint64
 		hasEsc := false
-		isASCIIKey := false
 
 		// 64-byte register SWAR fast path for keys (handles >99.9% of JSON keys with zero ABI calls).
 		kp := win.blockPtr(keyStart)
@@ -400,9 +394,7 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 			sc.pos = afterQuote
 			keyTyp = KStringCommon | uint64(keyStart)<<PosBits
 			keyVal = uint64(klen)
-			isASCIIKey = (w0 & (qm0 - 1) & swarHigh) == 0
 		} else if qm0 == 0 && em0 == 0 {
-			highAcc := w0
 			found := false
 			for off := 8; off < 64; off += 8 {
 				w := *(*uint64)(unsafe.Add(kp, off))
@@ -425,14 +417,12 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 					sc.pos = afterQuote
 					keyTyp = KStringCommon | uint64(keyStart)<<PosBits
 					keyVal = uint64(klen)
-					isASCIIKey = ((highAcc | (w & (qm - 1))) & swarHigh) == 0
 					found = true
 					break
 				}
 				if em != 0 {
 					break
 				}
-				highAcc |= w
 			}
 			if !found {
 				goto slowKey
@@ -470,38 +460,9 @@ func (sc *schemaScanner) scanStruct(plan *projPlan, c byte, valStart int) bool {
 			}
 		}
 
-		// O(1) bloom-filter rejection for unknown keys before constructing string or hashing.
+		// Authoritative field resolution via read-only sd.fieldMap.Get.
 		idx := -1
-		bloomRejected := false
-		if !disUnknown && !hasEsc && allASCIIKeys {
-			if klen > 0 {
-				c0 := byte(w0)
-				if c0 < 128 {
-					var bit uint64
-					if c0 < 64 {
-						bit = firstLo >> c0
-					} else {
-						bit = firstHi >> (c0 - 64)
-					}
-					if bit&1 == 0 {
-						bloomRejected = true
-					}
-				}
-			} else if (keyLenMask & 1) == 0 {
-				bloomRejected = true
-			}
-			if !bloomRejected && isASCIIKey {
-				if klen < 64 {
-					if (keyLenMask & (uint64(1) << uint(klen))) == 0 {
-						bloomRejected = true
-					}
-				} else if !hasLongKey {
-					bloomRejected = true
-				}
-			}
-		}
-
-		if !bloomRejected {
+		{
 			var key string
 			if hasEsc {
 				b := sc.p.bytesEscaped(keyStart, keyVal)
