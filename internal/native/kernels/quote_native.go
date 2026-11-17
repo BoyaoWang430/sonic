@@ -14,13 +14,16 @@ import "github.com/bytedance/sonic/internal/rt"
 // in both cases. Every escape is written atomically. src and dst must not overlap;
 // neither requires padding.
 func Quote(src string, dst []byte, flags uint64) (consumed, written int) {
-	return quote(rt.StringData(src), len(src), rt.SliceData(dst), len(dst), flags)
+	return QuoteBuffer(rt.StringData(src), len(src), rt.SliceData(dst), len(dst), flags)
 }
 
 // QuoteBuffer escapes size bytes from src into dst capacity bytes without
 // surrounding quotes, avoiding string/slice header construction on raw buffers.
 func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int) {
-	return quote(src, size, dst, capacity, flags)
+	raceRead(src, size)
+	consumed, written = quote(src, size, dst, capacity, flags)
+	raceWrite(dst, written)
+	return consumed, written
 }
 
 // QuoteHTML escapes src into dst without surrounding quotes, performing both
@@ -31,13 +34,16 @@ func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (co
 // On success consumed equals len(src). If dst is too short, consumed is the
 // complement of the input byte count processed. Every escape is written atomically.
 func QuoteHTML(src string, dst []byte) (consumed, written int) {
-	return quoteHTML(rt.StringData(src), len(src), rt.SliceData(dst), len(dst))
+	return QuoteHTMLBuffer(rt.StringData(src), len(src), rt.SliceData(dst), len(dst))
 }
 
 // QuoteHTMLBuffer escapes size bytes from src into dst capacity bytes without
 // surrounding quotes, fusing JSON string escaping and HTML escaping in one pass.
 func QuoteHTMLBuffer(src *byte, size int, dst *byte, capacity int) (consumed, written int) {
-	return quoteHTML(src, size, dst, capacity)
+	raceRead(src, size)
+	consumed, written = quoteHTML(src, size, dst, capacity)
+	raceWrite(dst, written)
+	return consumed, written
 }
 
 //go:noescape

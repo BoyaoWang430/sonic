@@ -19,6 +19,11 @@ func ScanNumber(src string, start int) (end int, err types.ParsingError) {
 	}
 	tail := src[start:]
 	end, err = numberScan(rt.StringData(tail), len(tail), 0)
+	readN := end
+	if readN < len(tail) {
+		readN++
+	}
+	raceRead(rt.StringData(tail), readN)
 	return start + end, err
 }
 
@@ -33,6 +38,11 @@ func ScanNumberStrict(src string, start int) (end int, err types.ParsingError) {
 	}
 	tail := src[start:]
 	end, err = numberScan(rt.StringData(tail), len(tail), 1)
+	readN := end
+	if readN < len(tail) {
+		readN++
+	}
+	raceRead(rt.StringData(tail), readN)
 	return start + end, err
 }
 
@@ -40,6 +50,12 @@ func ScanNumberStrict(src string, start int) (end int, err types.ParsingError) {
 // after start, or len(src). It deliberately does not validate number syntax.
 // start must be in [0, len(src)]. No readable padding is needed.
 func SkipNumber(src string, start int) (end int) {
-	end, _ = numberScan(rt.StringData(src[start:]), len(src)-start, 2)
+	tail := src[start:]
+	end, _ = numberScan(rt.StringData(tail), len(tail), 2)
+	readN := end
+	if readN < len(tail) {
+		readN++
+	}
+	raceRead(rt.StringData(tail), readN)
 	return start + end
 }

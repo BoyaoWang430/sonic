@@ -1,4 +1,3 @@
-
 //go:build race
 // +build race
 
@@ -18,33 +17,53 @@
  * limitations under the License.
  */
 
-
 package issue_test
 
 import (
-    `github.com/bytedance/sonic`
-    `testing`
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/bytedance/sonic"
 )
 
+type raceCallbackItem struct {
+	calls *atomic.Int64
+}
+
+func (r raceCallbackItem) MarshalJSON() ([]byte, error) {
+	if r.calls != nil {
+		r.calls.Add(1)
+	}
+	return []byte(`"ok"`), nil
+}
+
 type MyFoo struct {
-    List []*int64 
+	List []*int64
+	Item raceCallbackItem
 }
 
 func TestRaceEncode(t *testing.T) {
-    f := &MyFoo{
-        List: []*int64{new(int64), new(int64)},
-    }
+	var calls atomic.Int64
+	f := &MyFoo{
+		List: []*int64{new(int64), new(int64)},
+		Item: raceCallbackItem{calls: &calls},
+	}
 
-    go func() {
-        f.List = []*int64{new(int64), new(int64)}
-    }()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		f.List = []*int64{new(int64), new(int64)}
+	}()
 
-    go func() {
-        sonic.Marshal(f)
-    }()
+	go func() {
+		defer wg.Done()
+		_, _ = sonic.Marshal(f)
+	}()
+	wg.Wait()
 
-    // encoding/json always detect data race when enabling `-race` here
-    // go func() {
-    //     json.Marshal(f)
-    // }()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected single MarshalJSON invocation per Marshal even under -race, got %d", got)
+	}
 }

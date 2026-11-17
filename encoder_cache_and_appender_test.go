@@ -799,22 +799,15 @@ func TestReview_PretouchMergedAddressabilityPlans(t *testing.T) {
 }
 
 type reviewCountingAppender struct {
-	ID           int
-	appendCalls  *atomic.Int64
-	jsonCalls    *atomic.Int64
-	textCalls    *atomic.Int64
-	stdRaceCalls *atomic.Int64
+	ID          int
+	appendCalls *atomic.Int64
+	jsonCalls   *atomic.Int64
+	textCalls   *atomic.Int64
 }
 
 func (c reviewCountingAppender) AppendSonicJSON(dst []byte) ([]byte, error) {
-	if c.appendCalls != nil || c.stdRaceCalls != nil {
-		if calledFromStdEncodingJSON() {
-			if c.stdRaceCalls != nil {
-				c.stdRaceCalls.Add(1)
-			}
-		} else if c.appendCalls != nil {
-			c.appendCalls.Add(1)
-		}
+	if c.appendCalls != nil {
+		c.appendCalls.Add(1)
 	}
 	dst = append(dst, `{"id":`...)
 	dst = strconv.AppendInt(dst, int64(c.ID), 10)
@@ -823,34 +816,35 @@ func (c reviewCountingAppender) AppendSonicJSON(dst []byte) ([]byte, error) {
 }
 
 func (c reviewCountingAppender) MarshalJSON() ([]byte, error) {
-	if c.jsonCalls != nil || c.stdRaceCalls != nil {
-		if calledFromStdEncodingJSON() {
-			if c.stdRaceCalls != nil {
-				c.stdRaceCalls.Add(1)
-			}
-		} else if c.jsonCalls != nil {
-			c.jsonCalls.Add(1)
-		}
+	if c.jsonCalls != nil {
+		c.jsonCalls.Add(1)
+	}
+	if c.appendCalls != nil {
+		// Do not double-count AppendSonicJSON when MarshalJSON delegates internally.
+		dst := make([]byte, 0, 32)
+		dst = append(dst, `{"id":`...)
+		dst = strconv.AppendInt(dst, int64(c.ID), 10)
+		dst = append(dst, `,"mode":"clean_ascii"}`...)
+		return dst, nil
 	}
 	return c.AppendSonicJSON(nil)
 }
 
 func (c reviewCountingAppender) MarshalText() ([]byte, error) {
-	if c.textCalls != nil && !calledFromStdEncodingJSON() {
+	if c.textCalls != nil {
 		c.textCalls.Add(1)
 	}
 	return []byte("text_fallback"), nil
 }
 
 func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
-	var appendCalls, jsonCalls, textCalls, stdRaceCalls atomic.Int64
+	var appendCalls, jsonCalls, textCalls atomic.Int64
 	makeItem := func(id int) reviewCountingAppender {
 		return reviewCountingAppender{
-			ID:           id,
-			appendCalls:  &appendCalls,
-			jsonCalls:    &jsonCalls,
-			textCalls:    &textCalls,
-			stdRaceCalls: &stdRaceCalls,
+			ID:          id,
+			appendCalls: &appendCalls,
+			jsonCalls:   &jsonCalls,
+			textCalls:   &textCalls,
 		}
 	}
 
@@ -880,7 +874,7 @@ func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
 		t.Fatalf("ConfigStd.Marshal(DispatchContainer) error: %v", err)
 	}
 	if appendCalls.Load() != 6 {
-		t.Fatalf("expected 6 AppendJSON calls across concrete/ptr/slice/any/JSONAppender/json.Marshaler fields, got %d (MarshalJSON=%d, MarshalText=%d)",
+		t.Fatalf("expected strictly 6 AppendSonicJSON calls (including under -race), got %d (MarshalJSON=%d, MarshalText=%d)",
 			appendCalls.Load(), jsonCalls.Load(), textCalls.Load())
 	}
 	if jsonCalls.Load() != 0 || textCalls.Load() != 1 {
@@ -893,11 +887,7 @@ func TestReview_JSONAppenderDispatchPriorityAndZeroAlloc(t *testing.T) {
 		t.Fatalf("DispatchContainer parity mismatch:\ngot:  %s\nwant: %s", got, want)
 	}
 
-	// Verify 0 allocations when encoding into preallocated buffer under both default and ConfigStd options
-	// (skipped under -race where encodeIntoCheckRace intentionally invokes encoding/json.Marshal).
-	if stdRaceCalls.Load() > 0 {
-		return
-	}
+	// Verify 0 allocations when encoding into preallocated buffer under both default and ConfigStd options.
 	type SingleHolder struct {
 		Item reviewCountingAppender `json:"item"`
 	}
@@ -1060,8 +1050,7 @@ func TestEncoderRootCooldownEndToEndRecovery(t *testing.T) {
 	}
 
 	// Verify public ConfigDefault.Marshal parity first, then invoke encvm.EncodeRoot
-	// directly so -race builds (where Encode() bypasses EncodeRoot via !raceEnabled)
-	// also genuinely race-test EncodeRoot + tryAcquireDirectSingle + cooldownUntilNano!
+	// directly to exercise root cooldown / scratch paths explicitly.
 	pubA, err := ConfigDefault.Marshal(medA)
 	if err != nil || !bytes.Equal(pubA, wantA) {
 		t.Fatalf("public Marshal(medA) error=%v", err)
@@ -1285,4 +1274,70 @@ func BenchmarkEncoderCooldownModes(b *testing.B) {
 			}
 		})
 	})
+}
+
+type singleExecMarshaler struct {
+	calls     *atomic.Int64
+	fail      bool
+	useStdLib bool
+	payload   int
+}
+
+func (m singleExecMarshaler) MarshalJSON() ([]byte, error) {
+	m.calls.Add(1)
+	if m.fail {
+		return nil, fmt.Errorf("intentional marshaler error")
+	}
+	if m.useStdLib {
+		return json.Marshal(struct {
+			Std int `json:"std"`
+		}{Std: m.payload})
+	}
+	return []byte(fmt.Sprintf(`{"v":%d}`, m.payload)), nil
+}
+
+func TestEncoderSingleCallbackCountOnSuccessErrorAndStdDelegate(t *testing.T) {
+	// 1. Success path: Marshal and EncodeInto each invoke MarshalJSON strictly once (even under -race).
+	var okCalls atomic.Int64
+	out, err := ConfigStd.Marshal(struct {
+		A singleExecMarshaler `json:"a"`
+	}{A: singleExecMarshaler{calls: &okCalls, payload: 9}})
+	if err != nil || string(out) != `{"a":{"v":9}}` {
+		t.Fatalf("Marshal got (%s, %v)", out, err)
+	}
+	if okCalls.Load() != 1 {
+		t.Fatalf("expected 1 MarshalJSON call on Marshal, got %d", okCalls.Load())
+	}
+
+	var intoBuf []byte
+	if err := encoder.EncodeInto(&intoBuf, singleExecMarshaler{calls: &okCalls, payload: 11}, 0); err != nil || string(intoBuf) != `{"v":11}` {
+		t.Fatalf("EncodeInto got (%s, %v)", intoBuf, err)
+	}
+	if okCalls.Load() != 2 {
+		t.Fatalf("expected 2 total MarshalJSON calls after EncodeInto, got %d", okCalls.Load())
+	}
+
+	// 2. Error path: failing MarshalJSON must execute once and never trigger a post-error re-encode.
+	var errCalls atomic.Int64
+	var tailCalls atomic.Int64
+	_, err = ConfigStd.Marshal(struct {
+		Bad  singleExecMarshaler `json:"bad"`
+		Tail singleExecMarshaler `json:"tail"`
+	}{
+		Bad:  singleExecMarshaler{calls: &errCalls, fail: true},
+		Tail: singleExecMarshaler{calls: &tailCalls, payload: 1},
+	})
+	if err == nil {
+		t.Fatalf("expected error from failing MarshalJSON")
+	}
+	if errCalls.Load() != 1 || tailCalls.Load() != 0 {
+		t.Fatalf("expected (errCalls=1, tailCalls=0) on error, got (%d, %d)", errCalls.Load(), tailCalls.Load())
+	}
+
+	// 3. User MarshalJSON explicitly delegating to encoding/json.Marshal remains unaffected and executes once.
+	var stdCalls atomic.Int64
+	stdOut, err := ConfigStd.Marshal(singleExecMarshaler{calls: &stdCalls, useStdLib: true, payload: 42})
+	if err != nil || string(stdOut) != `{"std":42}` || stdCalls.Load() != 1 {
+		t.Fatalf("user std delegate got (%s, %v, calls=%d)", stdOut, err, stdCalls.Load())
+	}
 }

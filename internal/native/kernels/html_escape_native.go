@@ -13,13 +13,16 @@ import "github.com/bytedance/sonic/internal/rt"
 // in both cases. Every escape is written atomically, including the three-byte
 // U+2028/U+2029 input. src and dst must not overlap; neither requires padding.
 func HTMLEscape(src string, dst []byte) (consumed, written int) {
-	return htmlEscape(rt.StringData(src), len(src), rt.SliceData(dst), len(dst))
+	return HTMLEscapeBuffer(rt.StringData(src), len(src), rt.SliceData(dst), len(dst))
 }
 
 // HTMLEscapeBuffer copies size bytes from src into dst capacity bytes while
 // escaping HTML-unsafe runes, avoiding string/slice header construction.
 func HTMLEscapeBuffer(src *byte, size int, dst *byte, capacity int) (consumed, written int) {
-	return htmlEscape(src, size, dst, capacity)
+	raceRead(src, size)
+	consumed, written = htmlEscape(src, size, dst, capacity)
+	raceWrite(dst, written)
+	return consumed, written
 }
 
 //go:noescape

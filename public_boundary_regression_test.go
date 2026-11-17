@@ -88,27 +88,10 @@ type boxEscapeField struct {
 	V int `json:"v"`
 }
 
-func calledFromStdEncodingJSON() bool {
-	var pcs [16]uintptr
-	n := runtime.Callers(2, pcs[:])
-	frames := runtime.CallersFrames(pcs[:n])
-	for {
-		fr, more := frames.Next()
-		if strings.HasPrefix(fr.Function, "encoding/json.") {
-			return true
-		}
-		if !more {
-			return false
-		}
-	}
-}
-
 func (f *boxEscapeField) IsZero() bool {
-	if !calledFromStdEncodingJSON() {
-		retainedBoxMu.Lock()
-		retainedBoxPtrs = append(retainedBoxPtrs, f)
-		retainedBoxMu.Unlock()
-	}
+	retainedBoxMu.Lock()
+	retainedBoxPtrs = append(retainedBoxPtrs, f)
+	retainedBoxMu.Unlock()
 	return f.V == 0
 }
 

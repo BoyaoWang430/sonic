@@ -166,7 +166,7 @@ func Quote(s string) string {
 
 // Encode returns the JSON encoding of val, encoded with opts.
 func Encode(val interface{}, opts Options) ([]byte, error) {
-	if !raceEnabled && vars.UseVM {
+	if vars.UseVM {
 		if ret, ok, err := vm.EncodeRoot(val, uint64(opts)); ok {
 			return ret, err
 		}
@@ -176,7 +176,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 
 	buf := vars.NewBytes()
 	origBuf := (*buf)[:0]
-	err := encodeIntoCheckRace(buf, val, opts)
+	err := encodeInto(buf, val, opts)
 
 	/* check for errors */
 	if err != nil {
@@ -209,7 +209,7 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 // a new one.
 func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	origLen := len(*buf)
-	err := encodeIntoCheckRace(buf, val, opts)
+	err := encodeInto(buf, val, opts)
 	if err != nil {
 		*buf = (*buf)[:origLen]
 		return err

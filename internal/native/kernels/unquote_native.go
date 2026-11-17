@@ -13,15 +13,14 @@ import (
 // Flags select double-unquote and Unicode replacement. Invalid UTF-8 is preserved.
 // On error, written counts the decoded prefix and errorPos follows native/unquote.c.
 func Unquote(src string, dst []byte, flags uint64) (written, errorPos int, err types.ParsingError) {
-	var code int
-	_, written, _, errorPos, code = stringDecode(rt.StringData(src), len(src), rt.SliceData(dst), flags&3)
-	err = types.ParsingError(code)
-	return
+	return UnquoteBuffer(rt.StringData(src), len(src), rt.SliceData(dst), flags)
 }
 
 // UnquoteBuffer decodes size bytes from src into dst without surrounding quotes,
 // avoiding string/slice header construction on raw pointers.
 func UnquoteBuffer(src *byte, size int, dst *byte, flags uint64) (written, errorPos int, err types.ParsingError) {
+	raceRead(src, size)
 	_, written, _, errorPos, code := stringDecode(src, size, dst, flags&3)
+	raceWrite(dst, written)
 	return written, errorPos, types.ParsingError(code)
 }

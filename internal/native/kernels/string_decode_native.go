@@ -37,7 +37,7 @@ func ParseString(buf []byte, start int, validate, unicodeErrors bool) (end, writ
 		mode |= 2
 	}
 	var sawEscape int
-	end, written, sawEscape, errorPos, code = stringDecode(rt.SliceData(tail), len(tail), rt.SliceData(tail), mode)
+	end, written, sawEscape, errorPos, code = DecodeQuoted(rt.SliceData(tail), len(tail), mode)
 	end += base
 	if errorPos >= 0 {
 		errorPos += base
@@ -54,6 +54,14 @@ func ParseString(buf []byte, start int, validate, unicodeErrors bool) (end, writ
 // only when size is zero. The closing quote and following input are unchanged.
 func DecodeQuoted(tail *byte, size int, mode uint64) (end, written, escaped, errorPos, code int) {
 	end, written, escaped, errorPos, code = stringDecode(tail, size, tail, mode)
+	readN := end
+	if readN < size && code != 0 {
+		readN++
+	}
+	raceRead(tail, readN)
+	if escaped != 0 {
+		raceWrite(tail, written)
+	}
 	return
 }
 
