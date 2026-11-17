@@ -41,16 +41,16 @@ type CompileOptions struct {
 
 	// EncOnlyOmitNull sets the encoder to only omit nil value (ex: nil pointer, nil container) instead of zero value,
 	// with `omitempty` tag.
+	//
+	// Deprecated: Prefer explicit sonic.Config{OnlyOmitNull: true} or encoder.OnlyOmitNull
+	// so semantic behavior belongs to explicit encoding configuration rather than Pretouch order.
 	EncOnlyOmitNull bool
-
-	inlineDepthExplicit bool
 }
 
 var (
-	// Default value(3) means the compiler only inline 3 layers of nested struct.
-	// when the depth exceeds, the compiler will recurse
-	// and compile subsequent structs when they are decoded
-	DefaultMaxInlineDepth = 3
+	// DefaultMaxInlineDepth(16) is the single explicit default inline depth for both
+	// encoder and decoder plans; deeper nested structs recurse cleanly on demand.
+	DefaultMaxInlineDepth = 16
 
 	// Default value(1) means `Pretouch()` will be recursively executed once,
 	// if any nested struct is left (depth exceeds MaxInlineDepth)
@@ -94,18 +94,13 @@ func WithCompileMaxInlineDepth(depth int) CompileOption {
 			panic("depth must be > 0")
 		}
 		o.MaxInlineDepth = depth
-		o.inlineDepthExplicit = true
 	}
 }
 
-// HasExplicitMaxInlineDepth reports whether WithCompileMaxInlineDepth was
-// explicitly applied, distinguishing an explicit DefaultMaxInlineDepth from an
-// untouched default option set.
-func (o CompileOptions) HasExplicitMaxInlineDepth() bool {
-	return o.inlineDepthExplicit
-}
-
 // WithCompileEncOnlyOmitNull sets the encoder to only omit nil value instead of zero value with `omitempty` tag.
+//
+// Deprecated: Prefer explicit sonic.Config{OnlyOmitNull: true} or encoder.OnlyOmitNull
+// so semantic behavior belongs to explicit encoding configuration rather than Pretouch order.
 func WithCompileEncOnlyOmitNull(omit bool) CompileOption {
 	return func(o *CompileOptions) {
 		o.EncOnlyOmitNull = omit

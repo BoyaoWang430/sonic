@@ -8,7 +8,7 @@ import (
 )
 
 func (self *Compiler) compileFloatSlice(p *ir.Program, sp int, st reflect.Type) bool {
-	if !self.useVM {
+	if self.disableBatchSpecs {
 		return false
 	}
 	elem := st.Elem()

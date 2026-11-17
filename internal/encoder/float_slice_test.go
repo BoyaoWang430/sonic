@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic/internal/encoder/ir"
-	"github.com/bytedance/sonic/internal/encoder/vars"
 )
 
 type plainFloat float64
@@ -30,8 +29,6 @@ type jsonFloatSlice []float64
 func (jsonFloatSlice) MarshalJSON() ([]byte, error) { return []byte(`"slice"`), nil }
 
 func TestFloatSliceCompilation(t *testing.T) {
-	previous := vars.UseVM
-	defer func() { vars.UseVM = previous }()
 	cases := []struct {
 		value any
 		bulk  bool
@@ -41,15 +38,14 @@ func TestFloatSliceCompilation(t *testing.T) {
 		{[]textFloat{}, false}, {[]pointerTextFloat{}, false},
 		{jsonFloatSlice{}, false}, {[]*float64{}, false}, {[2]float64{}, false},
 	}
-	for _, backend := range []struct {
-		name string
-		vm   bool
-	}{{"VM", true}, {"JIT", false}} {
-		t.Run(backend.name, func(t *testing.T) {
-			vars.UseVM = backend.vm
+	for _, mode := range []struct {
+		name       string
+		batchSpecs bool
+	}{{"BatchSpecs", true}, {"GenericIR", false}} {
+		t.Run(mode.name, func(t *testing.T) {
 			for _, tc := range cases {
 				typ := reflect.TypeOf(tc.value)
-				p, err := NewCompiler().Compile(typ, false)
+				p, err := NewCompiler().withBatchSpecs(mode.batchSpecs).Compile(typ, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -57,7 +53,7 @@ func TestFloatSliceCompilation(t *testing.T) {
 				for _, ins := range p {
 					found = found || ins.Op() == ir.OP_f32_slice || ins.Op() == ir.OP_f64_slice
 				}
-				if want := backend.vm && tc.bulk; found != want {
+				if want := mode.batchSpecs && tc.bulk; found != want {
 					t.Fatalf("%v: bulk=%v, want %v", typ, found, want)
 				}
 			}

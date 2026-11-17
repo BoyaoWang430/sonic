@@ -29,28 +29,29 @@ import (
 	"github.com/bytedance/sonic/option"
 )
 
-func ForceUseVM() {
+func init() {
 	vm.SetCompiler(makeEncoderVM)
-	pretouchType = pretouchTypeVM
-	encodeValuePointer = vm.EncodeValuePointer
-	vars.UseVM = true
 }
 
-var encodeValuePointer func(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars.Stack, fv uint64) error
-
 func makeEncoderVM(vt reflect.Type, ex ...interface{}) (interface{}, error) {
-	ce, err := NewCompiler().CompileEncoder(vt, ex[0].(bool))
+	pv := ex[0].(bool)
+	omitNull := false
+	if len(ex) > 1 {
+		omitNull = ex[1].(bool)
+	}
+	c := NewCompiler()
+	c.opts.EncOnlyOmitNull = omitNull
+	ce, err := c.CompileEncoder(vt, pv)
 	if err != nil {
 		return nil, err
 	}
 	return &ce, nil
 }
 
-var pretouchType func(_vt reflect.Type, opts option.CompileOptions, pv bool) (map[vmPretouchKey]struct{}, error)
-
 func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, pv bool) (map[vmPretouchKey]struct{}, error) {
 	/* compile function */
 	compiler := NewCompiler().apply(opts)
+	omitNull := opts.EncOnlyOmitNull
 	encoder := func(vt reflect.Type, ex ...interface{}) (interface{}, error) {
 		ce, err := compiler.CompileEncoder(vt, ex[0].(bool))
 		if err != nil {
@@ -60,9 +61,9 @@ func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, pv bool) (map[v
 	}
 
 	/* find or compile */
-	if val := vars.GetProgram(vt, pv); val != nil {
+	if val := vars.GetProgramMode(vt, pv, omitNull); val != nil {
 		return nil, nil
-	} else if _, err := vars.ComputeProgram(vt, encoder, pv); err == nil {
+	} else if _, err := vars.ComputeProgramMode(vt, encoder, pv, omitNull); err == nil {
 		return compiler.rec, nil
 	} else {
 		return nil, err
@@ -78,6 +79,7 @@ func pretouchRecVMBatch(vtm map[vmPretouchKey]struct{}, opts option.CompileOptio
 	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
 		return nil
 	}
+	omitNull := opts.EncOnlyOmitNull
 	seen := make(map[vmPretouchKey]struct{}, len(vtm)*2)
 	var batchVal []caching.ProgramBatchItem
 	var batchPV []caching.ProgramBatchItem
@@ -92,7 +94,7 @@ func pretouchRecVMBatch(vtm map[vmPretouchKey]struct{}, opts option.CompileOptio
 				continue
 			}
 			seen[key] = struct{}{}
-			if vars.GetProgram(key.vt, key.pv) != nil {
+			if vars.GetProgramMode(key.vt, key.pv, omitNull) != nil {
 				continue
 			}
 			compiler := NewCompiler().apply(opts)
@@ -116,46 +118,25 @@ func pretouchRecVMBatch(vtm map[vmPretouchKey]struct{}, opts option.CompileOptio
 		vtm = next
 	}
 	if len(batchVal) > 0 {
-		vars.PutPrograms(batchVal, false)
+		vars.PutProgramsMode(batchVal, false, omitNull)
 	}
 	if len(batchPV) > 0 {
-		vars.PutPrograms(batchPV, true)
+		vars.PutProgramsMode(batchPV, true, omitNull)
 	}
 	return nil
 }
 
-func pretouchRec(vtm map[vmPretouchKey]struct{}, opts option.CompileOptions) error {
-	if vars.UseVM {
-		return pretouchRecVMBatch(vtm, opts)
-	}
-	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
-		return nil
-	}
-	next := make(map[vmPretouchKey]struct{})
-	for key := range vtm {
-		sub, err := pretouchType(key.vt, opts, key.pv)
-		if err != nil {
-			return err
-		}
-		for subKey := range sub {
-			next[subKey] = struct{}{}
-		}
-	}
-	opts.RecursiveDepth -= 1
-	return pretouchRec(next, opts)
-}
-
 type Compiler struct {
-	opts          option.CompileOptions
-	pv            bool
-	useVM         bool
-	tab           map[reflect.Type]bool
-	rec           map[vmPretouchKey]struct{}
-	root          ir.RootSpec
-	lastPureSpecs []ir.StructFieldSpec
-	lastPureOK    bool
-	lastPtrSpecs  []ir.StructFieldSpec
-	lastPtrOK     bool
+	opts              option.CompileOptions
+	pv                bool
+	disableBatchSpecs bool
+	tab               map[reflect.Type]bool
+	rec               map[vmPretouchKey]struct{}
+	root              ir.RootSpec
+	lastPureSpecs     []ir.StructFieldSpec
+	lastPureOK        bool
+	lastPtrSpecs      []ir.StructFieldSpec
+	lastPtrOK         bool
 }
 
 func defaultAllowSizeHint(vt reflect.Type) bool {
@@ -177,15 +158,14 @@ func defaultAllowSizeHint(vt reflect.Type) bool {
 
 func NewCompiler() *Compiler {
 	return &Compiler{
-		opts:  option.DefaultCompileOptions(),
-		useVM: vars.UseVM,
-		tab:   map[reflect.Type]bool{},
-		rec:   map[vmPretouchKey]struct{}{},
+		opts: option.DefaultCompileOptions(),
+		tab:  map[reflect.Type]bool{},
+		rec:  map[vmPretouchKey]struct{}{},
 	}
 }
 
-func (self *Compiler) WithVM(useVM bool) *Compiler {
-	self.useVM = useVM
+func (self *Compiler) withBatchSpecs(enabled bool) *Compiler {
+	self.disableBatchSpecs = !enabled
 	return self
 }
 
@@ -246,7 +226,7 @@ func (self *Compiler) compileOne(p *ir.Program, sp int, vt reflect.Type, pv bool
 func (self *Compiler) tryCompileMarshaler(p *ir.Program, vt reflect.Type, pv bool) bool {
 	pt := reflect.PtrTo(vt)
 
-	if self.useVM {
+	if !self.disableBatchSpecs {
 		if pv && pt.Implements(prim.JSONAppenderType) {
 			self.addMarshalerOp(p, ir.OP_marshal_append_p, pt, prim.JSONAppenderType)
 			return true
@@ -411,7 +391,7 @@ func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
 	e := p.PC()
 	p.Rtt(ir.OP_is_zero_map, vt)
 	p.Add(ir.OP_save)
-	if self.useVM {
+	if !self.disableBatchSpecs {
 		if kind, ok := vars.BuiltinMapKind(vt); ok {
 			p.Add(ir.OP_save)
 			p.Int(ir.OP_map_string_any, kind)
@@ -626,17 +606,9 @@ func (self *Compiler) compileString(p *ir.Program, vt reflect.Type) {
 	}
 }
 
-func (self *Compiler) effectiveMaxInlineDepth() int {
-	maxDepth := self.opts.MaxInlineDepth
-	if self.useVM && !self.opts.HasExplicitMaxInlineDepth() && maxDepth == option.DefaultMaxInlineDepth {
-		return 16
-	}
-	return maxDepth
-}
-
 func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
-	maxDepth := self.effectiveMaxInlineDepth()
-	if sp >= maxDepth || p.PC() >= vars.MAX_ILBUF || (!self.useVM && sp > 0 && vt.NumField() >= vars.MAX_FIELDS) {
+	maxDepth := self.opts.MaxInlineDepth
+	if sp >= maxDepth || p.PC() >= vars.MAX_ILBUF || (self.disableBatchSpecs && sp > 0 && vt.NumField() >= vars.MAX_FIELDS) {
 		p.Vp(ir.OP_recurse, vt, self.pv)
 		if self.opts.RecursiveDepth > 0 {
 			self.rec[vmPretouchKey{vt: vt, pv: self.pv}] = struct{}{}
@@ -663,7 +635,7 @@ func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
 
 func (self *Compiler) isCustomMarshaler(vt reflect.Type, pv bool) bool {
 	pt := reflect.PtrTo(vt)
-	if self.useVM && ((pv && pt.Implements(prim.JSONAppenderType)) || vt.Implements(prim.JSONAppenderType)) {
+	if !self.disableBatchSpecs && ((pv && pt.Implements(prim.JSONAppenderType)) || vt.Implements(prim.JSONAppenderType)) {
 		return true
 	}
 	if pv && pt.Implements(vars.JsonMarshalerType) {
@@ -689,8 +661,8 @@ func specNoCommaSkip(hasGuaranteedField bool) uint8 {
 }
 
 func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]ir.StructFieldSpec, bool) {
-	maxDepth := self.effectiveMaxInlineDepth()
-	if !self.useVM || depth >= maxDepth || self.tab[vt] || self.isCustomMarshaler(vt, true) {
+	maxDepth := self.opts.MaxInlineDepth
+	if self.disableBatchSpecs || depth >= maxDepth || self.tab[vt] || self.isCustomMarshaler(vt, true) {
 		return nil, false
 	}
 	savedPV := self.pv
@@ -755,7 +727,7 @@ func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]i
 
 func (self *Compiler) tryCompileStructFieldSpec(ef *encodedField, baseOffset uintptr, hasGuaranteedField bool, depth int) (ir.StructFieldSpec, bool) {
 	fv := ef.meta
-	if !self.useVM || ef.keyNeedsSanitize || ef.commaKeyLen > 255 || len(ef.owner) == 0 {
+	if self.disableBatchSpecs || ef.keyNeedsSanitize || ef.commaKeyLen > 255 || len(ef.owner) == 0 {
 		return ir.StructFieldSpec{}, false
 	}
 	if (fv.Opts & resolver.F_omitzero) != 0 {
@@ -966,8 +938,8 @@ func (self *Compiler) tryCompileStructFieldSpec(ef *encodedField, baseOffset uin
 
 func (self *Compiler) tryFlattenNestedStruct(ef *encodedField, baseOffset uintptr, sp int) (uintptr, bool) {
 	fv := ef.meta
-	maxDepth := self.effectiveMaxInlineDepth()
-	if !self.useVM || sp+1 >= maxDepth || !ef.hasStructBegin || len(ef.owner) == 0 {
+	maxDepth := self.opts.MaxInlineDepth
+	if self.disableBatchSpecs || sp+1 >= maxDepth || !ef.hasStructBegin || len(ef.owner) == 0 {
 		return 0, false
 	}
 	ft := fv.Type

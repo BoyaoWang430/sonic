@@ -97,12 +97,16 @@ var (
 			}
 		},
 	}
-	bufferPool      = sync.Pool{}
-	programCache    = caching.CreateProgramCache()
-	programCachePV  = caching.CreateProgramCache()
-	rootEncCache    = caching.CreateProgramCache()
-	cacheResetMu    sync.Mutex
-	cacheResetHooks []func()
+	bufferPool             = sync.Pool{}
+	programCache           = caching.CreateProgramCache()
+	programCachePV         = caching.CreateProgramCache()
+	programCacheOmitNull   = caching.CreateProgramCache()
+	programCachePVOmitNull = caching.CreateProgramCache()
+	rootEncCache           = caching.CreateProgramCache()
+	rootEncCacheOmitNull   = caching.CreateProgramCache()
+	legacyOmitNullTypes    = caching.CreateProgramCache()
+	cacheResetMu           sync.Mutex
+	cacheResetHooks        []func()
 )
 
 func RegisterCacheReset(fn func()) {
@@ -114,7 +118,11 @@ func RegisterCacheReset(fn func()) {
 func ResetProgramCache() {
 	programCache.Reset()
 	programCachePV.Reset()
+	programCacheOmitNull.Reset()
+	programCachePVOmitNull.Reset()
 	rootEncCache.Reset()
+	rootEncCacheOmitNull.Reset()
+	legacyOmitNullTypes.Reset()
 	cacheResetMu.Lock()
 	hooks := append([]func(){}, cacheResetHooks...)
 	cacheResetMu.Unlock()
@@ -582,11 +590,3 @@ func FreeBuffer(p *bytes.Buffer) {
 		bufferPool.Put(p)
 	}
 }
-
-var (
-	ArgPtrs   = []bool{true, true, true, false}
-	LocalPtrs = []bool{}
-
-	ArgPtrs_generic   = []bool{true}
-	LocalPtrs_generic = []bool{}
-)

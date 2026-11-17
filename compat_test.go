@@ -438,6 +438,7 @@ func TestOptionBitsDistinctAndIndependentAcrossBackends(t *testing.T) {
 		encoder.NoValidateJSONMarshaler,
 		encoder.NoEncoderNewline,
 		encoder.EncodeNullForInfOrNan,
+		encoder.OnlyOmitNull,
 	}
 	var seenEnc encoder.Options
 	for i, opt := range encOpts {

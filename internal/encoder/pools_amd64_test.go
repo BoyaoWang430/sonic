@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 )
@@ -140,8 +139,4 @@ func TestPretouchManyMutualRefValueCycleEncodeError(t *testing.T) {
 	assert.Error(t, err)
 	_, ok := err.(*json.UnsupportedValueError)
 	assert.True(t, ok)
-}
-
-func TestEncoderBackendSelection(t *testing.T) {
-	assert.True(t, vars.UseVM)
 }

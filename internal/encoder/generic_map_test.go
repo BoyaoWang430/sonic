@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic/internal/encoder/ir"
-	"github.com/bytedance/sonic/internal/encoder/vars"
 )
 
 type plainGenericMap map[string]any
@@ -23,10 +22,7 @@ func (customKey) MarshalText() ([]byte, error) {
 }
 
 func TestGenericMapCompilation(t *testing.T) {
-	previous := vars.UseVM
-	defer func() { vars.UseVM = previous }()
-	for _, useVM := range []bool{false, true} {
-		vars.UseVM = useVM
+	for _, batchSpecs := range []bool{false, true} {
 		for _, tc := range []struct {
 			value any
 			fast  bool
@@ -47,7 +43,7 @@ func TestGenericMapCompilation(t *testing.T) {
 			{map[string]struct{}{}, false},
 		} {
 			typ := reflect.TypeOf(tc.value)
-			p, err := NewCompiler().Compile(typ, false)
+			p, err := NewCompiler().withBatchSpecs(batchSpecs).Compile(typ, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,8 +51,8 @@ func TestGenericMapCompilation(t *testing.T) {
 			for _, ins := range p {
 				found = found || ins.Op() == ir.OP_map_string_any
 			}
-			if want := useVM && tc.fast; found != want {
-				t.Fatalf("%v, VM=%v: fast=%v, want %v", typ, useVM, found, want)
+			if want := batchSpecs && tc.fast; found != want {
+				t.Fatalf("%v, batchSpecs=%v: fast=%v, want %v", typ, batchSpecs, found, want)
 			}
 		}
 	}

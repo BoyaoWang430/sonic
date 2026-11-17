@@ -23,7 +23,6 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/ir"
-	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 )
@@ -120,30 +119,29 @@ func TestPretouchTypeVM(t *testing.T) {
 	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subC{}), pv: false})
 }
 
-func TestExplicitDefaultMaxInlineDepthNotRewrittenTo16(t *testing.T) {
+func TestExplicitAndDefaultMaxInlineDepth(t *testing.T) {
+	assert.Equal(t, 16, option.DefaultMaxInlineDepth)
+
 	type defLeaf struct{ X int }
 	type defMid struct{ B [1]defLeaf }
 	type defRoot struct{ A [1]defMid }
 
 	defSub, err := pretouchTypeVM(reflect.TypeOf(defRoot{}), option.DefaultCompileOptions(), false)
 	assert.NoError(t, err)
-	assert.Empty(t, defSub, "untouched default options inline up to depth 16 in VM")
+	assert.Empty(t, defSub, "default MaxInlineDepth(16) inlines shallow nested structs directly")
 
 	type expLeaf struct{ X int }
 	type expMid struct{ B [1]expLeaf }
 	type expRoot struct{ A [1]expMid }
 
 	explicitOpts := option.DefaultCompileOptions()
-	option.WithCompileMaxInlineDepth(option.DefaultMaxInlineDepth)(&explicitOpts)
+	option.WithCompileMaxInlineDepth(3)(&explicitOpts)
 	expSub, err := pretouchTypeVM(reflect.TypeOf(expRoot{}), explicitOpts, false)
 	assert.NoError(t, err)
-	assert.Contains(t, expSub, vmPretouchKey{vt: reflect.TypeOf(expLeaf{}), pv: false}, "explicit WithCompileMaxInlineDepth(3) must not be rewritten to 16")
+	assert.Contains(t, expSub, vmPretouchKey{vt: reflect.TypeOf(expLeaf{}), pv: false}, "explicit WithCompileMaxInlineDepth(3) stops inlining at depth 3")
 }
 
 func TestStructFieldsCompilation(t *testing.T) {
-	previous := vars.UseVM
-	defer func() { vars.UseVM = previous }()
-
 	type embedded struct {
 		E string `json:"e"`
 	}
@@ -156,9 +154,8 @@ func TestStructFieldsCompilation(t *testing.T) {
 		D uint64 `json:"d,omitempty"`
 	}
 
-	for _, useVM := range []bool{true, false} {
-		vars.UseVM = useVM
-		p, err := NewCompiler().Compile(reflect.TypeOf(sample{}), false)
+	for _, batchSpecs := range []bool{true, false} {
+		p, err := NewCompiler().withBatchSpecs(batchSpecs).Compile(reflect.TypeOf(sample{}), false)
 		assert.NoError(t, err)
 		var runs []int
 		for _, ins := range p {
@@ -166,7 +163,7 @@ func TestStructFieldsCompilation(t *testing.T) {
 				runs = append(runs, len(ins.VFields()))
 			}
 		}
-		if useVM {
+		if batchSpecs {
 			assert.Equal(t, []int{6}, runs)
 		} else {
 			assert.Empty(t, runs)

@@ -79,6 +79,10 @@ const (
 	// EncodeNullForInfOrNan encodes Infinity or NaN float values as 'null'
 	// instead of returning an error (native Sonic extension; distinct bit on compat).
 	EncodeNullForInfOrNan Options = 1 << alg.BitEncodeNullForInfOrNan
+
+	// OnlyOmitNull causes `omitempty` struct fields to omit only nil pointers/containers
+	// rather than all zero values (native Sonic extension; distinct bit on compat).
+	OnlyOmitNull Options = 1 << alg.BitOnlyOmitNull
 )
 
 // Encoder represents a specific set of encoder configurations.

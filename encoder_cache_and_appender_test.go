@@ -730,11 +730,11 @@ func TestReview_PretouchMergedAddressabilityPlans(t *testing.T) {
 		); err != nil {
 			t.Fatalf("iter %d Pretouch error: %v", iter, err)
 		}
-		if encvars.GetProgram(reflect.TypeOf(Child{}), false) == nil {
-			t.Fatalf("iter %d missing (Child, pv=false) program after Pretouch", iter)
+		if encvars.GetProgramMode(reflect.TypeOf(Child{}), false, true) == nil {
+			t.Fatalf("iter %d missing (Child, pv=false, omitNull=true) program after Pretouch", iter)
 		}
-		if encvars.GetProgram(reflect.TypeOf(Child{}), true) == nil {
-			t.Fatalf("iter %d missing (Child, pv=true) program after Pretouch", iter)
+		if encvars.GetProgramMode(reflect.TypeOf(Child{}), true, true) == nil {
+			t.Fatalf("iter %d missing (Child, pv=true, omitNull=true) program after Pretouch", iter)
 		}
 
 		gotVal, err := Marshal(Root{})
@@ -769,9 +769,71 @@ func TestReview_PretouchMergedAddressabilityPlans(t *testing.T) {
 		); err != nil {
 			t.Fatalf("iter %d MixedRoot Pretouch error: %v", iter, err)
 		}
-		if encvars.GetProgram(reflect.TypeOf(Child{}), false) == nil || encvars.GetProgram(reflect.TypeOf(Child{}), true) == nil {
-			t.Fatalf("iter %d MixedRoot missing one of (Child, pv=false/true) plans", iter)
+		if encvars.GetProgramMode(reflect.TypeOf(Child{}), false, true) == nil || encvars.GetProgramMode(reflect.TypeOf(Child{}), true, true) == nil {
+			t.Fatalf("iter %d MixedRoot missing one of (Child, pv=false/true, omitNull=true) plans", iter)
 		}
+		if encvars.GetProgramMode(reflect.TypeOf(Child{}), false, false) != nil || encvars.GetProgramMode(reflect.TypeOf(Child{}), true, false) != nil {
+			t.Fatalf("iter %d MixedRoot EncOnlyOmitNull Pretouch polluted default omitNull=false cache for shared Child", iter)
+		}
+	}
+}
+
+func TestOnlyOmitNullExplicitConfigAndNoPretouchCrossPollution(t *testing.T) {
+	type sharedChild struct {
+		ZeroInt int    `json:"zero_int,omitempty"`
+		NilPtr  *int   `json:"nil_ptr,omitempty"`
+		Tag     string `json:"tag"`
+	}
+	type serviceARoot struct {
+		Child sharedChild `json:"child"`
+	}
+	type serviceBRoot struct {
+		Child sharedChild `json:"child"`
+	}
+
+	encvars.ResetProgramCache()
+	defer encvars.ResetProgramCache()
+
+	// 1. Calling default Marshal first must NOT prevent explicit OnlyOmitNull config from omitting only nil.
+	defOut, err := ConfigDefault.Marshal(serviceARoot{Child: sharedChild{Tag: "ok"}})
+	if err != nil || string(defOut) != `{"child":{"tag":"ok"}}` {
+		t.Fatalf("default Marshal got (%s, %v)", defOut, err)
+	}
+
+	cfgOmitNull := Config{OnlyOmitNull: true}.Froze()
+	omitNullOut, err := cfgOmitNull.Marshal(serviceARoot{Child: sharedChild{Tag: "ok"}})
+	if err != nil || string(omitNullOut) != `{"child":{"zero_int":0,"tag":"ok"}}` {
+		t.Fatalf("Config{OnlyOmitNull:true} Marshal got (%s, %v)", omitNullOut, err)
+	}
+
+	// Default Marshal after OnlyOmitNull must remain unchanged.
+	defOutAfter, err := ConfigDefault.Marshal(serviceARoot{Child: sharedChild{Tag: "ok"}})
+	if err != nil || string(defOutAfter) != `{"child":{"tag":"ok"}}` {
+		t.Fatalf("default Marshal after OnlyOmitNull got (%s, %v)", defOutAfter, err)
+	}
+
+	// 2. Legacy Pretouch(serviceARoot, WithCompileEncOnlyOmitNull(true)) with low inline depth
+	// must NOT alter default Marshal on sharedChild or serviceBRoot!
+	encvars.ResetProgramCache()
+	if err := encoder.Pretouch(
+		reflect.TypeOf(serviceARoot{}),
+		option.WithCompileMaxInlineDepth(1),
+		option.WithCompileRecursiveDepth(2),
+		option.WithCompileEncOnlyOmitNull(true),
+	); err != nil {
+		t.Fatal(err)
+	}
+	bOut, err := ConfigDefault.Marshal(serviceBRoot{Child: sharedChild{Tag: "b"}})
+	if err != nil || string(bOut) != `{"child":{"tag":"b"}}` {
+		t.Fatalf("Pretouch on serviceARoot polluted serviceBRoot: got (%s, %v)", bOut, err)
+	}
+	cOut, err := ConfigDefault.Marshal(sharedChild{Tag: "c"})
+	if err != nil || string(cOut) != `{"tag":"c"}` {
+		t.Fatalf("Pretouch on serviceARoot polluted sharedChild: got (%s, %v)", cOut, err)
+	}
+	aLegacyOut, err := ConfigDefault.Marshal(serviceARoot{Child: sharedChild{Tag: "a"}})
+	if err != nil || string(aLegacyOut) != `{"child":{"zero_int":0,"tag":"a"}}` {
+		t.Fatalf("legacy Pretouch on serviceARoot recursive child mismatch: got (%s, %v)", aLegacyOut, err)
 	}
 }
 

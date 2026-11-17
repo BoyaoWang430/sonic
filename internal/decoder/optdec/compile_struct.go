@@ -137,8 +137,7 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 	if dec, ok := c.compiled[vt]; ok {
 		return dec
 	}
-	defaultDepth := !c.opts.HasExplicitMaxInlineDepth() && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth
-	if c.depth > 1 && defaultDepth {
+	if c.depth > 1 && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth {
 		if val := programCache.Get(vt); val != nil {
 			if sd, ok := val.(*structDecoder); ok {
 				c.compiled[vt] = sd
@@ -147,11 +146,7 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 		}
 	}
 
-	maxDepth := c.opts.MaxInlineDepth
-	if defaultDepth {
-		maxDepth = 16
-	}
-	if c.depth >= maxDepth+1 {
+	if c.depth >= c.opts.MaxInlineDepth+1 {
 		return c.newRecursiveDecoder(vt)
 	}
 	dec := c.compileStructBody(vt)

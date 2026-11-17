@@ -72,6 +72,10 @@ const (
 
 	// Encode Infinity or Nan float into `null`, instead of returning an error.
 	EncodeNullForInfOrNan Options = 1 << alg.BitEncodeNullForInfOrNan
+
+	// OnlyOmitNull causes `omitempty` struct fields to omit only nil pointers/containers
+	// rather than all zero values.
+	OnlyOmitNull Options = 1 << alg.BitOnlyOmitNull
 )
 
 // Encoder represents a specific set of encoder configurations.
@@ -166,10 +170,8 @@ func Quote(s string) string {
 
 // Encode returns the JSON encoding of val, encoded with opts.
 func Encode(val interface{}, opts Options) ([]byte, error) {
-	if vars.UseVM {
-		if ret, ok, err := vm.EncodeRoot(val, uint64(opts)); ok {
-			return ret, err
-		}
+	if ret, ok, err := vm.EncodeRoot(val, uint64(opts)); ok {
+		return ret, err
 	}
 
 	var ret []byte
@@ -310,10 +312,13 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 		if vt == nil {
 			continue
 		}
+		if cfg.EncOnlyOmitNull {
+			vars.RegisterLegacyOmitNullType(vt)
+		}
 		vtm[vmPretouchKey{vt: vt, pv: false}] = struct{}{}
 	}
 
-	return pretouchRec(vtm, cfg)
+	return pretouchRecVMBatch(vtm, cfg)
 }
 
 // Valid validates json and returns first non-blank character position,

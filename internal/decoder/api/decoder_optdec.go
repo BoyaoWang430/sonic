@@ -41,8 +41,6 @@ func decodeOneImpl(s string, f uint64, val interface{}) (string, int, error) {
 }
 
 func init() {
-	// ARM64 and native RISC-V share optdec and enable all its optimizations.
-	envs.EnableOptDec()
 	envs.EnableFastMap()
 }
 

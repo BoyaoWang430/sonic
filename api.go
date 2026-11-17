@@ -97,6 +97,10 @@ type Config struct {
 
 	// CaseSensitive indicates that the decoder should not ignore the case of object keys.
 	CaseSensitive bool
+
+	// OnlyOmitNull indicates that encoder `omitempty` struct fields omit only nil
+	// pointers/containers instead of all zero values (native Sonic extension).
+	OnlyOmitNull bool
 }
 
 var (

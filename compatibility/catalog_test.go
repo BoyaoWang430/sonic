@@ -31,7 +31,6 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/decoder"
-	"github.com/bytedance/sonic/internal/envs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -312,10 +311,8 @@ func TestCase_UNJ_PARTIAL(t *testing.T) {
 	}
 	if sonic.APIKind == sonic.UseStdJSON {
 		require.Equal(t, j.E, s.E, "compat delegates to active stdlib backend")
-	} else if envs.UseOptDec {
-		require.Equal(t, 1, s.E, "Sonic OptDec applies later fields after UnmarshalJSON error")
 	} else {
-		require.Equal(t, 0, s.E, "Sonic JIT does not apply later fields after UnmarshalJSON error")
+		require.Equal(t, 1, s.E, "Sonic OptDec applies later fields after UnmarshalJSON error")
 	}
 }
 
@@ -596,11 +593,7 @@ func TestCase_SYN_PREMUT(t *testing.T) {
 
 	require.Error(t, se)
 	require.Error(t, je)
-	if sonic.APIKind == sonic.UseStdJSON || envs.UseOptDec {
-		require.Equal(t, S{A: 9, B: 9}, s, "validates syntax before mutation")
-	} else {
-		require.Equal(t, S{A: 1, B: 9}, s, "Sonic JIT applies fields before the syntax error")
-	}
+	require.Equal(t, S{A: 9, B: 9}, s, "validates syntax before mutation")
 	require.Equal(t, S{A: 9, B: 9}, j, "std validates syntax before mutation")
 }
 
@@ -646,13 +639,8 @@ func TestCase_STRING_GONUM(t *testing.T) {
 
 			require.NoError(t, je)
 			require.Equal(t, tt.want, j)
-			if sonic.APIKind == sonic.UseStdJSON || envs.UseOptDec {
-				require.NoError(t, se)
-				require.Equal(t, j, s)
-			} else {
-				require.Error(t, se)
-				require.Equal(t, S{}, s)
-			}
+			require.NoError(t, se)
+			require.Equal(t, j, s)
 		})
 	}
 }
@@ -720,12 +708,9 @@ func TestCase_STRING_GONUM_PLUS(t *testing.T) {
 			if sonic.APIKind == sonic.UseStdJSON {
 				require.Equal(t, je == nil, se == nil)
 				require.Equal(t, j, s)
-			} else if envs.UseOptDec {
+			} else {
 				require.NoError(t, se)
 				require.Equal(t, tt.want, s)
-			} else {
-				require.Error(t, se)
-				require.Equal(t, S{}, s)
 			}
 		})
 	}
@@ -781,7 +766,7 @@ func TestCase_BASE64_ERROR(t *testing.T) {
 		require.Equal(t, stdUsesJSONV2, errors.As(se, &typeErr))
 	} else {
 		require.Empty(t, s)
-		require.Equal(t, !envs.UseOptDec, errors.As(se, &corrupt))
+		require.False(t, errors.As(se, &corrupt))
 	}
 }
 

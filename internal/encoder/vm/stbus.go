@@ -44,7 +44,11 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 	if vt == nil {
 		return prim.EncodeNil(buf)
 	}
-	pp, err := vars.FindOrCompile(vt, (fv&(1<<alg.BitPointerValue)) != 0, compiler)
+	omitNull := (fv&(1<<alg.BitOnlyOmitNull)) != 0 || vars.HasLegacyOmitNull(vt)
+	if omitNull {
+		fv |= 1 << alg.BitOnlyOmitNull
+	}
+	pp, err := vars.FindOrCompileMode(vt, (fv&(1<<alg.BitPointerValue)) != 0, omitNull, compiler)
 	if err != nil {
 		return err
 	}
@@ -320,8 +324,12 @@ func newValueBoxPool(vt reflect.Type) *sync.Pool {
 	}
 }
 
-func buildRootEncPlan(vt reflect.Type, _ ...interface{}) (interface{}, error) {
-	pp, err := vars.FindOrCompile(vt, false, compiler)
+func buildRootEncPlan(vt reflect.Type, ex ...interface{}) (interface{}, error) {
+	omitNull := false
+	if len(ex) > 0 {
+		omitNull = ex[0].(bool)
+	}
+	pp, err := vars.FindOrCompileMode(vt, false, omitNull, compiler)
 	if err != nil {
 		return nil, err
 	}
@@ -663,18 +671,22 @@ func EncodeValue(buf *[]byte, val interface{}, sb *vars.Stack, fv uint64) error 
 	// Values unpacked from an interface{} are not addressable at top level;
 	// pointer types will re-enable pv=true inside compilePtrBody after OP_deref.
 	fv &^= (1 << alg.BitPointerValue)
-	plan, err := getOrBuildRootPlan(rv.Type())
+	plan, err := getOrBuildRootPlan(rv.Type(), &fv)
 	if err != nil {
 		return err
 	}
 	return encodeWithRootPlan(buf, rv, plan, sb, fv)
 }
 
-func getOrBuildRootPlan(vt reflect.Type) (*rootEncPlan, error) {
-	if cached := vars.GetRootPlan(vt); cached != nil {
+func getOrBuildRootPlan(vt reflect.Type, fv *uint64) (*rootEncPlan, error) {
+	omitNull := (*fv&(1<<alg.BitOnlyOmitNull)) != 0 || vars.HasLegacyOmitNull(vt)
+	if omitNull {
+		*fv |= 1 << alg.BitOnlyOmitNull
+	}
+	if cached := vars.GetRootPlanMode(vt, omitNull); cached != nil {
 		return cached.(*rootEncPlan), nil
 	}
-	computed, err := vars.ComputeRootPlan(vt, buildRootEncPlan)
+	computed, err := vars.ComputeRootPlanMode(vt, omitNull, buildRootEncPlan)
 	if err != nil {
 		return nil, err
 	}
@@ -817,7 +829,7 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 		return []byte{'n', 'u', 'l', 'l'}, true, nil
 	}
 	fv &^= (1 << alg.BitPointerValue)
-	plan, err := getOrBuildRootPlan(rv.Type())
+	plan, err := getOrBuildRootPlan(rv.Type(), &fv)
 	if err != nil {
 		return nil, true, err
 	}
