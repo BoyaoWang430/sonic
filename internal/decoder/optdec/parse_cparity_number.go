@@ -42,8 +42,8 @@ func cParityParseNumber(cur *unsafe.Pointer, num *cParityNum, neg bool, dbuf *[]
 func cParityParseNumberValue(p unsafe.Pointer, num cParityNum, neg bool, dbuf []byte) (unsafe.Pointer, cParityNum, ErrorCode) {
 	start := p
 	var sig uint64
-	var exp, expDec int32
-	expNeg := int32(1)
+	var exp, expDec int64
+	expNeg := int64(1)
 	trunc := false
 	var value float64
 	var converted bool
@@ -70,15 +70,14 @@ func cParityParseNumberValue(p unsafe.Pointer, num cParityNum, neg bool, dbuf []
 			if cParityNumberByte(p) == 'e' || cParityNumberByte(p) == 'E' {
 				goto exponent
 			}
-			exp -= int32(uintptr(p) - uintptr(dot))
+			exp -= int64(uintptr(p) - uintptr(dot))
 			goto fraction
 		}
 		goto exponent
 	}
 	// Accumulate the representable prefix once. Later digits contribute to
 	// its decimal exponent; the twenty-digit integer case below still checks
-	// its last digit exactly. This preserves C's truncation semantics without
-	// first overflowing the accumulator and replaying the same prefix.
+	// its last digit exactly.
 	for count < 19 && cParityNumberDigit(cParityNumberByte(p)) {
 		sig = sig*10 + uint64(cParityNumberByte(p)-'0')
 		p = unsafe.Add(p, 1)
@@ -88,7 +87,7 @@ func cParityParseNumberValue(p unsafe.Pointer, num cParityNum, neg bool, dbuf []
 		goto invalid
 	}
 	if cParityNumberDigit(cParityNumberByte(p)) {
-		var skipped int32
+		var skipped int64
 		p, skipped = cParitySkipDigits(p)
 		trunc = true
 		exp += skipped
@@ -141,7 +140,7 @@ fraction:
 		needed--
 		fracCount++
 	}
-	exp -= int32(fracCount)
+	exp -= int64(fracCount)
 	if cParityNumberDigit(cParityNumberByte(p)) {
 		p, _ = cParitySkipDigits(p)
 		trunc = true
@@ -161,19 +160,32 @@ exponent:
 	if !cParityNumberDigit(cParityNumberByte(p)) {
 		goto invalid
 	}
+	for cParityNumberByte(p) == '0' {
+		p = unsafe.Add(p, 1)
+	}
 	count = 0
 	for cParityNumberDigit(cParityNumberByte(p)) {
-		expDec = expDec*10 + int32(cParityNumberByte(p)-'0')
+		if count < 12 {
+			expDec = expDec*10 + int64(cParityNumberByte(p)-'0')
+			count++
+		}
 		p = unsafe.Add(p, 1)
-		count++
 	}
-	if count >= 10 {
-		exp, expDec = 0, 10000
+	if count >= 12 {
+		expDec = 1 << 40
 	}
 	exp += expDec * expNeg
 
 floating:
-	value, converted = cParityAtofFast(sig, exp, neg, trunc)
+	if sig == 0 {
+		value = 0
+		if neg {
+			value = -value
+		}
+		converted = true
+	} else if exp >= -348 && exp <= 347 {
+		value, converted = cParityAtofFast(sig, int32(exp), neg, trunc)
+	}
 	if !converted {
 		value = cParityAtofFallback(start, int(uintptr(p)-uintptr(start)), &dbuf)
 		if neg {
@@ -199,7 +211,7 @@ done:
 // are ASCII digits. The parser input is padded and ends in a non-digit, so every
 // word read stays readable. A byte at or above 0xfa can carry into its neighbor
 // only when its own high nibble already rejects the word.
-func cParitySkipDigits(p unsafe.Pointer) (unsafe.Pointer, int32) {
+func cParitySkipDigits(p unsafe.Pointer) (unsafe.Pointer, int64) {
 	start := p
 	for {
 		w := *(*uint64)(p)
@@ -211,7 +223,7 @@ func cParitySkipDigits(p unsafe.Pointer) (unsafe.Pointer, int32) {
 	for cParityNumberDigit(cParityNumberByte(p)) {
 		p = unsafe.Add(p, 1)
 	}
-	return p, int32(uintptr(p) - uintptr(start))
+	return p, int64(uintptr(p) - uintptr(start))
 }
 
 func cParityAtofFast(mant uint64, exp int32, neg, trunc bool) (float64, bool) {

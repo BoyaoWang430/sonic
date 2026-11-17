@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/decoder/consts"
+	"github.com/bytedance/sonic/internal/native/number"
 )
 
 type diffChild struct {
@@ -79,12 +82,15 @@ func resetDiffPathStats() {
 	diffStatsFlatBailout.Store(0)
 }
 
-// hasOver800DigitNumber guards only documented F64-LONG-OVF (>800-digit mantissa truncation vs Go 1.27).
-func hasOver800DigitNumber(s string) bool {
-	if len(s) <= 800 {
+// hasStdPre127StrconvFloatBug reports whether s contains a >800-byte JSON number
+// token on which pre-Go 1.27 stdlib strconv.ParseFloat itself produces a
+// mathematically wrong result (e.g. F64-LONG-OVF). Internal Sonic path
+// comparisons always run without exemption; only the stdlib oracle comparison
+// on pre-Go 1.27 toolchains checks this exact stdlib defect.
+func hasStdPre127StrconvFloatBug(s string) bool {
+	if diffStdUsesJSONV2 || len(s) <= 800 {
 		return false
 	}
-	run := 0
 	inStr := false
 	esc := false
 	for i := 0; i < len(s); i++ {
@@ -103,16 +109,26 @@ func hasOver800DigitNumber(s string) bool {
 		}
 		if c == '"' {
 			inStr = true
-			run = 0
 			continue
 		}
-		if (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
-			run++
-			if run > 800 {
-				return true
+		if c == '-' || (c >= '0' && c <= '9') {
+			end, perr := number.Scan(s, i)
+			if perr == 0 && end-i > 800 {
+				tok := s[i:end]
+				stdF64, stdErr64 := strconv.ParseFloat(tok, 64)
+				exactF64, exactOK64 := number.ParseValidJSONFloat64(tok)
+				if (stdErr64 == nil) != exactOK64 || (exactOK64 && math.Float64bits(stdF64) != math.Float64bits(exactF64)) {
+					return true
+				}
+				stdF32, stdErr32 := strconv.ParseFloat(tok, 32)
+				exactF32, exactOK32 := number.ParseValidJSONFloat32(tok)
+				if (stdErr32 == nil) != exactOK32 || (exactOK32 && math.Float32bits(float32(stdF32)) != math.Float32bits(exactF32)) {
+					return true
+				}
 			}
-		} else {
-			run = 0
+			if end > i {
+				i = end - 1
+			}
 		}
 	}
 	return false
@@ -389,7 +405,7 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 	}
 
 	if checkStd && utf8.ValidString(s) {
-		if diffStdUsesJSONV2 && hasOver800DigitNumber(s) {
+		if hasStdPre127StrconvFloatBug(s) {
 			return
 		}
 		gotStd, errStd := decodeViaStdGenericWithOptsAndInit[T](s, f, initFn)
@@ -502,7 +518,7 @@ func checkAnyFiveWay(t *testing.T, s string, f uint64) {
 		}
 	}
 	if (f == diffStdOpts || f == diffUseNumberOpts) && utf8.ValidString(s) {
-		if diffStdUsesJSONV2 && hasOver800DigitNumber(s) {
+		if hasStdPre127StrconvFloatBug(s) {
 			return
 		}
 		gotStd, errStd := decodeViaStdGenericWithOptsAndInit[any](s, f, nil)
@@ -597,7 +613,7 @@ func checkRawEnvelopeFiveWayWithInit(t *testing.T, s string, f uint64, checkStd 
 		}
 	}
 	if checkStd && utf8.ValidString(s) {
-		if diffStdUsesJSONV2 && hasOver800DigitNumber(s) {
+		if hasStdPre127StrconvFloatBug(s) {
 			return
 		}
 		gotStd, errStd := decodeViaStdGenericWithOptsAndInit[diffRawEnvelope](s, f, initFn)

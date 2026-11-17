@@ -1,8 +1,6 @@
 package number
 
 import (
-	"strconv"
-
 	"github.com/bytedance/sonic/internal/native/types"
 )
 
@@ -127,9 +125,9 @@ func parseFloatPrefix(s string, start int) (Result, int, types.ParsingError) {
 }
 
 func parseFloat(s string) (Result, types.ParsingError) {
-	v, convErr := strconv.ParseFloat(s, 64)
+	v, ok := ParseValidJSONFloat64(s)
 	result := Result{Kind: Float, Float64: v}
-	if convErr != nil {
+	if !ok {
 		// The caller has already validated JSON number syntax, so only a
 		// range error is possible here.
 		return result, types.ERR_FLOAT_INFINITY

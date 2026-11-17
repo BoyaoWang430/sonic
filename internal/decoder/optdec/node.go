@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/envs"
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
@@ -415,8 +416,7 @@ func (val Node) AsF64(ctx *Context) (float64, bool) {
 	case KReal:
 		return float64(val.F64()), true
 	case KRawNumber:
-		f, err := val.Number(ctx).Float64()
-		return f, err == nil
+		return number.ParseValidJSONFloat64(val.Raw(ctx))
 	default:
 		return 0, false
 	}
@@ -431,7 +431,7 @@ func (val Node) AsF32(ctx *Context) (float32, bool) {
 	case KReal:
 		return realBitsToFloat32(val.ptr.val, ctx.Parser.Json, val.Position())
 	case KRawNumber:
-		return parseExactFloat32Slice(val.Raw(ctx))
+		return number.ParseValidJSONFloat32(val.Raw(ctx))
 	default:
 		return 0, false
 	}

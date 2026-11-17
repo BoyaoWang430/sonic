@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/native"
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/internal/utils"
@@ -91,11 +92,19 @@ func ParseU64(raw string) (uint64, error) {
 }
 
 func ParseF64(raw string) (float64, error) {
-	f64, err := strconv.ParseFloat(raw, 64)
+	f64, err := number.ParseGoFloat64(raw)
 	if err != nil {
 		return 0, err
 	}
 	return f64, nil
+}
+
+func ParseF32(raw string) (float32, error) {
+	f32, err := number.ParseGoFloat32(raw)
+	if err != nil {
+		return 0, err
+	}
+	return f32, nil
 }
 
 func Unquote(raw string) (string, error) {

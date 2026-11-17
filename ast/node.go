@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -356,7 +357,7 @@ func (self *Node) Int64() (int64, error) {
 		case string:
 			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
 				return i, nil
-			} else if f, err := strconv.ParseFloat(v, 64); err == nil {
+			} else if f, err := number.ParseGoFloat64(v); err == nil {
 				return int64(f), nil
 			} else {
 				return 0, err
@@ -364,7 +365,7 @@ func (self *Node) Int64() (int64, error) {
 		case json.Number:
 			if i, err := v.Int64(); err == nil {
 				return i, nil
-			} else if f, err := v.Float64(); err == nil {
+			} else if f, err := number.ParseGoFloat64(string(v)); err == nil {
 				return int64(f), nil
 			} else {
 				return 0, err
@@ -484,7 +485,7 @@ func (self *Node) Number() (json.Number, error) {
 		case float64:
 			return json.Number(strconv.FormatFloat(v, 'g', -1, 64)), nil
 		case string:
-			if _, err := strconv.ParseFloat(v, 64); err == nil {
+			if _, err := number.ParseGoFloat64(v); err == nil {
 				return json.Number(v), nil
 			} else {
 				return json.Number(""), err
@@ -645,13 +646,13 @@ func (self *Node) Float64() (float64, error) {
 		case float64:
 			return float64(v), nil
 		case string:
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
+			if f, err := number.ParseGoFloat64(v); err == nil {
 				return float64(f), nil
 			} else {
 				return 0, err
 			}
 		case json.Number:
-			if f, err := v.Float64(); err == nil {
+			if f, err := number.ParseGoFloat64(string(v)); err == nil {
 				return float64(f), nil
 			} else {
 				return 0, err
@@ -2639,7 +2640,7 @@ func parseFloat64Fast(s string) (float64, error) {
 			}
 		}
 	}
-	return strconv.ParseFloat(s, 64)
+	return number.ParseGoFloat64(s)
 }
 
 func (node *Node) toInt64() (int64, error) {

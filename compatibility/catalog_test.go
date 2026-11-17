@@ -870,8 +870,10 @@ func TestCase_TEXT_APPEND(t *testing.T) {
 }
 
 // Case F64-LONG-OVF: a mantissa longer than the 800-digit fallback buffer
-// exposes a historical range-detection bug. Go 1.27 reports the mathematical
-// overflow; Sonic still truncates the mantissa and returns a finite value.
+// historically truncated the logical decimal point. Native Sonic now tracks the
+// exact logical decimal point and always reports the mathematical overflow
+// across all Go versions, whereas encoding/json prior to Go 1.27 still exhibits
+// the historical stdlib strconv truncation bug.
 func TestCase_F64_LONG_OVF(t *testing.T) {
 	number := "5" + strings.Repeat("3", 383) + "5" + strings.Repeat("3", 1327) + "e-913"
 	data := []byte("[" + number + "]")
@@ -899,10 +901,15 @@ func TestCase_F64_LONG_OVF(t *testing.T) {
 			return
 		}
 	} else {
-		// Go 1.26 and earlier share Sonic's historical finite-value behavior.
+		// Go 1.26 and earlier stdlib strconv.ParseFloat still returns a finite value.
 		require.NoError(t, je)
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.NoError(t, se)
+			require.Equal(t, j, s)
+			return
+		}
 	}
-	require.NoError(t, se)
+	require.Error(t, se)
 	require.Len(t, s, 1)
-	require.Equal(t, 5.3333333333333336e-114, s[0])
+	require.Nil(t, s[0])
 }

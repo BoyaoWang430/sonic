@@ -1061,17 +1061,18 @@ func decodeFloat32Key(dec *mapDecoder, raw string, kv reflect.Value) error {
 	if err != nil {
 		return err
 	}
-	ret, err := strconv.ParseFloat(key, 32)
+	ret, err := ParseF32(key)
 	if err != nil {
 		if ne, ok := err.(*strconv.NumError); ok && ne.Err == strconv.ErrRange {
 			return error_value(key, dec.keyType)
 		}
 		return err
 	}
-	if math.IsNaN(ret) || math.IsInf(ret, 0) {
+	f64 := float64(ret)
+	if math.IsNaN(f64) || math.IsInf(f64, 0) {
 		return error_value(key, dec.keyType)
 	}
-	kv.SetFloat(ret)
+	kv.SetFloat(f64)
 	return nil
 }
 

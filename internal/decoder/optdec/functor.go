@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
-	"strconv"
 	"sync/atomic"
 	"unsafe"
 
@@ -356,11 +355,11 @@ func needsExactFloat32(bits uint64) bool {
 
 //go:noinline
 func parseExactFloat32Slice(raw string) (float32, bool) {
-	f, err := strconv.ParseFloat(raw, 32)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+	f, err := ParseF32(raw)
+	if err != nil || math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
 		return 0, false
 	}
-	return float32(f), true
+	return f, true
 }
 
 //go:noinline

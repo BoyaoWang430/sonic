@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/utils"
 	"github.com/bytedance/sonic/unquote"
@@ -209,7 +210,7 @@ func decodeFloat64(src string, pos int) (ret int, v float64, err error) {
 	ret = sp
 	vv := src[pos:ret]
 
-	v, err = strconv.ParseFloat(vv, 64)
+	v, err = number.ParseGoFloat64(vv)
 	if err != nil {
 		//NOTICE: allow overflow here
 		if err.(*strconv.NumError).Err == strconv.ErrRange {
