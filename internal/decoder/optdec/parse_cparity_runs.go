@@ -52,6 +52,10 @@ const (
 )
 
 func cParityParseWithPadding(p *Parser) ErrorCode {
+	return cParityParseWithPaddingMode(p, cpu.UseScalar)
+}
+
+func cParityParseWithPaddingMode(p *Parser, forceScalar bool) ErrorCode {
 	var state cParityRunsState
 	p.scanFlags = p.options & (scanKernelFlagRawNumber | scanKernelFlagRejectControl)
 	buf := &p.nbuf
@@ -90,7 +94,7 @@ func cParityParseWithPadding(p *Parser) ErrorCode {
 	var code ErrorCode
 	for {
 		var event int
-		if cpu.UseScalar {
+		if forceScalar {
 			event = cParityParseRunsScalar(&p.ScanKernelState, &state, raw, p.nodes)
 		} else {
 			event = cParityParseRunsAsm(&p.ScanKernelState, &state, rawBase, nodesBase)

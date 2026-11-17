@@ -179,6 +179,58 @@ func decodeViaRunsWithInit[T any](s string, f uint64, initFn func(*T)) (T, error
 	return dst, checkSingleDocEnd(s, endPos, fix_error(s, 0, err))
 }
 
+func decodeViaScalarRunsWithInit[T any](s string, f uint64, initFn func(*T)) (T, error) {
+	var dst T
+	if initFn != nil {
+		initFn(&dst)
+	}
+	etp, vp, dec, _, err := unpackAndCompileRoot(&dst)
+	if err != nil {
+		return dst, err
+	}
+	p := newParserImpl(s, 0, f)
+	defer p.free()
+	p.isEface = etp == anyType || etp == mapEfaceType || etp == sliceEfaceType
+	p.strictURC = (f & (1 << _F_disable_urc)) != 0
+	p.keepUseNumber = (f & (1 << _F_use_number)) != 0
+	p.deferFloatOverflow = !p.keepUseNumber
+	p.ensurePadded()
+	old := p.options
+	if !p.isEface && !p.keepUseNumber {
+		p.options &^= 1 << _F_use_number
+	}
+	ecode := parseRunsGrowingMode(p, true)
+	p.options = old
+	if p.Utf8Inv {
+		s = p.Json
+	}
+	if ecode != SONIC_OK {
+		err = p.fixError(ecode)
+	} else {
+		ctx := p.initDecodeContext(p.snapshotDocument(), f, etp)
+		err = dec.FromDom(vp, ctx.Root(), ctx)
+	}
+	endPos := p.Pos()
+	if endPos > len(s) {
+		endPos = len(s)
+	}
+	return dst, checkSingleDocEnd(s, endPos, fix_error(s, 0, err))
+}
+
+func classifyContractErr(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	switch err.(type) {
+	case SyntaxError:
+		return "syntax"
+	case *MismatchTypeError, MismatchTypeError:
+		return "mismatch"
+	default:
+		return "other"
+	}
+}
+
 func decodeViaSchemaOrFullWithInit[T any](s string, f uint64, initFn func(*T)) (T, bool, error) {
 	var dst T
 	if initFn != nil {
@@ -330,6 +382,7 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 	errRouter = checkSingleDocEnd(sRouter, endRouter, errRouter)
 
 	gotRuns, errRuns := decodeViaRunsWithInit[T](s, f, initFn)
+	gotScalar, errScalar := decodeViaScalarRunsWithInit[T](s, f, initFn)
 	gotSchema, usedSchema, errSchema := decodeViaSchemaOrFullWithInit[T](s, f, initFn)
 	if usedSchema {
 		diffStatsSchemaHit.Add(1)
@@ -341,37 +394,47 @@ func checkGenericSixWayWithInit[T any](t *testing.T, s string, f uint64, checkSt
 
 	noValSkip := (f & (1 << _F_no_validate_json)) != 0
 	if !noValSkip {
-		if (errRouter != nil) != (errRuns != nil) {
-			t.Fatalf("%T router vs runs err mismatch (f=0x%x) on %q:\n  router=%v\n  runs=%v", gotRuns, f, s, errRouter, errRuns)
+		runsKind := classifyContractErr(errRuns)
+		if classifyContractErr(errRouter) != runsKind {
+			t.Fatalf("%T router vs runs err kind mismatch (f=0x%x) on %q:\n  router=%T (%v)\n  runs=%T (%v)", gotRuns, f, s, errRouter, errRouter, errRuns, errRuns)
 		}
-		if (errSchema != nil) != (errRuns != nil) {
-			t.Fatalf("%T schema vs runs err mismatch (f=0x%x) on %q:\n  schema=%v\n  runs=%v", gotRuns, f, s, errSchema, errRuns)
+		if classifyContractErr(errScalar) != runsKind {
+			t.Fatalf("%T scalar vs runs err kind mismatch (f=0x%x) on %q:\n  scalar=%T (%v)\n  runs=%T (%v)", gotRuns, f, s, errScalar, errScalar, errRuns, errRuns)
 		}
-		if (errGiant != nil) != (errRuns != nil) {
-			t.Fatalf("%T giant vs runs err mismatch (f=0x%x) on %q:\n  giant=%v\n  runs=%v", gotRuns, f, s, errGiant, errRuns)
+		if classifyContractErr(errSchema) != runsKind {
+			t.Fatalf("%T schema vs runs err kind mismatch (f=0x%x) on %q:\n  schema=%T (%v)\n  runs=%T (%v)", gotRuns, f, s, errSchema, errSchema, errRuns, errRuns)
 		}
-		if (errStream != nil) != (errRuns != nil) {
-			t.Fatalf("%T stream vs runs err mismatch (f=0x%x) on %q:\n  stream=%v\n  runs=%v", gotRuns, f, s, errStream, errRuns)
+		if classifyContractErr(errGiant) != runsKind {
+			t.Fatalf("%T giant vs runs err kind mismatch (f=0x%x) on %q:\n  giant=%T (%v)\n  runs=%T (%v)", gotRuns, f, s, errGiant, errGiant, errRuns, errRuns)
 		}
-	} else if errRuns == nil {
-		if errRouter != nil || errSchema != nil || errGiant != nil || errStream != nil {
-			t.Fatalf("%T NoValidateJSON failed on input accepted by runs (f=0x%x) on %q: router=%v schema=%v giant=%v stream=%v",
-				gotRuns, f, s, errRouter, errSchema, errGiant, errStream)
+		if classifyContractErr(errStream) != runsKind {
+			t.Fatalf("%T stream vs runs err kind mismatch (f=0x%x) on %q:\n  stream=%T (%v)\n  runs=%T (%v)", gotRuns, f, s, errStream, errStream, errRuns, errRuns)
 		}
-	}
 
-	if errRuns == nil {
+		// Contract Dimension 4: Verify destination target state on BOTH success and error!
 		if !reflect.DeepEqual(gotRouter, gotRuns) {
-			t.Fatalf("%T router vs runs value mismatch (f=0x%x) on %q:\n  router=%#v\n  runs=%#v", gotRuns, f, s, gotRouter, gotRuns)
+			t.Fatalf("%T router vs runs target state mismatch (err=%v, f=0x%x) on %q:\n  router=%#v\n  runs=%#v", gotRuns, errRuns, f, s, gotRouter, gotRuns)
+		}
+		if !reflect.DeepEqual(gotScalar, gotRuns) {
+			t.Fatalf("%T scalar vs runs target state mismatch (err=%v, f=0x%x) on %q:\n  scalar=%#v\n  runs=%#v", gotRuns, errRuns, f, s, gotScalar, gotRuns)
 		}
 		if !reflect.DeepEqual(gotSchema, gotRuns) {
-			t.Fatalf("%T schema vs runs value mismatch (f=0x%x) on %q:\n  schema=%#v\n  runs=%#v", gotRuns, f, s, gotSchema, gotRuns)
+			t.Fatalf("%T schema vs runs target state mismatch (err=%v, f=0x%x) on %q:\n  schema=%#v\n  runs=%#v", gotRuns, errRuns, f, s, gotSchema, gotRuns)
 		}
 		if !reflect.DeepEqual(gotGiant, gotRuns) {
-			t.Fatalf("%T giant vs runs value mismatch (f=0x%x) on %q:\n  giant=%#v\n  runs=%#v", gotRuns, f, s, gotGiant, gotRuns)
+			t.Fatalf("%T giant vs runs target state mismatch (err=%v, f=0x%x) on %q:\n  giant=%#v\n  runs=%#v", gotRuns, errRuns, f, s, gotGiant, gotRuns)
 		}
 		if !reflect.DeepEqual(gotStream, gotRuns) {
-			t.Fatalf("%T stream vs runs value mismatch (f=0x%x) on %q:\n  stream=%#v\n  runs=%#v", gotRuns, f, s, gotStream, gotRuns)
+			t.Fatalf("%T stream vs runs target state mismatch (err=%v, f=0x%x) on %q:\n  stream=%#v\n  runs=%#v", gotRuns, errRuns, f, s, gotStream, gotRuns)
+		}
+	} else if errRuns == nil {
+		if errRouter != nil || errScalar != nil || errSchema != nil || errGiant != nil || errStream != nil {
+			t.Fatalf("%T NoValidateJSON failed on input accepted by runs (f=0x%x) on %q: router=%v scalar=%v schema=%v giant=%v stream=%v",
+				gotRuns, f, s, errRouter, errScalar, errSchema, errGiant, errStream)
+		}
+		if !reflect.DeepEqual(gotRouter, gotRuns) || !reflect.DeepEqual(gotScalar, gotRuns) ||
+			!reflect.DeepEqual(gotSchema, gotRuns) || !reflect.DeepEqual(gotGiant, gotRuns) || !reflect.DeepEqual(gotStream, gotRuns) {
+			t.Fatalf("%T NoValidateJSON value mismatch (f=0x%x) on %q", gotRuns, f, s)
 		}
 	}
 

@@ -89,10 +89,9 @@ func resetAndRunFullParse(p *Parser, mutated bool) ErrorCode {
 	p.end = len(p.Json)
 	p.nbk = cParityNonspaceBlock{}
 	p.nbuf = nodeBuf{}
+	p.nbuf.init(p.nodes)
 	if wasLazy && p.singleDoc && len(p.Json) > presizeSingleDocBytes && p.sessionPadded == nil {
 		p.presizeNodesOne()
-	} else {
-		p.nbuf.init(p.nodes)
 	}
 	return parseImpl(p)
 }

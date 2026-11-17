@@ -16,10 +16,7 @@
 
 package cpu
 
-import (
-	"fmt"
-	"os"
-)
+import "os"
 
 var (
 	HasAVX2   bool
@@ -54,7 +51,7 @@ func init() {
 		HasAVX2 = false
 		HasSSSE3 = false
 	default:
-		panic(fmt.Sprintf("invalid mode: '%s', should be one of 'auto', 'noavx', 'noavx2', 'nossse3', 'scalar'", v))
+		panic("invalid mode: '" + v + "', should be one of 'auto', 'noavx', 'noavx2', 'nossse3', 'scalar'")
 	}
 	if forceScalarBuild {
 		UseScalar = true

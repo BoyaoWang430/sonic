@@ -89,6 +89,9 @@ main() {
         runopt|diff)
             run_diff_fuzz
             ;;
+        runopt_scalar|diff_scalar)
+            SONIC_MODE=scalar run_diff_fuzz
+            ;;
         clean)
             cleanup
             ;;

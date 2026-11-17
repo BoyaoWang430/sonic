@@ -269,10 +269,12 @@ func cappedInitialNodesCap(src string, start, divisor int) int {
 func (p *Parser) presizeNodesOne() {
 	start := firstContainerStart(p.Json)
 	if start < 0 {
+		p.nbuf.init(p.nodes)
 		return
 	}
 	estNodes := cappedInitialNodesCap(p.Json, start, 11)
 	if estNodes <= cap(p.nodes) {
+		p.nbuf.init(p.nodes)
 		return
 	}
 	if estNodes > maxPooledNodesCount && p.backup == nil && cap(p.nodes) <= maxPooledNodesCount {

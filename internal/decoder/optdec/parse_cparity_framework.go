@@ -210,7 +210,16 @@ func (p *Parser) growNodeTape(stage *nodeTapeGrowth) bool {
 // cannot make it loop or copy the tape more than a constant number of times
 // beyond the geometric phase.
 func parseRunsGrowing(p *Parser) ErrorCode {
-	err := cParityParseWithPadding(p)
+	return parseRunsGrowingMode(p, false)
+}
+
+func parseRunsGrowingMode(p *Parser, forceScalar bool) ErrorCode {
+	var err ErrorCode
+	if forceScalar {
+		err = cParityParseWithPaddingMode(p, true)
+	} else {
+		err = cParityParseWithPadding(p)
+	}
 	stage := growGeometric
 	for classifyScanStop(err) == scanStopNodeCapExhausted {
 		if p.nbuf.depth > types.MAX_RECURSE && len(p.nodes) > types.MAX_RECURSE+2 {
@@ -222,7 +231,11 @@ func parseRunsGrowing(p *Parser) ErrorCode {
 		if !p.growNodeTape(&stage) {
 			break
 		}
-		err = cParityParseWithPadding(p)
+		if forceScalar {
+			err = cParityParseWithPaddingMode(p, true)
+		} else {
+			err = cParityParseWithPadding(p)
+		}
 	}
 	return err
 }
