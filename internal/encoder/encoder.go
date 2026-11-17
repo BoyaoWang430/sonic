@@ -190,9 +190,18 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 	}
 
 	/* make a copy of the result */
-	if rt.CanSizeResue(cap(*buf)) {
+	if rt.CanSizeResue(cap(*buf)) || (cap(*buf) > len(*buf)*2 && cap(*buf) > 1024) {
 		ret = rt.CloneBytesNoZero(*buf)
-		vars.FreeBytes(buf)
+		if !rt.CanSizeResue(cap(*buf)) {
+			if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+				*buf = origBuf
+				vars.FreeBytes(buf)
+			} else {
+				*buf = nil
+			}
+		} else {
+			vars.FreeBytes(buf)
+		}
 	} else {
 		ret = *buf
 		if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {

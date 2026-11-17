@@ -323,12 +323,41 @@ var (
 )
 
 type StructSliceSpec struct {
-	KeyPtr     *byte
-	SliceType  reflect.Type
-	ElemSize   uintptr
-	Specs      []StructFieldSpec
-	DenseSpecs []StructFieldSpec
-	IsDense    bool
+	KeyPtr       *byte
+	SliceType    reflect.Type
+	ElemSize     uintptr
+	MinElemBytes int
+	Specs        []StructFieldSpec
+	DenseSpecs   []StructFieldSpec
+	IsDense      bool
+}
+
+const MinPtrSliceElemBytes = 3
+
+// MinValueSliceElemBytes returns a compile-time provable lower bound on the
+// JSON bytes emitted per element of a value struct slice ([]T), including its
+// object braces and element separator. It never inspects runtime values.
+func MinValueSliceElemBytes(denseSpecs []StructFieldSpec, isDense bool) int {
+	if !isDense {
+		return 3 // "{}" + ","
+	}
+	n := 3 // "{", "}", ","
+	for i := range denseSpecs {
+		s := &denseSpecs[i]
+		switch s.Kind {
+		case OP_struct_end:
+			n += 1
+		case OP_struct_begin:
+			n += int(s.KeyLen)
+		case OP_str, OP_quote, OP_slice_i64, OP_slice_i32, OP_slice_u64, OP_slice_u32, OP_slice_bool, OP_slice_str, OP_slice_struct, OP_slice_ptr_struct, OP_ptr_struct, OP_bin:
+			n += int(s.KeyLen) + 2
+		case OP_bool:
+			n += int(s.KeyLen) + 4
+		default:
+			n += int(s.KeyLen) + 1
+		}
+	}
+	return n
 }
 
 type StructPtrSpec struct {
@@ -579,10 +608,10 @@ type RootSpec struct {
 	Addressable    bool
 	HasPureSpecs   bool
 	HasDenseSpecs  bool
-	AllowSizeHint  bool
 	BodyStartPC    int
 	BodyEndPC      int
 	ElemSize       uintptr
+	MinElemBytes   int
 	BuiltinMapKind int
 	PureSpecs      []StructFieldSpec
 	DenseSpecs     []StructFieldSpec

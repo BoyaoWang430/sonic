@@ -139,23 +139,6 @@ type Compiler struct {
 	lastPtrOK         bool
 }
 
-func defaultAllowSizeHint(vt reflect.Type) bool {
-	if vt == nil {
-		return false
-	}
-	switch vt.Kind() {
-	case reflect.Struct:
-		return true
-	case reflect.Ptr:
-		return vt.Elem().Kind() == reflect.Struct
-	case reflect.Slice:
-		et := vt.Elem()
-		return et.Kind() == reflect.Struct || (et.Kind() == reflect.Ptr && et.Elem().Kind() == reflect.Struct)
-	default:
-		return false
-	}
-}
-
 func NewCompiler() *Compiler {
 	return &Compiler{
 		opts: option.DefaultCompileOptions(),
@@ -190,9 +173,8 @@ func (self *Compiler) rescue(ep *error) {
 func (self *Compiler) CompileEncoder(vt reflect.Type, pv bool) (ret ir.CompiledEncoder, err error) {
 	defer self.rescue(&err)
 	self.root = ir.RootSpec{
-		Kind:          ir.RootGeneric,
-		Addressable:   pv,
-		AllowSizeHint: defaultAllowSizeHint(vt),
+		Kind:        ir.RootGeneric,
+		Addressable: pv,
 	}
 	self.lastPureSpecs = nil
 	self.lastPureOK = false
@@ -372,7 +354,6 @@ func (self *Compiler) compilePtrBody(p *ir.Program, sp int, vt reflect.Type) {
 			Addressable:   true,
 			HasPureSpecs:  innerPureOK,
 			HasDenseSpecs: hasDense,
-			AllowSizeHint: vt.Kind() == reflect.Struct,
 			BodyStartPC:   bodyStart,
 			BodyEndPC:     bodyEnd,
 			PureSpecs:     innerPureSpecs,
@@ -554,8 +535,8 @@ func (self *Compiler) compileSliceArray(p *ir.Program, sp int, st reflect.Type) 
 				Addressable:   true,
 				HasPureSpecs:  true,
 				HasDenseSpecs: hasDense,
-				AllowSizeHint: true,
 				ElemSize:      elem.Size(),
+				MinElemBytes:  ir.MinValueSliceElemBytes(denseSpecs, hasDense),
 				PureSpecs:     elemPureSpecs,
 				DenseSpecs:    denseSpecs,
 			}
@@ -566,7 +547,7 @@ func (self *Compiler) compileSliceArray(p *ir.Program, sp int, st reflect.Type) 
 				Addressable:   true,
 				HasPureSpecs:  true,
 				HasDenseSpecs: hasDense,
-				AllowSizeHint: true,
+				MinElemBytes:  ir.MinPtrSliceElemBytes,
 				PureSpecs:     elemPtrSpecs,
 				DenseSpecs:    denseSpecs,
 			}
@@ -625,7 +606,6 @@ func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
 				Kind:          ir.RootPureStruct,
 				HasPureSpecs:  true,
 				HasDenseSpecs: hasDense,
-				AllowSizeHint: true,
 				PureSpecs:     pureSpecs,
 				DenseSpecs:    denseSpecs,
 			}
@@ -878,12 +858,13 @@ func (self *Compiler) tryCompileStructFieldSpec(ef *encodedField, baseOffset uin
 					}
 					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
 					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
-						KeyPtr:     ef.commaKeyPtr(),
-						SliceType:  ft,
-						ElemSize:   et.Size(),
-						Specs:      elemSpecs,
-						DenseSpecs: denseSpecs,
-						IsDense:    isDense,
+						KeyPtr:       ef.commaKeyPtr(),
+						SliceType:    ft,
+						ElemSize:     et.Size(),
+						MinElemBytes: ir.MinValueSliceElemBytes(denseSpecs, isDense),
+						Specs:        elemSpecs,
+						DenseSpecs:   denseSpecs,
+						IsDense:      isDense,
 					})
 					kind = ir.OP_slice_struct
 				} else if et.Kind() == reflect.Ptr {
@@ -897,12 +878,13 @@ func (self *Compiler) tryCompileStructFieldSpec(ef *encodedField, baseOffset uin
 					}
 					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
 					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
-						KeyPtr:     ef.commaKeyPtr(),
-						SliceType:  ft,
-						ElemSize:   et.Size(),
-						Specs:      elemSpecs,
-						DenseSpecs: denseSpecs,
-						IsDense:    isDense,
+						KeyPtr:       ef.commaKeyPtr(),
+						SliceType:    ft,
+						ElemSize:     et.Size(),
+						MinElemBytes: ir.MinPtrSliceElemBytes,
+						Specs:        elemSpecs,
+						DenseSpecs:   denseSpecs,
+						IsDense:      isDense,
 					})
 					kind = ir.OP_slice_ptr_struct
 				} else {

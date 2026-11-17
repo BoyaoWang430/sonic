@@ -16,25 +16,40 @@
 
 package vm
 
-import "testing"
+import (
+	"math"
+	"strings"
+	"testing"
+)
 
-func TestGrowSliceBufAfterFirstCapsReservation(t *testing.T) {
-	// A large first element must not be extrapolated over a million elements.
+func TestReserveSliceMinCapNoFirstElemExtrapolationAndOverflowSafe(t *testing.T) {
+	// 1. Overflow and cap safety across extreme counts.
 	buf := append(make([]byte, 0, 8), '[')
-	start := len(buf)
-	buf = append(buf, make([]byte, 4096)...)
-	got := growSliceBufAfterFirst(buf, start, 1000000)
-	if extra := cap(got) - len(got); extra > maxSlicePresize+64 {
-		t.Fatalf("reserved %d bytes ahead, want at most %d", extra, maxSlicePresize+64)
-	}
-	if string(got[:len(buf)]) != string(buf) {
-		t.Fatal("presize must preserve the bytes already written")
+	for _, n := range []int{-1, 0, 1, 1000000, math.MaxInt / 2, math.MaxInt} {
+		got := reserveSliceMinCap(buf, n, 16)
+		if extra := cap(got) - len(got); extra > maxSliceMinReserve+16 {
+			t.Fatalf("n=%d reserved %d bytes ahead, want at most %d", n, extra, maxSliceMinReserve+16)
+		}
+		if string(got[:len(buf)]) != string(buf) {
+			t.Fatalf("n=%d corrupted existing prefix", n)
+		}
 	}
 
-	// Ordinary slices are still presized from the first element.
-	small := append([]byte{'['}, `{"a":1}`...)
-	got = growSliceBufAfterFirst(small, 1, 1000)
-	if want := len(small) + 7*999; cap(got) < want {
-		t.Fatalf("cap %d after presize, want at least %d", cap(got), want)
+	// 2. Skewed large first element must NOT extrapolate 4KB * 999 -> ~4MB reservation.
+	type skewedElem struct {
+		ID  int    `json:"id"`
+		Bio string `json:"bio"`
+	}
+	elems := make([]skewedElem, 1000)
+	elems[0] = skewedElem{ID: 1, Bio: strings.Repeat("x", 4096)}
+	for i := 1; i < len(elems); i++ {
+		elems[i] = skewedElem{ID: i + 1, Bio: ""}
+	}
+	out, ok, err := EncodeRoot(elems, 0)
+	if err != nil || !ok {
+		t.Fatalf("EncodeRoot skewed slice failed: ok=%v err=%v", ok, err)
+	}
+	if cap(out) > len(out)*2+256 {
+		t.Fatalf("skewed first element over-reserved output slice: len=%d cap=%d", len(out), cap(out))
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/bytedance/sonic/encoder"
 	"github.com/bytedance/sonic/internal/decoder/optdec"
@@ -1088,8 +1087,6 @@ func TestEncoderRootCooldownEndToEndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify public ConfigDefault.Marshal parity first, then invoke encvm.EncodeRoot
-	// directly to exercise root cooldown / scratch paths explicitly.
 	pubA, err := ConfigDefault.Marshal(medA)
 	if err != nil || !bytes.Equal(pubA, wantA) {
 		t.Fatalf("public Marshal(medA) error=%v", err)
@@ -1102,24 +1099,23 @@ func TestEncoderRootCooldownEndToEndRecovery(t *testing.T) {
 		return out, err
 	}
 
-	// Prime root sizeHints on uncontended calls so direct single-flight fast path is active.
-	for i := 0; i < 3; i++ {
-		gotA, err := encodeRoot(medA)
-		if err != nil || !bytes.Equal(gotA, wantA) {
-			t.Fatalf("warmup medA error=%v", err)
-		}
+	// Verify returned slices are detached from pooled scratch buffers across calls.
+	firstA, err := encodeRoot(medA)
+	if err != nil || !bytes.Equal(firstA, wantA) {
+		t.Fatalf("first encodeRoot(medA) error=%v", err)
+	}
+	firstSnap := append([]byte(nil), firstA...)
+	for i := 0; i < 4; i++ {
 		gotB, err := encodeRoot(medB)
 		if err != nil || !bytes.Equal(gotB, wantB) {
-			t.Fatalf("warmup medB error=%v", err)
+			t.Fatalf("interleaved medB error=%v", err)
 		}
 	}
-
-	vtA := reflect.TypeOf(medA)
-	if until, ok := encvm.RootPlanCooldownUntilForTest(vtA); !ok || until != 0 {
-		t.Fatalf("expected initial medA cooldownUntil == 0, ok=%v until=%d", ok, until)
+	if !bytes.Equal(firstA, firstSnap) {
+		t.Fatal("EncodeRoot output aliased pooled scratch buffer across subsequent encodes")
 	}
 
-	// Hold medA inside encodeRootDirectSingle on goroutine 1 while 16 workers contend on medA, medB, and smallC.
+	// Hold medA mid-encode on goroutine 1 while 16 workers concurrently encode medA, medB, and smallC.
 	barrier.active.Store(true)
 	var holderWG sync.WaitGroup
 	holderWG.Add(1)
@@ -1158,30 +1154,12 @@ func TestEncoderRootCooldownEndToEndRecovery(t *testing.T) {
 		}()
 	}
 	workersWG.Wait()
-
-	if until, ok := encvm.RootPlanCooldownUntilForTest(vtA); !ok || until <= 0 {
-		close(barrier.release)
-		holderWG.Wait()
-		t.Fatalf("expected contention on medA to set cooldownUntil > 0, got ok=%v until=%d", ok, until)
-	}
-
 	close(barrier.release)
 	holderWG.Wait()
 
-	// Wait past the 2ms lease window while interleaving other types and GC cycles.
-	time.Sleep(4 * time.Millisecond)
-	for i := 0; i < 11; i++ {
-		_, _ = encodeRoot(medB)
-		_, _ = encodeRoot(smallC)
-	}
-
-	// Very first call on medA after the 2ms lease window must clear cooldownUntilNano and recover direct fast path.
-	gotRecovered, err := encodeRoot(medA)
-	if err != nil || !bytes.Equal(gotRecovered, wantA) {
-		t.Fatalf("recovered EncodeRoot(medA) failed: err=%v", err)
-	}
-	if until, ok := encvm.RootPlanCooldownUntilForTest(vtA); !ok || until != 0 {
-		t.Fatalf("expected medA cooldownUntil cleared to 0 on first call after lease window, got ok=%v until=%d", ok, until)
+	gotAfter, err := encodeRoot(medA)
+	if err != nil || !bytes.Equal(gotAfter, wantA) {
+		t.Fatalf("post-contention EncodeRoot(medA) failed: err=%v", err)
 	}
 }
 
@@ -1235,7 +1213,6 @@ func BenchmarkEncoderCooldownModes(b *testing.B) {
 	}
 
 	b.Run("SingleTypeSteady", func(b *testing.B) {
-		time.Sleep(3 * time.Millisecond)
 		_, _ = ConfigDefault.Marshal(valA)
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -1248,7 +1225,6 @@ func BenchmarkEncoderCooldownModes(b *testing.B) {
 	})
 
 	b.Run("MultiTypeInterleaved", func(b *testing.B) {
-		time.Sleep(3 * time.Millisecond)
 		_, _ = ConfigDefault.Marshal(valA)
 		_, _ = ConfigDefault.Marshal(valB)
 		_, _ = ConfigDefault.Marshal(valC)
@@ -1275,7 +1251,7 @@ func BenchmarkEncoderCooldownModes(b *testing.B) {
 		}
 	})
 
-	b.Run("PostContentionRecovered", func(b *testing.B) {
+	b.Run("PostContentionSteady", func(b *testing.B) {
 		var wg sync.WaitGroup
 		for g := 0; g < 16; g++ {
 			wg.Add(1)
@@ -1287,8 +1263,6 @@ func BenchmarkEncoderCooldownModes(b *testing.B) {
 			}()
 		}
 		wg.Wait()
-		time.Sleep(4 * time.Millisecond)
-		// First call recovers direct path; measure recovered steady-state throughput.
 		_, _ = ConfigDefault.Marshal(valA)
 		b.ReportAllocs()
 		b.ResetTimer()

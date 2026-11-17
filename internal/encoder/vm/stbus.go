@@ -22,8 +22,6 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
-	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/encoder/alg"
@@ -56,89 +54,23 @@ func EncodeValuePointer(buf *[]byte, vt reflect.Type, p unsafe.Pointer, sb *vars
 	return Execute(buf, p, sb, fv, &ce.Program)
 }
 
-const (
-	minDirectRootHint = 512
-	maxDirectRootHint = 32 << 10
-)
-
 type rootEncPlan struct {
-	prog              *ir.Program
-	boxPool           *sync.Pool
-	pureSpecs         []ir.StructFieldSpec
-	denseSpecs        []ir.StructFieldSpec
-	elemSize          uintptr
-	builtinMapKind    int
-	bodyStartPC       int
-	bodyEndPC         int
-	sizeHint          atomic.Uint32
-	isDirectPtr       bool
-	isDirectMap       bool
-	hasPureSpecs      bool
-	hasDenseSpecs     bool
-	isPureSlice       bool
-	isPurePtrSlice    bool
-	allowSizeHint     bool
-	boxHasPtrs        bool
-	_                 [64]byte
-	cooldownUntilNano atomic.Int64
-	_                 [56]byte
-	inDirectUse       atomic.Uint32
-}
-
-const encConcCooldownWindow = int64(2 * time.Millisecond)
-
-var encMonoEpoch = time.Now().Add(-time.Second)
-
-func encMonoNowNano() int64 {
-	d := int64(time.Since(encMonoEpoch))
-	if d <= 0 {
-		return 1
-	}
-	return d
-}
-
-func (p *rootEncPlan) tryAcquireDirectSingle() bool {
-	if until := p.cooldownUntilNano.Load(); until != 0 {
-		now := encMonoNowNano()
-		if now < until {
-			return false
-		}
-		p.cooldownUntilNano.CompareAndSwap(until, 0)
-	}
-	if p.inDirectUse.CompareAndSwap(0, 1) {
-		return true
-	}
-	now := encMonoNowNano()
-	p.cooldownUntilNano.Store(now + encConcCooldownWindow)
-	return false
-}
-
-// RootPlanCooldownUntilForTest reports the current cooldownUntilNano timestamp
-// for a cached rootEncPlan (used by end-to-end contention recovery tests).
-func RootPlanCooldownUntilForTest(vt reflect.Type) (int64, bool) {
-	cached := vars.GetRootPlan(vt)
-	if cached == nil {
-		return 0, false
-	}
-	plan, ok := cached.(*rootEncPlan)
-	if !ok || plan == nil {
-		return 0, false
-	}
-	return plan.cooldownUntilNano.Load(), true
-}
-
-func (p *rootEncPlan) tryAcquireDirectSingleAt(now int64) bool {
-	if until := p.cooldownUntilNano.Load(); until != 0 {
-		if now < until {
-			return false
-		}
-		p.cooldownUntilNano.CompareAndSwap(until, 0)
-	}
-	if p.inDirectUse.CompareAndSwap(0, 1) {
-		return true
-	}
-	p.cooldownUntilNano.Store(now + encConcCooldownWindow)
-	return false
+	prog           *ir.Program
+	boxPool        *sync.Pool
+	pureSpecs      []ir.StructFieldSpec
+	denseSpecs     []ir.StructFieldSpec
+	elemSize       uintptr
+	minElemBytes   int
+	builtinMapKind int
+	bodyStartPC    int
+	bodyEndPC      int
+	isDirectPtr    bool
+	isDirectMap    bool
+	hasPureSpecs   bool
+	hasDenseSpecs  bool
+	isPureSlice    bool
+	isPurePtrSlice bool
+	boxHasPtrs     bool
 }
 
 func typeHasPointers(vt reflect.Type) bool {
@@ -159,45 +91,34 @@ func typeHasPointers(vt reflect.Type) bool {
 	}
 }
 
-func clampRootSizeHint(n int) uint32 {
-	if n <= 0 {
-		return 0
-	}
-	if n > maxDirectRootHint {
-		return maxDirectRootHint + 1
-	}
-	return uint32(n)
-}
+// maxSliceMinReserve bounds ahead-of-time minimum reservation for struct slices.
+// Capacity calculation uses only compile-time provable lower bounds per element
+// (never extrapolating from the first runtime element) and checks integer
+// overflow before multiplying or adding.
+const maxSliceMinReserve = 256 << 10
 
-// maxSlicePresize caps how far growSliceBufAfterFirst reserves ahead of the
-// bytes already written. The estimate extrapolates from the first element
-// only, so an unusually large first element must not turn into a huge
-// up-front allocation; append's own growth covers anything beyond the cap.
-const maxSlicePresize = 4 << 20
-
-func growSliceBufAfterFirst(buf []byte, startOff int, n int) []byte {
-	if n < 64 {
+func reserveSliceMinCap(buf []byte, n int, minElemBytes int) []byte {
+	if n <= 1 || minElemBytes <= 0 {
 		return buf
 	}
-	perElem := (len(buf) - startOff) + 1
-	if perElem > 4096 {
-		perElem = 4096
+	rem := n
+	if maxElems := maxSliceMinReserve / minElemBytes; rem > maxElems {
+		rem = maxElems
 	}
-	rem := perElem * (n - 1)
-	rem += rem >> 3
-	if rem > maxSlicePresize {
-		rem = maxSlicePresize
+	extra := rem * minElemBytes
+	if extra <= 0 || len(buf) > math.MaxInt-extra-16 {
+		return buf
 	}
-	est := len(buf) + rem + 64
-	if est > cap(buf) {
-		grown := make([]byte, len(buf), est)
+	need := len(buf) + extra + 16
+	if need > cap(buf) {
+		grown := make([]byte, len(buf), need)
 		copy(grown, buf)
 		return grown
 	}
 	return buf
 }
 
-func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, specs []ir.StructFieldSpec, denseSpecs []ir.StructFieldSpec, hasDense bool, s *vars.Stack, flags uint64) error {
+func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, minElemBytes int, specs []ir.StructFieldSpec, denseSpecs []ir.StructFieldSpec, hasDense bool, s *vars.Stack, flags uint64) error {
 	if rv.IsNil() {
 		if flags&(1<<alg.BitNoNullSliceOrMap) != 0 {
 			*b = append(*b, '[', ']')
@@ -215,8 +136,8 @@ func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, sp
 		return vars.ERR_too_deep
 	}
 	dataPtr := rv.UnsafePointer()
-	startOff := len(*b)
-	buf := append(*b, '[', '{')
+	buf := reserveSliceMinCap(*b, n, minElemBytes)
+	buf = append(buf, '[', '{')
 	var err error
 	sanitize := flags & alg.SanitizeMask
 	if sanitize == 0 {
@@ -226,7 +147,6 @@ func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, sp
 				s.LeaveDepth(2)
 				return err
 			}
-			buf = growSliceBufAfterFirst(buf, startOff, n)
 			for idx := 1; idx < n; idx++ {
 				elemPtr := unsafe.Add(dataPtr, uintptr(idx)*elemSize)
 				buf = append(buf, '}', ',', '{')
@@ -242,7 +162,6 @@ func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, sp
 				s.LeaveDepth(2)
 				return err
 			}
-			buf = growSliceBufAfterFirst(buf, startOff, n)
 			for idx := 1; idx < n; idx++ {
 				elemPtr := unsafe.Add(dataPtr, uintptr(idx)*elemSize)
 				buf = append(buf, '}', ',', '{')
@@ -260,7 +179,6 @@ func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, sp
 				s.LeaveDepth(2)
 				return err
 			}
-			buf = growSliceBufAfterFirst(buf, startOff, n)
 			for idx := 1; idx < n; idx++ {
 				elemPtr := unsafe.Add(dataPtr, uintptr(idx)*elemSize)
 				buf = append(buf, '}', ',', '{')
@@ -276,7 +194,6 @@ func encodePureStructSliceRoot(b *[]byte, rv reflect.Value, elemSize uintptr, sp
 				s.LeaveDepth(2)
 				return err
 			}
-			buf = growSliceBufAfterFirst(buf, startOff, n)
 			for idx := 1; idx < n; idx++ {
 				elemPtr := unsafe.Add(dataPtr, uintptr(idx)*elemSize)
 				buf = append(buf, '}', ',', '{')
@@ -348,7 +265,6 @@ func buildRootEncPlan(vt reflect.Type, ex ...interface{}) (interface{}, error) {
 			isDirectPtr:   true,
 			hasPureSpecs:  spec.HasPureSpecs,
 			hasDenseSpecs: spec.HasDenseSpecs,
-			allowSizeHint: spec.AllowSizeHint,
 		}, nil
 	case ir.RootPureSlice:
 		return &rootEncPlan{
@@ -356,18 +272,18 @@ func buildRootEncPlan(vt reflect.Type, ex ...interface{}) (interface{}, error) {
 			pureSpecs:     spec.PureSpecs,
 			denseSpecs:    spec.DenseSpecs,
 			elemSize:      spec.ElemSize,
+			minElemBytes:  spec.MinElemBytes,
 			hasDenseSpecs: spec.HasDenseSpecs,
 			isPureSlice:   true,
-			allowSizeHint: spec.AllowSizeHint,
 		}, nil
 	case ir.RootPurePtrSlice:
 		return &rootEncPlan{
 			prog:           prog,
 			pureSpecs:      spec.PureSpecs,
 			denseSpecs:     spec.DenseSpecs,
+			minElemBytes:   spec.MinElemBytes,
 			hasDenseSpecs:  spec.HasDenseSpecs,
 			isPurePtrSlice: true,
-			allowSizeHint:  spec.AllowSizeHint,
 		}, nil
 	case ir.RootBuiltinMap:
 		return &rootEncPlan{
@@ -383,7 +299,6 @@ func buildRootEncPlan(vt reflect.Type, ex ...interface{}) (interface{}, error) {
 			denseSpecs:    spec.DenseSpecs,
 			hasPureSpecs:  true,
 			hasDenseSpecs: spec.HasDenseSpecs,
-			allowSizeHint: spec.AllowSizeHint,
 			boxHasPtrs:    typeHasPointers(vt),
 		}, nil
 	default:
@@ -394,10 +309,9 @@ func buildRootEncPlan(vt reflect.Type, ex ...interface{}) (interface{}, error) {
 			boxHasPtrs = typeHasPointers(vt)
 		}
 		return &rootEncPlan{
-			prog:          prog,
-			boxPool:       boxPool,
-			allowSizeHint: spec.AllowSizeHint,
-			boxHasPtrs:    boxHasPtrs,
+			prog:       prog,
+			boxPool:    boxPool,
+			boxHasPtrs: boxHasPtrs,
 		}, nil
 	}
 }
@@ -695,7 +609,7 @@ func getOrBuildRootPlan(vt reflect.Type, fv *uint64) (*rootEncPlan, error) {
 
 func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *vars.Stack, fv uint64) error {
 	if plan.isPureSlice {
-		return encodePureStructSliceRoot(buf, rv, plan.elemSize, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
+		return encodePureStructSliceRoot(buf, rv, plan.elemSize, plan.minElemBytes, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
 	}
 	if plan.isPurePtrSlice {
 		return encodePurePtrStructSliceRoot(buf, rv, plan.pureSpecs, plan.denseSpecs, plan.hasDenseSpecs, sb, fv)
@@ -778,42 +692,9 @@ func encodeWithRootPlan(buf *[]byte, rv reflect.Value, plan *rootEncPlan, sb *va
 	return err
 }
 
-func encodeRootDirectSingle(val interface{}, rv reflect.Value, plan *rootEncPlan, hint int, fv uint64) ([]byte, error) {
-	defer plan.inDirectUse.Store(0)
-	capHint := hint + (hint >> 5) + 96
-	out := make([]byte, 0, capHint)
-	var stk *vars.Stack
-	if !plan.isPureSlice && !plan.isPurePtrSlice && !plan.hasPureSpecs {
-		stk = vars.NewStack()
-	}
-	err := encodeWithRootPlan(&out, rv, plan, stk, fv)
-	if err != nil {
-		if stk != nil {
-			vars.ResetStack(stk)
-			vars.FreeStack(stk)
-		}
-		runtime.KeepAlive(val)
-		return nil, err
-	}
-	if stk != nil {
-		vars.FreeStack(stk)
-	}
-	runtime.KeepAlive(val)
-
-	if len(out) > capHint || len(out)*2 < hint {
-		plan.sizeHint.Store(clampRootSizeHint(len(out)))
-	}
-	if cap(out) > len(out)*2 && cap(out) > 1024 {
-		shrunk := make([]byte, len(out))
-		copy(shrunk, out)
-		return shrunk, nil
-	}
-	return out, nil
-}
-
-// EncodeRoot encodes top-level struct and struct-slice values via per-P pooled scratch buffers
-// with adaptive steady-state capacity hints and unzeroed result cloning, avoiding cold heap
-// zeroing and sync.Pool Stack traffic on pure/dense struct schemas.
+// EncodeRoot encodes top-level struct, pointer, map, and struct-slice values
+// via pooled scratch buffers and detached output slices, with zero global
+// history, clock reads, or cross-request concurrency probing.
 func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	switch val.(type) {
 	case nil, string, []byte, json.RawMessage, json.Number, bool,
@@ -834,28 +715,18 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 		return nil, true, err
 	}
 
-	if plan.allowSizeHint {
-		if plan.isDirectPtr && rv.UnsafePointer() == nil {
-			return []byte{'n', 'u', 'l', 'l'}, true, nil
-		}
-		if plan.isPureSlice || plan.isPurePtrSlice {
-			if rv.IsNil() {
-				if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
-					return []byte{'[', ']'}, true, nil
-				}
-				return []byte{'n', 'u', 'l', 'l'}, true, nil
-			}
-			if rv.Len() == 0 {
+	if plan.isDirectPtr && rv.UnsafePointer() == nil {
+		return []byte{'n', 'u', 'l', 'l'}, true, nil
+	}
+	if plan.isPureSlice || plan.isPurePtrSlice {
+		if rv.IsNil() {
+			if fv&(1<<alg.BitNoNullSliceOrMap) != 0 {
 				return []byte{'[', ']'}, true, nil
 			}
+			return []byte{'n', 'u', 'l', 'l'}, true, nil
 		}
-	}
-
-	if plan.allowSizeHint {
-		hint := int(plan.sizeHint.Load())
-		if hint >= minDirectRootHint && hint <= maxDirectRootHint && plan.tryAcquireDirectSingle() {
-			out, err := encodeRootDirectSingle(val, rv, plan, hint, fv)
-			return out, true, err
+		if rv.Len() == 0 {
+			return []byte{'[', ']'}, true, nil
 		}
 	}
 
@@ -881,16 +752,16 @@ func EncodeRoot(val interface{}, fv uint64) ([]byte, bool, error) {
 	}
 	runtime.KeepAlive(val)
 
-	if plan.allowSizeHint {
-		hint := int(plan.sizeHint.Load())
-		if (len(execCtx.Buf) >= minDirectRootHint && hint == 0) || len(execCtx.Buf) > cap(origBuf) || (hint > 0 && len(execCtx.Buf)*2 < hint) {
-			plan.sizeHint.Store(clampRootSizeHint(len(execCtx.Buf)))
-		}
-	}
-
 	var ret []byte
-	if rt.CanSizeResue(cap(execCtx.Buf)) {
+	if rt.CanSizeResue(cap(execCtx.Buf)) || (cap(execCtx.Buf) > len(execCtx.Buf)*2 && cap(execCtx.Buf) > 1024) {
 		ret = rt.CloneBytesNoZero(execCtx.Buf)
+		if !rt.CanSizeResue(cap(execCtx.Buf)) {
+			if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+				execCtx.Buf = origBuf
+			} else {
+				execCtx.Buf = nil
+			}
+		}
 		vars.FreeExecCtx(execCtx, needStk)
 	} else {
 		ret = execCtx.Buf

@@ -130,9 +130,9 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 		return buf, vars.ERR_too_deep
 	}
 	ptrs := unsafe.Slice((*unsafe.Pointer)(dataPtr), n)
+	buf = reserveSliceMinCap(buf, n, ir.MinPtrSliceElemBytes)
 	buf = append(buf, '[')
 	var err error
-	sized := false
 	if sanitize == 0 {
 		if isDense {
 			for idx, elemPtr := range ptrs {
@@ -143,7 +143,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					buf = append(buf, 'n', 'u', 'l', 'l')
 					continue
 				}
-				startOff := len(buf)
 				buf = append(buf, '{')
 				buf, err = encodeStructFieldsDense(buf, elemPtr, denseSpecs, s, flags)
 				if err != nil {
@@ -151,12 +150,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					return buf, err
 				}
 				buf = append(buf, '}')
-				if !sized {
-					sized = true
-					if rem := n - idx; rem >= 64 {
-						buf = growSliceBufAfterFirst(buf, startOff, rem)
-					}
-				}
 			}
 		} else {
 			for idx, elemPtr := range ptrs {
@@ -167,7 +160,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					buf = append(buf, 'n', 'u', 'l', 'l')
 					continue
 				}
-				startOff := len(buf)
 				buf = append(buf, '{')
 				buf, _, err = encodeStructFieldsDefault(buf, elemPtr, specs, 1<<_S_cond, s, flags)
 				if err != nil {
@@ -175,12 +167,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					return buf, err
 				}
 				buf = append(buf, '}')
-				if !sized {
-					sized = true
-					if rem := n - idx; rem >= 64 {
-						buf = growSliceBufAfterFirst(buf, startOff, rem)
-					}
-				}
 			}
 		}
 	} else {
@@ -193,7 +179,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					buf = append(buf, 'n', 'u', 'l', 'l')
 					continue
 				}
-				startOff := len(buf)
 				buf = append(buf, '{')
 				buf, err = encodeStructFieldsSanitizedDense(buf, elemPtr, denseSpecs, s, flags, sanitize)
 				if err != nil {
@@ -201,12 +186,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					return buf, err
 				}
 				buf = append(buf, '}')
-				if !sized {
-					sized = true
-					if rem := n - idx; rem >= 64 {
-						buf = growSliceBufAfterFirst(buf, startOff, rem)
-					}
-				}
 			}
 		} else {
 			for idx, elemPtr := range ptrs {
@@ -217,7 +196,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					buf = append(buf, 'n', 'u', 'l', 'l')
 					continue
 				}
-				startOff := len(buf)
 				buf = append(buf, '{')
 				buf, _, err = encodeStructFieldsSanitized(buf, elemPtr, specs, 1<<_S_cond, s, flags, sanitize)
 				if err != nil {
@@ -225,12 +203,6 @@ func encodePtrStructSliceBody(buf []byte, dataPtr unsafe.Pointer, n int, specs [
 					return buf, err
 				}
 				buf = append(buf, '}')
-				if !sized {
-					sized = true
-					if rem := n - idx; rem >= 64 {
-						buf = growSliceBufAfterFirst(buf, startOff, rem)
-					}
-				}
 			}
 		}
 	}
@@ -477,7 +449,7 @@ func encodeStructFieldsDense(buf []byte, base unsafe.Pointer, specs []ir.StructF
 			if !s.EnterDepth(2) {
 				return buf, vars.ERR_too_deep
 			}
-			startOff := len(buf)
+			buf = reserveSliceMinCap(buf, n, sliceSpec.MinElemBytes)
 			buf = append(buf, '[', '{')
 			var err error
 			if sliceSpec.IsDense {
@@ -486,7 +458,6 @@ func encodeStructFieldsDense(buf []byte, base unsafe.Pointer, specs []ir.StructF
 					s.LeaveDepth(2)
 					return buf, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -502,7 +473,6 @@ func encodeStructFieldsDense(buf []byte, base unsafe.Pointer, specs []ir.StructF
 					s.LeaveDepth(2)
 					return buf, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -731,7 +701,7 @@ func encodeStructFieldsSanitizedDense(buf []byte, base unsafe.Pointer, specs []i
 			if !s.EnterDepth(2) {
 				return buf, vars.ERR_too_deep
 			}
-			startOff := len(buf)
+			buf = reserveSliceMinCap(buf, n, sliceSpec.MinElemBytes)
 			buf = append(buf, '[', '{')
 			var err error
 			if sliceSpec.IsDense {
@@ -740,7 +710,6 @@ func encodeStructFieldsSanitizedDense(buf []byte, base unsafe.Pointer, specs []i
 					s.LeaveDepth(2)
 					return buf, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -756,7 +725,6 @@ func encodeStructFieldsSanitizedDense(buf []byte, base unsafe.Pointer, specs []i
 					s.LeaveDepth(2)
 					return buf, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -1060,7 +1028,7 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 			if !s.EnterDepth(2) {
 				return buf, f, vars.ERR_too_deep
 			}
-			startOff := len(buf)
+			buf = reserveSliceMinCap(buf, n, sliceSpec.MinElemBytes)
 			buf = append(buf, '[', '{')
 			var err error
 			if sliceSpec.IsDense {
@@ -1069,7 +1037,6 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 					s.LeaveDepth(2)
 					return buf, f, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -1085,7 +1052,6 @@ func encodeStructFieldsDefault(buf []byte, base unsafe.Pointer, specs []ir.Struc
 					s.LeaveDepth(2)
 					return buf, f, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -1610,7 +1576,7 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 			if !s.EnterDepth(2) {
 				return buf, f, vars.ERR_too_deep
 			}
-			startOff := len(buf)
+			buf = reserveSliceMinCap(buf, n, sliceSpec.MinElemBytes)
 			buf = append(buf, '[', '{')
 			var err error
 			if sliceSpec.IsDense {
@@ -1619,7 +1585,6 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 					s.LeaveDepth(2)
 					return buf, f, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
@@ -1635,7 +1600,6 @@ func encodeStructFieldsSanitized(buf []byte, base unsafe.Pointer, specs []ir.Str
 					s.LeaveDepth(2)
 					return buf, f, err
 				}
-				buf = growSliceBufAfterFirst(buf, startOff, n)
 				for idx := 1; idx < n; idx++ {
 					elemPtr := unsafe.Add(dataPtr, uintptr(idx)*sliceSpec.ElemSize)
 					buf = append(buf, '}', ',', '{')
