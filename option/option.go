@@ -39,16 +39,20 @@ type CompileOptions struct {
 	// the loop times for recursively pretouch
 	RecursiveDepth int
 
-	// EncOnlyOmitNull sets the encoder to only omit nil value (ex: nil pointer, nil container) instead of zero value,
-	// with `omitempty` tag.
+	// EncOnlyOmitNull precompiles the OnlyOmitNull encoder plan cache during Pretouch
+	// without changing the runtime behavior of default encoding calls.
+	//
+	// Behavioral migration note: select OnlyOmitNull at encode time via explicit
+	// sonic.Config{OnlyOmitNull: true}.Froze() or encoder.OnlyOmitNull.
+	//
+	// Deprecated: Warm and invoke via explicit sonic.Config{OnlyOmitNull: true} or encoder.OnlyOmitNull.
 	EncOnlyOmitNull bool
 }
 
 var (
-	// Default value(3) means the compiler only inline 3 layers of nested struct.
-	// when the depth exceeds, the compiler will recurse
-	// and compile subsequent structs when they are decoded
-	DefaultMaxInlineDepth = 3
+	// DefaultMaxInlineDepth(16) is the single explicit default inline depth for both
+	// encoder and decoder plans; deeper nested structs recurse cleanly on demand.
+	DefaultMaxInlineDepth = 16
 
 	// Default value(1) means `Pretouch()` will be recursively executed once,
 	// if any nested struct is left (depth exceeds MaxInlineDepth)
@@ -72,7 +76,7 @@ type CompileOption func(o *CompileOptions)
 //
 // For deep nested struct (depth exceeds MaxInlineDepth),
 // try to set more loops to completely compile,
-// thus reduce JIT instability in the first hit.
+// thus avoid on-demand type compilation latency on first hit.
 func WithCompileRecursiveDepth(loop int) CompileOption {
 	return func(o *CompileOptions) {
 		if loop < 0 {
@@ -95,7 +99,11 @@ func WithCompileMaxInlineDepth(depth int) CompileOption {
 	}
 }
 
-// WithCompileEncOnlyOmitNull sets the encoder to only omit nil value instead of zero value with `omitempty` tag.
+// WithCompileEncOnlyOmitNull precompiles the OnlyOmitNull encoder plan cache during Pretouch.
+// It does not implicitly alter subsequent default-mode Marshal/Encode calls; callers must pass
+// encoder.OnlyOmitNull or use sonic.Config{OnlyOmitNull: true}.Froze() at runtime.
+//
+// Deprecated: Prefer explicit sonic.Config{OnlyOmitNull: true} or encoder.OnlyOmitNull.
 func WithCompileEncOnlyOmitNull(omit bool) CompileOption {
 	return func(o *CompileOptions) {
 		o.EncOnlyOmitNull = omit

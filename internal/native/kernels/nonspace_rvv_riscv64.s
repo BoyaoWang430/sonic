@@ -1,0 +1,48 @@
+//go:build !sonic_compat && !sonic_scalar && riscv64 && go1.26 && !go1.28 && riscv64.rva23u64
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "textflag.h"
+
+// func nonSpaceMask(src *byte, size int) (mask uint64)
+// size is in [0,64]. M4 holds all 64 lanes even at the minimum VLEN=128.
+TEXT ·nonSpaceMask(SB), NOSPLIT, $0-24
+	MOV src+0(FP), X10
+	MOV size+8(FP), X11
+	MOV $0, X12
+	BEQZ X11, ns_done
+	MOV $32, X15
+	VSETVLI X11, E8, M4, TA, MA, X0
+	VLE8V (X10), V8
+	VMSEQVX X15, V8, V4
+	// TAB and CR differ only in bit 2. NOR marks non-whitespace lanes.
+	VANDVI $-5, V8, V12
+	VMSEQVI $9, V12, V5
+	VMORMM V4, V5, V4
+	VMSEQVI $10, V8, V5
+	VMNORMM V4, V5, V4
+	// Extract the packed mask, then clear all agnostic tail bits.
+	VSETIVLI $1, E64, M1, TA, MA, X0
+	VMVXS V4, X12
+	MOV $64, X16
+	SUB X11, X16, X16
+	MOV $-1, X17
+	SRL X16, X17, X17
+	AND X17, X12
+ns_done:
+	MOV X12, mask+16(FP)
+	RET

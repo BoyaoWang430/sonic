@@ -21,29 +21,22 @@ import (
 	"sort"
 	"strings"
 	"unicode"
-	"unicode/utf8"
-
-	"github.com/bytedance/sonic/internal/encoder/alg"
 )
 
 type StdField struct {
-	name        string
-	nameBytes   []byte
-	nameNonEsc  string
-	nameEscHTML string
-	tag         bool
-	index       []int
-	typ         reflect.Type
-	omitEmpty   bool
-	omitZero    bool
-	isZero      func(reflect.Value) bool
-	quoted      bool
+	name          string
+	tag           bool
+	index         []int
+	typ           reflect.Type
+	omitEmpty     bool
+	omitZero      bool
+	pointerIsZero bool
+	isZero        func(reflect.Value) bool
+	quoted        bool
 }
 
 type StdStructFields struct {
-	list         []StdField
-	nameIndex    map[string]*StdField
-	byFoldedName map[string]*StdField
+	list []StdField
 }
 
 func typeFields(t reflect.Type) StdStructFields {
@@ -59,9 +52,6 @@ func typeFields(t reflect.Type) StdStructFields {
 
 	// Fields found.
 	var fields []StdField
-
-	// Buffer to run appendHTMLEscape on field names.
-	var nameEscBuf []byte
 
 	for len(next) > 0 {
 		current, next = next, current[:0]
@@ -137,12 +127,6 @@ func typeFields(t reflect.Type) StdStructFields {
 						omitZero:  opts.Contains("omitzero"),
 						quoted:    quoted,
 					}
-					field.nameBytes = []byte(field.name)
-
-					// Build nameEscHTML and nameNonEsc ahead of time.
-					nameEscBuf = alg.HtmlEscape(nameEscBuf[:0], field.nameBytes)
-					field.nameEscHTML = `"` + string(nameEscBuf) + `":`
-					field.nameNonEsc = `"` + field.name + `":`
 
 					if field.omitZero {
 						t := sf.Type
@@ -166,6 +150,7 @@ func typeFields(t reflect.Type) StdStructFields {
 								return v.Interface().(isZeroer).IsZero()
 							}
 						case reflect.PointerTo(t).Implements(isZeroerType):
+							field.pointerIsZero = true
 							field.isZero = func(v reflect.Value) bool {
 								if !v.CanAddr() {
 									// Temporarily box v so we can take the address.
@@ -251,17 +236,7 @@ func typeFields(t reflect.Type) StdStructFields {
 		a, b := fields[i], fields[j]
 		return compare(a.index, b.index) < 0
 	})
-
-	exactNameIndex := make(map[string]*StdField, len(fields))
-	foldedNameIndex := make(map[string]*StdField, len(fields))
-	for i, field := range fields {
-		exactNameIndex[field.name] = &fields[i]
-		// For historical reasons, first folded match takes precedence.
-		if _, ok := foldedNameIndex[string(foldName(field.nameBytes))]; !ok {
-			foldedNameIndex[string(foldName(field.nameBytes))] = &fields[i]
-		}
-	}
-	return StdStructFields{fields, exactNameIndex, foldedNameIndex}
+	return StdStructFields{list: fields}
 }
 
 func compare(s1, s2 []int) int {
@@ -346,42 +321,4 @@ func dominantField(fields []StdField) (StdField, bool) {
 		return StdField{}, false
 	}
 	return fields[0], true
-}
-
-// foldName returns a folded string such that foldName(x) == foldName(y)
-// is identical to bytes.EqualFold(x, y).
-func foldName(in []byte) []byte {
-	// This is inlinable to take advantage of "function outlining".
-	var arr [32]byte // large enough for most JSON names
-	return appendFoldedName(arr[:0], in)
-}
-
-func appendFoldedName(out, in []byte) []byte {
-	for i := 0; i < len(in); {
-		// Handle single-byte ASCII.
-		if c := in[i]; c < utf8.RuneSelf {
-			if 'a' <= c && c <= 'z' {
-				c -= 'a' - 'A'
-			}
-			out = append(out, c)
-			i++
-			continue
-		}
-		// Handle multi-byte Unicode.
-		r, n := utf8.DecodeRune(in[i:])
-		out = utf8.AppendRune(out, foldRune(r))
-		i += n
-	}
-	return out
-}
-
-// foldRune is returns the smallest rune for all runes in the same fold set.
-func foldRune(r rune) rune {
-	for {
-		r2 := unicode.SimpleFold(r)
-		if r2 <= r {
-			return r2
-		}
-		r = r2
-	}
 }

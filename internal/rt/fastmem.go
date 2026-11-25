@@ -154,3 +154,7 @@ func Add(ptr unsafe.Pointer, off uintptr) unsafe.Pointer {
 func CanSizeResue(cap int) bool {
 	return cap <= int(option.LimitBufferSize)
 }
+
+func StringData(s string) *byte    { return unsafe.StringData(s) }
+func SliceData[T any](s []T) *T    { return unsafe.SliceData(s) }
+func String(p *byte, n int) string { return unsafe.String(p, n) }

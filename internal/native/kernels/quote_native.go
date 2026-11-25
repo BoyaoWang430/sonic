@@ -1,0 +1,72 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package kernels
+
+import (
+	"github.com/bytedance/sonic/internal/cpu"
+	"github.com/bytedance/sonic/internal/rt"
+)
+
+// Quote escapes src into dst without surrounding quotes. Only bit zero of flags
+// (types.F_DOUBLE_UNQUOTE) affects the output. The escape spelling matches the
+// native quote tables, including Unicode escapes for backspace and form feed.
+// It preserves non-ASCII bytes without UTF-8 validation or HTML escaping.
+//
+// On success consumed equals len(src). If dst is too short, consumed is the
+// complement of the input byte count processed. written is the output byte count
+// in both cases. Every escape is written atomically. src and dst must not overlap;
+// neither requires padding.
+func Quote(src string, dst []byte, flags uint64) (consumed, written int) {
+	return QuoteBuffer(rt.StringData(src), len(src), rt.SliceData(dst), len(dst), flags)
+}
+
+// QuoteBuffer escapes size bytes from src into dst capacity bytes without
+// surrounding quotes, avoiding string/slice header construction on raw buffers.
+func QuoteBuffer(src *byte, size int, dst *byte, capacity int, flags uint64) (consumed, written int) {
+	if size <= 0 {
+		return 0, 0
+	}
+	if cpu.UseScalar {
+		return quoteScalar(src, size, dst, capacity, flags)
+	}
+	return quote(src, size, dst, capacity, flags)
+}
+
+// QuoteHTML escapes src into dst without surrounding quotes, performing both
+// JSON string escaping and HTML escaping (<, >, &, U+2028, U+2029) in a single
+// pass without UTF-8 validation. src must represent the remaining unchunked
+// suffix of the string so 3-byte U+2028/U+2029 sequences are never split.
+//
+// On success consumed equals len(src). If dst is too short, consumed is the
+// complement of the input byte count processed. Every escape is written atomically.
+func QuoteHTML(src string, dst []byte) (consumed, written int) {
+	return QuoteHTMLBuffer(rt.StringData(src), len(src), rt.SliceData(dst), len(dst))
+}
+
+// QuoteHTMLBuffer escapes size bytes from src into dst capacity bytes without
+// surrounding quotes, fusing JSON string escaping and HTML escaping in one pass.
+func QuoteHTMLBuffer(src *byte, size int, dst *byte, capacity int) (consumed, written int) {
+	if size <= 0 {
+		return 0, 0
+	}
+	if cpu.UseScalar {
+		return quoteHTMLScalar(src, size, dst, capacity)
+	}
+	return quoteHTML(src, size, dst, capacity)
+}

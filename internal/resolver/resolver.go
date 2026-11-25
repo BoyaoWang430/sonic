@@ -21,7 +21,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	_ "unsafe"
 )
 
 type FieldOpts int
@@ -45,11 +44,12 @@ type Offset struct {
 }
 
 type FieldMeta struct {
-	Name   string
-	Path   []Offset
-	Opts   FieldOpts
-	Type   reflect.Type
-	IsZero func(reflect.Value) bool
+	Name          string
+	Path          []Offset
+	Opts          FieldOpts
+	Type          reflect.Type
+	IsZero        func(reflect.Value) bool
+	PointerIsZero bool
 }
 
 func (self *FieldMeta) String() string {
@@ -116,16 +116,26 @@ func (self *FieldMeta) optimize() {
 
 func resolveFields(vt reflect.Type) []FieldMeta {
 	tfv := typeFields(vt)
-	ret := []FieldMeta(nil)
+	nFields := len(tfv.list)
+	if nFields == 0 {
+		return nil
+	}
+	ret := make([]FieldMeta, nFields)
+	totalDepth := 0
+	for i := range tfv.list {
+		totalDepth += len(tfv.list[i].index)
+	}
+	offsetSlab := make([]Offset, totalDepth)
+	slabPos := 0
 
 	/* convert each field */
-	for _, fv := range tfv.list {
-		/* add to result */
-		ret = append(ret, FieldMeta{})
-		fm := &ret[len(ret)-1]
+	for fIdx, fv := range tfv.list {
+		fm := &ret[fIdx]
 
 		item := vt
-		path := []Offset(nil)
+		depth := len(fv.index)
+		path := offsetSlab[slabPos : slabPos+depth : slabPos+depth]
+		slabPos += depth
 
 		/* check for "string" */
 		if fv.quoted {
@@ -141,7 +151,7 @@ func resolveFields(vt reflect.Type) []FieldMeta {
 		handleOmitZero(fv, fm)
 
 		/* dump the field path */
-		for _, i := range fv.index {
+		for d, i := range fv.index {
 			kind := F_offset
 			fval := item.Field(i)
 			item = fval.Type
@@ -153,11 +163,11 @@ func resolveFields(vt reflect.Type) []FieldMeta {
 			}
 
 			/* add to path */
-			path = append(path, Offset{
+			path[d] = Offset{
 				Kind: kind,
 				Type: item,
 				Size: fval.Offset,
-			})
+			}
 		}
 
 		/* get the index to the last offset */
@@ -188,6 +198,12 @@ var (
 	fieldLock  = sync.RWMutex{}
 	fieldCache = map[reflect.Type][]FieldMeta{}
 )
+
+func ResetFieldCacheForTest() {
+	fieldLock.Lock()
+	fieldCache = map[reflect.Type][]FieldMeta{}
+	fieldLock.Unlock()
+}
 
 func ResolveStruct(vt reflect.Type) []FieldMeta {
 	var ok bool
@@ -222,5 +238,6 @@ func handleOmitZero(fv StdField, fm *FieldMeta) {
 	if fv.omitZero {
 		fm.Opts |= F_omitzero
 		fm.IsZero = fv.isZero
+		fm.PointerIsZero = fv.pointerIsZero
 	}
 }

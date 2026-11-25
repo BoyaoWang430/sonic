@@ -1,38 +1,48 @@
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package utils
 
 import (
-	"runtime"
-	"unsafe"
-
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 func isDigit(c byte) bool {
 	return c >= '0' && c <= '9'
 }
 
-//go:nocheckptr
 func SkipNumber(src string, pos int) (ret int) {
-	base := uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr)
-	sp := base + uintptr(pos)
-	se := base + uintptr(len(src))
-	if sp >= se {
+	n := len(src)
+	if pos >= n {
 		return -int(types.ERR_EOF)
 	}
 
-	if c := *(*byte)(unsafe.Pointer(sp)); c == '-' {
-		sp += 1
+	i := pos
+	if src[i] == '-' {
+		i++
 	}
-	ss := sp
+	ss := i
 
 	var pointer bool
 	var exponent bool
 	var lastIsDigit bool
 	var nextNeedDigit = true
 
-	for ; sp < se; sp += uintptr(1) {
-		c := *(*byte)(unsafe.Pointer(sp))
+	for ; i < n; i++ {
+		c := src[i]
 		if isDigit(c) {
 			lastIsDigit = true
 			nextNeedDigit = false
@@ -40,7 +50,7 @@ func SkipNumber(src string, pos int) (ret int) {
 		} else if nextNeedDigit {
 			return -int(types.ERR_INVALID_CHAR)
 		} else if c == '.' {
-			if !lastIsDigit || pointer || exponent || sp == ss {
+			if !lastIsDigit || pointer || exponent || i == ss {
 				return -int(types.ERR_INVALID_CHAR)
 			}
 			pointer = true
@@ -51,7 +61,7 @@ func SkipNumber(src string, pos int) (ret int) {
 			if !lastIsDigit || exponent {
 				return -int(types.ERR_INVALID_CHAR)
 			}
-			if sp == se-1 {
+			if i == n-1 {
 				return -int(types.ERR_EOF)
 			}
 			exponent = true
@@ -59,7 +69,7 @@ func SkipNumber(src string, pos int) (ret int) {
 			nextNeedDigit = false
 			continue
 		} else if c == '-' || c == '+' {
-			if prev := *(*byte)(unsafe.Pointer(sp - 1)); prev != 'e' && prev != 'E' {
+			if prev := src[i-1]; prev != 'e' && prev != 'E' {
 				return -int(types.ERR_INVALID_CHAR)
 			}
 			lastIsDigit = false
@@ -74,13 +84,11 @@ func SkipNumber(src string, pos int) (ret int) {
 		return -int(types.ERR_EOF)
 	}
 
-	runtime.KeepAlive(src)
-	return int(uintptr(sp) - uintptr((*rt.GoString)(unsafe.Pointer(&src)).Ptr))
+	return i
 }
 
-// Hack: this is used for both checking space and cause friendly compile errors in 32-bit arch.
-const _Sonic_Not_Support_32Bit_Arch__Checking_32Bit_Arch_Here = (1 << ' ') | (1 << '\t') | (1 << '\r') | (1 << '\n')
+const spaceMask = (uint64(1) << ' ') | (uint64(1) << '\t') | (uint64(1) << '\r') | (uint64(1) << '\n')
 
 func IsSpace(c byte) bool {
-	return (int(1<<c) & _Sonic_Not_Support_32Bit_Arch__Checking_32Bit_Arch_Here) != 0
+	return (uint64(1)<<c)&spaceMask != 0
 }

@@ -1,6 +1,6 @@
 module github.com/bytedance/sonic
 
-go 1.18
+go 1.20
 
 // replace github.com/bytedance/sonic/loader => ./loader
 

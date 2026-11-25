@@ -1,0 +1,83 @@
+//go:build !sonic_compat && linux && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package kernels
+
+import (
+	"os"
+	"syscall"
+	"testing"
+
+	"github.com/bytedance/sonic/internal/rt"
+)
+
+func TestSkipSpaceGuardPages(t *testing.T) {
+	page := os.Getpagesize()
+	mapping, err := syscall.Mmap(-1, 0, 3*page, syscall.PROT_NONE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := syscall.Munmap(mapping); err != nil {
+			t.Error(err)
+		}
+	}()
+	middle := mapping[page : 2*page]
+	if err := syscall.Mprotect(middle, syscall.PROT_READ|syscall.PROT_WRITE); err != nil {
+		t.Fatal(err)
+	}
+	for i := range middle {
+		middle[i] = ' '
+	}
+	vl := spaceVectorBytes()
+	maxLen := 3*vl + 1
+	if maxLen > page {
+		maxLen = page
+	}
+	for n := 1; n <= maxLen; n++ {
+		// Both ends of the readable page are exercised. Changing n also
+		// changes the alignment of the input ending at the trailing guard.
+		for _, base := range []int{0, page - n} {
+			input := middle[base : base+n]
+			if got := SkipSpace(rt.String(rt.SliceData(input), len(input)), 0); got != n {
+				t.Fatalf("base=%d length=%d all whitespace: got %d", base, n, got)
+			}
+			for _, stop := range []int{0, n / 2, n - 1} {
+				input[stop] = 'x'
+				if got := SkipSpace(rt.String(rt.SliceData(input), len(input)), 0); got != stop {
+					t.Fatalf("base=%d length=%d stop=%d: got %d", base, n, stop, got)
+				}
+				input[stop] = ' '
+			}
+			if got := SkipSpace(rt.String(rt.SliceData(input), len(input)), n); got != n {
+				t.Fatalf("base=%d length=%d empty tail: got %d", base, n, got)
+			}
+		}
+	}
+	// A zero-length call must not read even an inaccessible address.
+	if got := space(&mapping[2*page], 0); got != 0 {
+		t.Fatalf("zero-length guard pointer: got %d", got)
+	}
+	if err := syscall.Mprotect(middle, syscall.PROT_READ); err != nil {
+		t.Fatal(err)
+	}
+	src := rt.String(rt.SliceData(middle), len(middle))
+	if got := SkipSpace(src, 0); got != page {
+		t.Fatalf("read-only page: got %d, want %d", got, page)
+	}
+}
