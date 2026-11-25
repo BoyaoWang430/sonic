@@ -1,0 +1,68 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package native
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/bytedance/sonic/internal/native/types"
+)
+
+func TestRISCVLiteralTraversalContract(t *testing.T) {
+	cases := []struct {
+		src    string
+		cursor int
+		err    types.ParsingError
+		stack  []int
+	}{
+		{"null", 4, 0, nil},
+		{"trueX", 4, 0, nil}, // Traversal returns the first value, not the whole input.
+		{"false", 5, 0, nil},
+		{"tx", 2, types.ERR_EOF, nil}, // Truncation takes priority over a bad suffix.
+		{"txxx", 1, types.ERR_INVALID_CHAR, nil},
+		{"fal", 3, types.ERR_EOF, nil},
+		{"falxe", 3, types.ERR_INVALID_CHAR, nil},
+		{"falsX", 4, types.ERR_INVALID_CHAR, nil},
+		{"n\x00ll", 1, types.ERR_INVALID_CHAR, nil},
+		{"[true,false,null]", 17, 0, nil},
+		{`{"x":true,"y":[false,null]}`, 27, 0, nil},
+		{"[tx]", 4, types.ERR_EOF, []int{skipArrayState}},
+		{"[txxx]", 2, types.ERR_INVALID_CHAR, []int{skipArrayState}},
+		{`{"x":falXe}`, 8, types.ERR_INVALID_CHAR, []int{skipObjectState}},
+	}
+	for _, tc := range cases {
+		for offset := 0; offset <= 64; offset++ {
+			for _, flags := range []uint64{0, types.F_VALIDATE_STRING} {
+				src := strings.Repeat(" ", offset) + tc.src
+				var state types.StateMachine
+				state.Sp, state.Vt[0] = 1, -1
+				pos := 0
+				ret := ValidateOne(&src, &pos, &state, flags)
+				wantRet := offset
+				if tc.err != 0 {
+					wantRet = -int(tc.err)
+				}
+				if ret != wantRet || pos != offset+tc.cursor || !equalState(state.Vt[:state.Sp], tc.stack) {
+					t.Fatalf("src=%q offset=%d flags=%d: got (%d,%d,%v), want (%d,%d,%v)", tc.src, offset, flags, ret, pos, state.Vt[:state.Sp], wantRet, offset+tc.cursor, tc.stack)
+				}
+			}
+		}
+	}
+}

@@ -1,5 +1,4 @@
-//go:build (!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)
-// +build !amd64,!arm64 go1.28 !go1.17 arm64,!go1.20
+//go:build sonic_compat || (!(amd64 && go1.20) && !(arm64 && go1.20) && !(riscv64 && go1.26 && riscv64.rva22u64) && !(sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -24,10 +23,17 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 
+	"github.com/bytedance/sonic/internal/compat"
 	"github.com/bytedance/sonic/option"
 )
 
+// apiKind marks the explicit encoding/json adapter backend (-tags=sonic_compat
+// or uncertified 32-bit / big-endian / rva20u64 fallback targets). Compared
+// with UseSonicJSON, this adapter delegates marshaling/unmarshaling to
+// encoding/json and omits native-only extensions (ast.Loads/Preorder,
+// JSONAppender priority, and zero-copy string borrowing).
 const apiKind = UseStdJSON
 
 type frozenConfig struct {
@@ -46,6 +52,9 @@ func (cfg frozenConfig) marshalOptions(val interface{}, prefix, indent string) (
 	enc.SetEscapeHTML(cfg.EscapeHTML)
 	enc.SetIndent(prefix, indent)
 	err := enc.Encode(val)
+	if err != nil {
+		return nil, err
+	}
 	out := w.Bytes()
 
 	// json.Encoder always appends '\n' after encoding,
@@ -53,7 +62,7 @@ func (cfg frozenConfig) marshalOptions(val interface{}, prefix, indent string) (
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
-	return out, err
+	return out, nil
 }
 
 // Marshal is implemented by sonic
@@ -80,7 +89,7 @@ func (cfg frozenConfig) MarshalIndent(val interface{}, prefix, indent string) ([
 
 // UnmarshalFromString is implemented by sonic
 func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
-	r := bytes.NewBufferString(buf)
+	r := strings.NewReader(buf)
 	dec := json.NewDecoder(r)
 	if cfg.UseNumber {
 		dec.UseNumber()
@@ -93,17 +102,32 @@ func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
 		return err
 	}
 
-	// check the trailing chars
-	offset := dec.InputOffset()
-	if t, err := dec.Token(); !(t == nil && err == io.EOF) {
-		return &json.SyntaxError{Offset: offset}
+	// check the trailing chars without copying remaining buffer
+	if pos, hasTrailing := compat.FindTrailingNonSpace(buf, int(dec.InputOffset())); hasTrailing {
+		return compat.NewTrailingSyntaxError(buf[pos], pos)
 	}
 	return nil
 }
 
 // Unmarshal is implemented by sonic
 func (cfg frozenConfig) Unmarshal(buf []byte, val interface{}) error {
-	return cfg.UnmarshalFromString(string(buf), val)
+	r := bytes.NewReader(buf)
+	dec := json.NewDecoder(r)
+	if cfg.UseNumber {
+		dec.UseNumber()
+	}
+	if cfg.DisallowUnknownFields {
+		dec.DisallowUnknownFields()
+	}
+	err := dec.Decode(val)
+	if err != nil {
+		return err
+	}
+
+	if pos, hasTrailing := compat.FindTrailingNonSpaceBytes(buf, int(dec.InputOffset())); hasTrailing {
+		return compat.NewTrailingSyntaxError(buf[pos], pos)
+	}
+	return nil
 }
 
 // NewEncoder is implemented by sonic
@@ -132,17 +156,12 @@ func (cfg frozenConfig) Valid(data []byte) bool {
 	return json.Valid(data)
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency at **amd64** Arch.
-// Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
-// a compile option to set the depth of recursive compile for the nested struct type.
-// * This is the none implement for !amd64.
-// It will be useful for someone who develop with !amd64 arch,like Mac M1.
+// Pretouch is a no-op on the encoding/json compatibility adapter backend.
 func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly.
+// PretouchMany is a no-op on the encoding/json compatibility adapter backend.
 func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }

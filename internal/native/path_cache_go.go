@@ -1,0 +1,346 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package native
+
+import (
+	"encoding/binary"
+	"math/bits"
+	"unsafe"
+
+	"github.com/bytedance/sonic/internal/native/kernels"
+	"github.com/bytedance/sonic/internal/native/types"
+	"github.com/bytedance/sonic/internal/rt"
+	"github.com/bytedance/sonic/internal/utils"
+)
+
+// pathBlock keeps classifications after a token boundary for the following
+// key, colon, value and separator. It never changes relaxed search semantics.
+// A nonempty full block has nonspace|boundaries != 0: every byte is either
+// non-space or a numeric boundary. Both zero therefore mark an events-only tail.
+type pathBlock struct {
+	base, end                    int
+	events, nonspace, boundaries uint64
+}
+
+func (b *pathBlock) load(src string, pos int) {
+	b.events, b.nonspace, b.boundaries, b.end = kernels.PathMasks(src, pos)
+	b.base = pos
+	b.end += pos
+}
+
+// pathOrdinaryByte consumes an ordinary non-space byte. Returning zero leaves
+// the cursor unchanged so the caller can handle whitespace, controls and EOF.
+// Keeping the slow call in the grammar phase allows this operation to inline.
+func pathOrdinaryByte(src string, p *int) byte {
+	pos := *p
+	if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+		*p = pos + 1
+		return src[pos]
+	}
+	return 0
+}
+
+func (b *pathBlock) nextSlow(src string, pos int) (byte, int) {
+	if uint(pos) >= uint(len(src)) {
+		return 0, len(src)
+	}
+	for {
+		if b.nonspace|b.boundaries == 0 || pos < b.base || pos >= b.end {
+			// Most formatting gaps are shorter than a classification block.
+			if src[pos] == '\n' {
+				pos++
+				base := unsafe.Pointer(rt.StringData(src))
+				for pos+8 <= len(src) && *(*uint64)(unsafe.Add(base, pos)) == 0x2020202020202020 {
+					pos += 8
+				}
+				if pos+4 <= len(src) && *(*uint32)(unsafe.Add(base, pos)) == 0x20202020 {
+					pos += 4
+				}
+				if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+					return src[pos], pos + 1
+				}
+			}
+			limit := minNative(len(src), pos+24)
+			for pos < limit && utils.IsSpace(src[pos]) {
+				pos++
+			}
+			if pos == len(src) {
+				return 0, pos
+			}
+			if pos < limit {
+				return src[pos], pos + 1
+			}
+			b.load(src, pos)
+		}
+		mask := b.nonspace >> uint(pos-b.base)
+		if mask != 0 {
+			pos += bits.TrailingZeros64(mask)
+			return src[pos], pos + 1
+		}
+		pos = b.end
+		if pos == len(src) {
+			return 0, pos
+		}
+	}
+}
+
+// string reuses cached classifications when available, or probes a short
+// uncached prefix. A first cached quote completes a plain string; a first
+// backslash hands the remaining string to the complete scanner.
+func (b *pathBlock) string(src string, begin int) (end, escape int, err types.ParsingError) {
+	if begin < b.base || begin >= b.end {
+		return b.stringTail(src, begin)
+	}
+	pos := begin
+	mask := b.events >> uint(pos-b.base)
+	if mask == 0 {
+		pos = b.end
+	} else {
+		pos += bits.TrailingZeros64(mask)
+		if src[pos] == '"' {
+			return pos + 1, -1, 0
+		}
+	}
+	end, escape, err, events, width := kernels.ScanPathStringBlock(src[pos:])
+	end += pos
+	if escape >= 0 {
+		escape += pos
+	}
+	b.saveStringTail(end, events, width)
+	return end, escape, err
+}
+
+// Preserve validation's error cursor and active grammar by replaying only
+// failures. Successful strings can consume the path's existing classifications.
+func (b *pathBlock) validateTarget(src string, origPos int, m *types.StateMachine) (int, int) {
+	return b.validateTargetAtDepth(src, origPos, m, 0)
+}
+
+func (b *pathBlock) validateTargetAtDepth(src string, origPos int, m *types.StateMachine, baseDepth int) (int, int) {
+	pos := origPos
+	var ch byte
+	if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+		ch = src[pos]
+		pos++
+	} else {
+		ch, pos = b.nextSlow(src, pos)
+	}
+	if ch == '"' {
+		if end, _, err := b.string(src, pos); err == 0 {
+			if m != nil {
+				m.Sp = 0
+			}
+			return pos - 1, end
+		}
+	}
+	p := origPos
+	ret := ValidateOneAtDepth(&src, &p, m, 0, baseDepth)
+	return ret, p
+}
+
+const (
+	tokenByteOnes     uint64 = 0x0101010101010101
+	tokenByteHighBits uint64 = 0x8080808080808080
+)
+
+func (b *pathBlock) matchKey(src string, begin int, key string) (int, bool, types.ParsingError) {
+	// Single-word SWAR fast path: handles every plain key of length 0..7
+	// (both matched and mismatched!) without function calls or slice compares on length mismatch.
+	if len(src)-begin >= 8 {
+		x := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(unsafe.Pointer(rt.StringData(src)), begin))[:])
+		q := x ^ ('"' * tokenByteOnes)
+		quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
+		if quotes != 0 {
+			s := x ^ ('\\' * tokenByteOnes)
+			slashes := (s - tokenByteOnes) &^ s & tokenByteHighBits
+			qtz := bits.TrailingZeros64(quotes)
+			if slashes == 0 || qtz < bits.TrailingZeros64(slashes) {
+				k := qtz >> 3
+				if k != len(key) {
+					return begin + k + 1, false, 0
+				}
+				return begin + k + 1, src[begin:begin+k] == key, 0
+			}
+		} else if len(src)-begin >= 16 {
+			s0 := x ^ ('\\' * tokenByteOnes)
+			if ((s0 - tokenByteOnes) &^ s0 & tokenByteHighBits) == 0 {
+				x1 := binary.LittleEndian.Uint64((*[8]byte)(unsafe.Add(unsafe.Pointer(rt.StringData(src)), begin+8))[:])
+				q1 := x1 ^ ('"' * tokenByteOnes)
+				if quotes1 := (q1 - tokenByteOnes) &^ q1 & tokenByteHighBits; quotes1 != 0 {
+					s1 := x1 ^ ('\\' * tokenByteOnes)
+					slashes1 := (s1 - tokenByteOnes) &^ s1 & tokenByteHighBits
+					qtz1 := bits.TrailingZeros64(quotes1)
+					if slashes1 == 0 || qtz1 < bits.TrailingZeros64(slashes1) {
+						k := 8 + (qtz1 >> 3)
+						if k != len(key) {
+							return begin + k + 1, false, 0
+						}
+						return begin + k + 1, src[begin:begin+k] == key, 0
+					}
+				}
+			}
+		}
+	} else if len(key) <= 16 && len(src)-begin > len(key) && src[begin+len(key)] == '"' {
+		var diff byte
+		for i := 0; i < len(key); i++ {
+			c := src[begin+i]
+			if c == '"' || c == '\\' {
+				goto scanKey
+			}
+			diff |= c ^ key[i]
+		}
+		return begin + len(key) + 1, diff == 0, 0
+	}
+scanKey:
+	end, escape, err := b.string(src, begin)
+	if err != 0 {
+		return end, false, err
+	}
+	if escape < 0 {
+		return end, src[begin:end-1] == key, 0
+	}
+	return matchEscapedPathKey(src, key, begin, end)
+}
+
+// skipValue returns the final cursor and the token start or error. Traversal
+// deliberately ignores errors for unselected values and checks the following
+// delimiter; a selected target still propagates the returned error.
+func (b *pathBlock) skipValue(src string, pos int) (end, ret int) {
+	var ch byte
+	if uint(pos) < uint(len(src)) && src[pos] > ' ' {
+		ch = src[pos]
+		pos++
+	} else if uint(pos+1) < uint(len(src)) && src[pos] == ' ' && src[pos+1] > ' ' {
+		ch = src[pos+1]
+		pos += 2
+	} else {
+		ch, pos = b.nextSlow(src, pos)
+	}
+	start := pos - 1
+	switch ch {
+	case 0:
+		return pos, -int(types.ERR_EOF)
+	case '[', '{':
+		if uint(pos) < uint(len(src)) && src[pos] == ch+2 {
+			return pos + 1, start
+		}
+		end, err := kernels.SkipContainer(src, start)
+		if err != 0 {
+			return end, -int(err)
+		}
+		return end, start
+	case '"':
+		if pos < b.base || pos >= b.end {
+			if len(src)-pos >= 8 {
+				p := unsafe.Add(unsafe.Pointer(rt.StringData(src)), pos)
+				x := binary.LittleEndian.Uint64((*[8]byte)(p)[:])
+				q := x ^ ('"' * tokenByteOnes)
+				quotes := (q - tokenByteOnes) &^ q & tokenByteHighBits
+				s := x ^ ('\\' * tokenByteOnes)
+				slashes := (s - tokenByteOnes) &^ s & tokenByteHighBits
+				if quotes != 0 && (slashes == 0 || bits.TrailingZeros64(quotes) < bits.TrailingZeros64(slashes)) {
+					return pos + (bits.TrailingZeros64(quotes) >> 3) + 1, start
+				}
+			}
+			end, _, err := b.stringTail(src, pos)
+			if err != 0 {
+				return end, -int(err)
+			}
+			return end, start
+		}
+		mask := b.events >> uint(pos-b.base)
+		if mask == 0 {
+			pos = b.end
+		} else {
+			pos += bits.TrailingZeros64(mask)
+			if src[pos] == '"' {
+				return pos + 1, start
+			}
+		}
+		end, _, err, events, width := kernels.ScanPathStringBlock(src[pos:])
+		end += pos
+		b.saveStringTail(end, events, width)
+		if err != 0 {
+			return end, -int(err)
+		}
+		return end, start
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		if b.nonspace|b.boundaries != 0 && pos >= b.base && pos < b.end {
+			mask := b.boundaries >> uint(pos-b.base)
+			if mask != 0 {
+				return pos + bits.TrailingZeros64(mask), start
+			}
+			pos = b.end
+		}
+		limit := len(src)
+		if pos+12 < limit {
+			limit = pos + 12
+		}
+		for pos < limit {
+			c := src[pos]
+			if c == ',' || c == ']' || c == '}' || c <= ' ' {
+				if c == ',' || c == ']' || c == '}' || utils.IsSpace(c) {
+					return pos, start
+				}
+			}
+			pos++
+		}
+		if pos == len(src) {
+			return pos, start
+		}
+		return kernels.SkipNumber(src, pos), start
+	case 'n', 't', 'f':
+		width := 4
+		if ch == 'f' {
+			width = 5
+		}
+		if len(src)-start < width {
+			return len(src), -int(types.ERR_EOF)
+		}
+		return start + width, start
+	default:
+		return start, -int(types.ERR_INVALID_CHAR)
+	}
+}
+
+// Path search deliberately skips malformed unselected numeric candidates too.
+// Only these seven boundaries terminate a candidate; grammar markers do not.
+func pathNumberTail(src string, pos int) int {
+	limit := minNative(len(src), pos+8)
+	for pos < limit {
+		c := src[pos]
+		if c == ',' || c == ']' || c == '}' || utils.IsSpace(c) {
+			return pos
+		}
+		pos++
+	}
+	if pos == len(src) {
+		return pos
+	}
+	return kernels.SkipNumber(src, pos)
+}
+
+// A string scanner returns only classifications it already computed. Other
+// consumers must not interpret the stale whitespace/number masks as this span.
+func (b *pathBlock) saveStringTail(end int, events uint64, width int) {
+	if width != 0 {
+		b.base, b.end, b.events = end, end+width, events
+		b.nonspace, b.boundaries = 0, 0
+	}
+}

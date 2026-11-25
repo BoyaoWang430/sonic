@@ -45,8 +45,8 @@ type Config struct {
 	// WARNING: This hurts performance A LOT, USE WITH CARE.
 	SortMapKeys bool
 
-	// CompactMarshaler indicates encoder that the output JSON from json.Marshaler
-	// is always compact and needs no validation
+	// CompactMarshaler indicates that the encoder should validate and compact
+	// the JSON output returned by json.Marshaler / JSONAppender values.
 	CompactMarshaler bool
 
 	// NoQuoteTextMarshaler indicates encoder that the output text from encoding.TextMarshaler
@@ -74,7 +74,8 @@ type Config struct {
 	// non-ignored, exported fields in the destination.
 	DisallowUnknownFields bool
 
-	// CopyString indicates decoder to decode string values by copying instead of referring.
+	// CopyString indicates decoder to decode string values by copying into bounded
+	// standalone slabs instead of referencing the input string.
 	CopyString bool
 
 	// ValidateString indicates decoder and encoder to validate string values: decoder will return errors
@@ -97,6 +98,10 @@ type Config struct {
 
 	// CaseSensitive indicates that the decoder should not ignore the case of object keys.
 	CaseSensitive bool
+
+	// OnlyOmitNull indicates that encoder `omitempty` struct fields omit only nil
+	// pointers/containers instead of all zero values (native Sonic extension).
+	OnlyOmitNull bool
 }
 
 var (
@@ -189,13 +194,17 @@ func MarshalString(val interface{}) (string, error) {
 }
 
 // Unmarshal parses the JSON-encoded data and stores the result in the value pointed to by v.
-// NOTICE: This API copies given buffer by default,
-// if you want to pass JSON more efficiently, use UnmarshalString instead.
+// Decoded built-in strings and returned errors are detached from buf so buf may be reused
+// after Unmarshal returns (custom json.Unmarshaler implementations that retain their []byte
+// argument must copy it themselves per encoding/json rules).
 func Unmarshal(buf []byte, val interface{}) error {
 	return ConfigDefault.Unmarshal(buf, val)
 }
 
-// UnmarshalString is like Unmarshal, except buf is a string.
+// UnmarshalString is like Unmarshal, except buf is an immutable string.
+// When CopyString is false (the default in ConfigDefault), unescaped decoded strings may
+// borrow substrings of buf directly; if buf was constructed via an unsafe []byte-to-string
+// cast, the caller must keep the backing bytes immutable for the lifetime of decoded values.
 func UnmarshalString(buf string, val interface{}) error {
 	return ConfigDefault.UnmarshalFromString(buf, val)
 }
@@ -225,8 +234,8 @@ func GetWithOptions(src []byte, opts ast.SearchOptions, path ...interface{}) (as
 // GetFromString is same with Get except src is string.
 //
 // WARNING: The returned JSON is **Referenced** from the input.
-// Caching or long-time holding the returned node may cause OOM.
-// If your src is big, consider use GetFromStringCopy().
+// Caching or long-time holding the returned node may retain the full input string.
+// If your src is big, consider using GetCopyFromString().
 func GetFromString(src string, path ...interface{}) (ast.Node, error) {
 	return ast.NewSearcher(src).GetByPath(path...)
 }

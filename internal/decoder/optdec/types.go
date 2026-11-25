@@ -1,3 +1,5 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
 /*
  * Copyright 2021 ByteDance Inc.
  *
@@ -21,9 +23,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
-	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 var (
@@ -39,13 +38,57 @@ var (
 	uint16Type              = reflect.TypeOf(uint16(0))
 	uint32Type              = reflect.TypeOf(uint32(0))
 	uint64Type              = reflect.TypeOf(uint64(0))
+	uintptrType             = reflect.TypeOf(uintptr(0))
 	float32Type             = reflect.TypeOf(float32(0))
 	float64Type             = reflect.TypeOf(float64(0))
 	stringType              = reflect.TypeOf("")
 	bytesType               = reflect.TypeOf([]byte(nil))
 	jsonNumberType          = reflect.TypeOf(json.Number(""))
 	base64CorruptInputError = reflect.TypeOf(base64.CorruptInputError(0))
-	anyType                 = rt.UnpackType(reflect.TypeOf((*interface{})(nil)).Elem())
+	anyType                 = reflect.TypeOf((*interface{})(nil)).Elem()
+	sliceEfaceType          = reflect.TypeOf([]interface{}(nil))
+	mapEfaceType            = reflect.TypeOf(map[string]interface{}(nil))
+	mapStringType           = reflect.TypeOf(map[string]string(nil))
+	mapStrIntType           = reflect.TypeOf(map[string]int(nil))
+	mapStrI8Type            = reflect.TypeOf(map[string]int8(nil))
+	mapStrI16Type           = reflect.TypeOf(map[string]int16(nil))
+	mapStrI32Type           = reflect.TypeOf(map[string]int32(nil))
+	mapStrI64Type           = reflect.TypeOf(map[string]int64(nil))
+	mapStrUintType          = reflect.TypeOf(map[string]uint(nil))
+	mapStrU8Type            = reflect.TypeOf(map[string]uint8(nil))
+	mapStrU16Type           = reflect.TypeOf(map[string]uint16(nil))
+	mapStrU32Type           = reflect.TypeOf(map[string]uint32(nil))
+	mapStrU64Type           = reflect.TypeOf(map[string]uint64(nil))
+	mapStrUintptrType       = reflect.TypeOf(map[string]uintptr(nil))
+	mapStrF32Type           = reflect.TypeOf(map[string]float32(nil))
+	mapStrF64Type           = reflect.TypeOf(map[string]float64(nil))
+	mapStrBoolType          = reflect.TypeOf(map[string]bool(nil))
+	mapIntStrType           = reflect.TypeOf(map[int]string(nil))
+	mapI64StrType           = reflect.TypeOf(map[int64]string(nil))
+	sliceIntType            = reflect.TypeOf([]int(nil))
+	sliceI32Type            = reflect.TypeOf([]int32(nil))
+	sliceI64Type            = reflect.TypeOf([]int64(nil))
+	sliceUintType           = reflect.TypeOf([]uint(nil))
+	sliceU32Type            = reflect.TypeOf([]uint32(nil))
+	sliceU64Type            = reflect.TypeOf([]uint64(nil))
+	sliceF32Type            = reflect.TypeOf([]float32(nil))
+	sliceF64Type            = reflect.TypeOf([]float64(nil))
+	sliceBoolType           = reflect.TypeOf([]bool(nil))
+	sliceStringType         = reflect.TypeOf([]string(nil))
+	ptrBoolType             = reflect.TypeOf((*bool)(nil))
+	ptrIntType              = reflect.TypeOf((*int)(nil))
+	ptrInt8Type             = reflect.TypeOf((*int8)(nil))
+	ptrInt16Type            = reflect.TypeOf((*int16)(nil))
+	ptrInt32Type            = reflect.TypeOf((*int32)(nil))
+	ptrInt64Type            = reflect.TypeOf((*int64)(nil))
+	ptrUintType             = reflect.TypeOf((*uint)(nil))
+	ptrUint8Type            = reflect.TypeOf((*uint8)(nil))
+	ptrUint16Type           = reflect.TypeOf((*uint16)(nil))
+	ptrUint32Type           = reflect.TypeOf((*uint32)(nil))
+	ptrUint64Type           = reflect.TypeOf((*uint64)(nil))
+	ptrFloat32Type          = reflect.TypeOf((*float32)(nil))
+	ptrFloat64Type          = reflect.TypeOf((*float64)(nil))
+	ptrStringType           = reflect.TypeOf((*string)(nil))
 )
 
 var (
@@ -53,8 +96,3 @@ var (
 	jsonUnmarshalerType         = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
 	encodingTextUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 )
-
-func rtype(t reflect.Type) (*rt.GoItab, *rt.GoType) {
-	p := (*rt.GoIface)(unsafe.Pointer(&t))
-	return p.Itab, (*rt.GoType)(p.Value)
-}

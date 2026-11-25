@@ -1,5 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28)
-// +build amd64,go1.17,!go1.28 arm64,go1.20,!go1.28
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -50,11 +49,21 @@ func TestEncOnlyOmitNilPtr(t *testing.T) {
 		NonOmitSlice []int
 	}
 
-	Pretouch(reflect.TypeOf(data{}), option.WithCompileEncOnlyOmitNull(true))
+	// Pretouch with WithCompileEncOnlyOmitNull(true)
+	// prewarms the OnlyOmitNull plan cache without mutating default Encode(d, 0)
+	// semantics; pass OnlyOmitNull explicitly at encode time to select that mode.
+	require.NoError(t, Pretouch(reflect.TypeOf(data{}), option.WithCompileEncOnlyOmitNull(true)))
+
+	t.Run("default mode unaffected by Pretouch", func(t *testing.T) {
+		d := data{}
+		js, err := Encode(d, 0)
+		require.NoError(t, err)
+		require.Equal(t, `{"NonOmitPtr":null,"NonOmitVal":0,"NonOmitSlice":null}`, string(js))
+	})
 
 	t.Run("nil containers", func(t *testing.T) {
 		d := data{}
-		js, err := Encode(d, 0)
+		js, err := Encode(d, OnlyOmitNull)
 		require.NoError(t, err)
 		require.Equal(t, `{"BoolVal":false,"IntVal":0,"StrVal":"","FloatVal":0,"NonOmitPtr":null,"NonOmitVal":0,"NonOmitSlice":null}`, string(js))
 	})
@@ -69,7 +78,7 @@ func TestEncOnlyOmitNilPtr(t *testing.T) {
 			Any:          anyVal,
 			NonOmitSlice: sliceVal,
 		}
-		js, err := Encode(d, 0)
+		js, err := Encode(d, OnlyOmitNull)
 		require.NoError(t, err)
 		require.Equal(t, `{"BoolVal":false,"IntVal":0,"StrVal":"","FloatVal":0,"SliceVal":[],"MapVal":{},"Any":{},"NonOmitPtr":null,"NonOmitVal":0,"NonOmitSlice":[]}`, string(js))
 	})

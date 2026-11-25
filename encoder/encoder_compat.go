@@ -1,5 +1,4 @@
-//go:build (!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)
-// +build !amd64,!arm64 go1.28 !go1.17 arm64,!go1.20
+//go:build sonic_compat || (!(amd64 && go1.20) && !(arm64 && go1.20) && !(riscv64 && go1.26 && riscv64.rva22u64) && !(sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -26,6 +25,7 @@ import (
 	"reflect"
 
 	"github.com/bytedance/sonic/internal/compat"
+	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -36,59 +36,53 @@ func init() {
 // EnableFallback indicates if encoder use fallback
 const EnableFallback = true
 
-// Options is a set of encoding options.
+// Options is a set of encoding options shared with internal/encoder/alg.
 type Options uint64
-
-const (
-	bitSortMapKeys = iota
-	bitEscapeHTML
-	bitCompactMarshaler
-	bitNoQuoteTextMarshaler
-	bitNoNullSliceOrMap
-	bitValidateString
-	bitNoValidateJSONMarshaler
-	bitNoEncoderNewline
-
-	// used for recursive compile
-	bitPointerValue = 63
-)
 
 const (
 	// SortMapKeys indicates that the keys of a map needs to be sorted
 	// before serializing into JSON.
 	// WARNING: This hurts performance A LOT, USE WITH CARE.
-	SortMapKeys Options = 1 << bitSortMapKeys
+	SortMapKeys Options = 1 << alg.BitSortMapKeys
 
 	// EscapeHTML indicates encoder to escape all HTML characters
 	// after serializing into JSON (see https://pkg.go.dev/encoding/json#HTMLEscape).
 	// WARNING: This hurts performance A LOT, USE WITH CARE.
-	EscapeHTML Options = 1 << bitEscapeHTML
+	EscapeHTML Options = 1 << alg.BitEscapeHTML
 
-	// CompactMarshaler indicates that the output JSON from json.Marshaler
-	// is always compact and needs no validation
-	CompactMarshaler Options = 1 << bitCompactMarshaler
+	// CompactMarshaler indicates that the encoder should validate and compact
+	// the JSON output returned by json.Marshaler / JSONAppender values.
+	CompactMarshaler Options = 1 << alg.BitCompactMarshaler
 
 	// NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler
 	// is always escaped string and needs no quoting
-	NoQuoteTextMarshaler Options = 1 << bitNoQuoteTextMarshaler
+	NoQuoteTextMarshaler Options = 1 << alg.BitNoQuoteTextMarshaler
 
 	// NoNullSliceOrMap indicates all empty Array or Object are encoded as '[]' or '{}',
 	// instead of 'null'
-	NoNullSliceOrMap Options = 1 << bitNoNullSliceOrMap
+	NoNullSliceOrMap Options = 1 << alg.BitNoNullSliceOrMap
 
 	// ValidateString indicates that encoder should validate the input string
 	// before encoding it into JSON.
-	ValidateString Options = 1 << bitValidateString
+	ValidateString Options = 1 << alg.BitValidateString
 
 	// NoValidateJSONMarshaler indicates that the encoder should not validate the output string
 	// after encoding the JSONMarshaler to JSON.
-	NoValidateJSONMarshaler Options = 1 << bitNoValidateJSONMarshaler
+	NoValidateJSONMarshaler Options = 1 << alg.BitNoValidateJSONMarshaler
 
 	// NoEncoderNewline indicates that the encoder should not add a newline after every message
-	NoEncoderNewline Options = 1 << bitNoEncoderNewline
+	NoEncoderNewline Options = 1 << alg.BitNoEncoderNewline
 
 	// CompatibleWithStd is used to be compatible with std encoder.
 	CompatibleWithStd Options = SortMapKeys | EscapeHTML | CompactMarshaler
+
+	// EncodeNullForInfOrNan encodes Infinity or NaN float values as 'null'
+	// instead of returning an error (native Sonic extension; distinct bit on compat).
+	EncodeNullForInfOrNan Options = 1 << alg.BitEncodeNullForInfOrNan
+
+	// OnlyOmitNull causes `omitempty` struct fields to omit only nil pointers/containers
+	// rather than all zero values (native Sonic extension; distinct bit on compat).
+	OnlyOmitNull Options = 1 << alg.BitOnlyOmitNull
 )
 
 // Encoder represents a specific set of encoder configurations.
@@ -187,7 +181,12 @@ func Quote(s string) string {
 
 // Encode returns the JSON encoding of val, encoded with opts.
 func Encode(val interface{}, opts Options) ([]byte, error) {
-	return json.Marshal(val)
+	if (opts & EscapeHTML) != 0 {
+		return json.Marshal(val)
+	}
+	var buf []byte
+	err := EncodeInto(&buf, val, opts|NoEncoderNewline)
+	return buf, err
 }
 
 // EncodeInto is like Encode but uses a user-supplied buffer instead of allocating
@@ -196,16 +195,21 @@ func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
 	if buf == nil {
 		panic("user-supplied buffer buf is nil")
 	}
+	origLen := len(*buf)
 	w := bytes.NewBuffer(*buf)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML((opts & EscapeHTML) != 0)
 	err := enc.Encode(val)
+	if err != nil {
+		*buf = (*buf)[:origLen]
+		return err
+	}
 	*buf = w.Bytes()
 	l := len(*buf)
-	if l > 0 && (opts&NoEncoderNewline != 0) && (*buf)[l-1] == '\n' {
+	if l > origLen && (*buf)[l-1] == '\n' {
 		*buf = (*buf)[:l-1]
 	}
-	return err
+	return nil
 }
 
 // HTMLEscape appends to dst the JSON-encoded src with <, >, &, U+2028 and U+2029
@@ -229,24 +233,22 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 	enc.SetEscapeHTML((opts & EscapeHTML) != 0)
 	enc.SetIndent(prefix, indent)
 	err := enc.Encode(val)
+	if err != nil {
+		return nil, err
+	}
 	out := w.Bytes()
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
-	return out, err
+	return out, nil
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency.
-//
-// Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
-// a compile option to set the depth of recursive compile for the nested struct type.
+// Pretouch is a no-op on the encoding/json compatibility adapter backend.
 func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-// in order to reduce the first-hit latency.
+// PretouchMany is a no-op on the encoding/json compatibility adapter backend.
 func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }

@@ -1,0 +1,48 @@
+//go:build !sonic_compat && go1.26 && !go1.28 && riscv64.rva22u64
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package sonic
+
+import (
+	"math"
+	"testing"
+)
+
+// These expectations come from the community native implementation, not the
+// encoding/json fallback. Keep them separate from the common-contract corpus.
+func TestRVVNativeContracts(t *testing.T) {
+	if APIKind != UseSonicJSON {
+		t.Fatal("RISC-V native target selected the compatibility backend")
+	}
+	// Decoding "-0" into float64 preserves IEEE-754 negative zero (-0.0),
+	// matching encoding/json across all native architectures.
+	var zero float64
+	if err := ConfigStd.UnmarshalFromString("-0", &zero); err != nil || zero != 0 || !math.Signbit(zero) {
+		t.Fatalf("integer negative zero: %v (signbit=%v), %v", zero, math.Signbit(zero), err)
+	}
+	// internal/encoder/alg/spec.go normalizes both floating zero signs.
+	encoded, err := ConfigStd.Marshal(math.Copysign(0, -1))
+	if err != nil || string(encoded) != "0" {
+		t.Fatalf("floating negative zero: %s, %v", encoded, err)
+	}
+	// Valid's existing native adapter passes flags=0, which only scans string
+	// boundaries. It does not enable F_VALIDATE_STRING escape validation.
+	if !Valid([]byte(`"\x"`)) {
+		t.Fatal("native Valid string-boundary policy changed")
+	}
+}

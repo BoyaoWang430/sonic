@@ -22,12 +22,11 @@ import (
 	"reflect"
 	"runtime"
 
-	"github.com/bytedance/gopkg/lang/dirtmake"
 	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/encoder/vars"
+	"github.com/bytedance/sonic/internal/encoder/vm"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
-	"github.com/bytedance/sonic/utf8"
 )
 
 // Options is a set of encoding options.
@@ -73,6 +72,10 @@ const (
 
 	// Encode Infinity or Nan float into `null`, instead of returning an error.
 	EncodeNullForInfOrNan Options = 1 << alg.BitEncodeNullForInfOrNan
+
+	// OnlyOmitNull causes `omitempty` struct fields to omit only nil pointers/containers
+	// rather than all zero values.
+	OnlyOmitNull Options = 1 << alg.BitOnlyOmitNull
 )
 
 // Encoder represents a specific set of encoder configurations.
@@ -167,27 +170,46 @@ func Quote(s string) string {
 
 // Encode returns the JSON encoding of val, encoded with opts.
 func Encode(val interface{}, opts Options) ([]byte, error) {
+	if ret, ok, err := vm.EncodeRoot(val, uint64(opts)); ok {
+		return ret, err
+	}
+
 	var ret []byte
 
 	buf := vars.NewBytes()
-	err := encodeIntoCheckRace(buf, val, opts)
+	origBuf := (*buf)[:0]
+	err := encodeInto(buf, val, opts)
 
 	/* check for errors */
 	if err != nil {
+		if !rt.CanSizeResue(cap(*buf)) && cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			*buf = origBuf
+		}
 		vars.FreeBytes(buf)
 		return nil, err
 	}
 
-	/* htmlescape or correct UTF-8 if opts enable */
-	encodeFinishWithPool(buf, opts)
-
 	/* make a copy of the result */
-	if rt.CanSizeResue(cap(*buf)) {
-		ret = dirtmake.Bytes(len(*buf), len(*buf))
-		copy(ret, *buf)
-		vars.FreeBytes(buf)
+	if rt.CanSizeResue(cap(*buf)) || (cap(*buf) > len(*buf)*2 && cap(*buf) > 1024) {
+		ret = rt.CloneBytesNoZero(*buf)
+		if !rt.CanSizeResue(cap(*buf)) {
+			if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+				*buf = origBuf
+				vars.FreeBytes(buf)
+			} else {
+				*buf = nil
+			}
+		} else {
+			vars.FreeBytes(buf)
+		}
 	} else {
 		ret = *buf
+		if cap(origBuf) > 0 && rt.CanSizeResue(cap(origBuf)) {
+			*buf = origBuf
+			vars.FreeBytes(buf)
+		} else {
+			*buf = nil
+		}
 	}
 
 	/* return the buffer into pool */
@@ -197,54 +219,26 @@ func Encode(val interface{}, opts Options) ([]byte, error) {
 // EncodeInto is like Encode but uses a user-supplied buffer instead of allocating
 // a new one.
 func EncodeInto(buf *[]byte, val interface{}, opts Options) error {
-	err := encodeIntoCheckRace(buf, val, opts)
+	origLen := len(*buf)
+	err := encodeInto(buf, val, opts)
 	if err != nil {
+		*buf = (*buf)[:origLen]
 		return err
 	}
-	*buf = encodeFinish(*buf, opts)
-	return err
+	return nil
 }
 
 func encodeInto(buf *[]byte, val interface{}, opts Options) error {
 	stk := vars.NewStack()
-	efv := rt.UnpackEface(val)
-	err := encodeTypedPointer(buf, efv.Type, &efv.Value, stk, uint64(opts))
-
-	/* return the stack into pool */
+	err := vm.EncodeValue(buf, val, stk, uint64(opts))
 	if err != nil {
 		vars.ResetStack(stk)
 	}
 	vars.FreeStack(stk)
 
-	/* avoid GC ahead */
 	runtime.KeepAlive(buf)
-	runtime.KeepAlive(efv)
+	runtime.KeepAlive(val)
 	return err
-}
-
-func encodeFinish(buf []byte, opts Options) []byte {
-	if opts&EscapeHTML != 0 {
-		buf = HTMLEscape(nil, buf)
-	}
-	if (opts&ValidateString != 0) && !utf8.Validate(buf) {
-		buf = utf8.CorrectWith(nil, buf, `\ufffd`)
-	}
-	return buf
-}
-
-func encodeFinishWithPool(buf *[]byte, opts Options) {
-	if opts&EscapeHTML != 0 {
-		dst := vars.NewBytes()
-		// put the result bytes to buf and the old buf to dst to return to the pool.
-		// we cannot return buf to the pool because it will be used by the caller.
-		*buf, *dst = HTMLEscape(*dst, *buf), *buf
-		vars.FreeBytes(dst)
-	}
-	if (opts&ValidateString != 0) && !utf8.Validate(*buf) {
-		dst := vars.NewBytes()
-		*buf, *dst = utf8.CorrectWith(*dst, *buf, `\ufffd`), *buf
-		vars.FreeBytes(dst)
-	}
 }
 
 // HTMLEscape appends to dst the JSON-encoded src with <, >, &, U+2028 and U+2029
@@ -288,8 +282,7 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 	/* copy to the result buffer */
 	var ret []byte
 	if rt.CanSizeResue(cap(buf.Bytes())) {
-		ret = make([]byte, buf.Len())
-		copy(ret, buf.Bytes())
+		ret = rt.CloneBytesNoZero(buf.Bytes())
 		/* return the buffers into pool */
 		vars.FreeBuffer(buf)
 	} else {
@@ -299,8 +292,8 @@ func EncodeIndented(val interface{}, prefix string, indent string, opts Options)
 	return ret, nil
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency.
+// Pretouch compiles vt's encoder type plan ahead-of-time to warm schema caches
+// and reduce first-request latency.
 //
 // Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 // a compile option to set the depth of recursive compile for the nested struct type.
@@ -308,8 +301,8 @@ func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return PretouchMany([]reflect.Type{vt}, opts...)
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-// in order to reduce the first-hit latency.
+// PretouchMany compiles encoder type plans for all vts ahead-of-time to warm
+// schema caches and reduce first-request latency.
 //
 // Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 // a compile option to set the depth of recursive compile for the nested struct type.
@@ -323,15 +316,15 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 		opt(&cfg)
 	}
 
-	vtm := make(map[reflect.Type]uint8, len(vts))
+	vtm := make(map[vmPretouchKey]struct{}, len(vts))
 	for _, vt := range vts {
-		vtm[vt] = 0
+		if vt == nil {
+			continue
+		}
+		vtm[vmPretouchKey{vt: vt, pv: false}] = struct{}{}
 	}
 
-	if !vars.UseVM {
-		return pretouchRecX86(vtm, cfg)
-	}
-	return pretouchRec(vtm, cfg)
+	return pretouchRecVMBatch(vtm, cfg)
 }
 
 // Valid validates json and returns first non-blank character position,

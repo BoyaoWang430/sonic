@@ -1,5 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28)
-// +build amd64,go1.17,!go1.28 arm64,go1.20,!go1.28
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -25,6 +24,8 @@ import (
 
 	"github.com/bytedance/sonic/decoder"
 	"github.com/bytedance/sonic/encoder"
+	"github.com/bytedance/sonic/internal/decoder/api"
+	"github.com/bytedance/sonic/internal/encoder/alg"
 	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
@@ -68,6 +69,9 @@ func (cfg Config) Froze() API {
 	}
 	if cfg.EncodeNullForInfOrNan {
 		api.encoderOpts |= encoder.EncodeNullForInfOrNan
+	}
+	if cfg.OnlyOmitNull {
+		api.encoderOpts |= encoder.OnlyOmitNull
 	}
 
 	// configure decoder options:
@@ -116,21 +120,12 @@ func (cfg frozenConfig) MarshalIndent(val interface{}, prefix, indent string) ([
 
 // UnmarshalFromString is implemented by sonic
 func (cfg frozenConfig) UnmarshalFromString(buf string, val interface{}) error {
-	dec := decoder.NewDecoder(buf)
-	dec.SetOptions(cfg.decoderOpts)
-	err := dec.Decode(val)
-
-	/* check for errors */
-	if err != nil {
-		return err
-	}
-
-	return dec.CheckTrailings()
+	return api.UnmarshalString(buf, uint64(cfg.decoderOpts), val)
 }
 
 // Unmarshal is implemented by sonic
 func (cfg frozenConfig) Unmarshal(buf []byte, val interface{}) error {
-	return cfg.UnmarshalFromString(string(buf), val)
+	return api.UnmarshalBytes(buf, cfg.CopyString, uint64(cfg.decoderOpts), val)
 }
 
 // NewEncoder is implemented by sonic
@@ -149,12 +144,15 @@ func (cfg frozenConfig) NewDecoder(reader io.Reader) Decoder {
 
 // Valid is implemented by sonic
 func (cfg frozenConfig) Valid(data []byte) bool {
+	if cfg.ValidateString || cfg.UseUnicodeErrors {
+		return alg.ValidStrictFullDoc(data, cfg.ValidateString, cfg.UseUnicodeErrors)
+	}
 	ok, _ := encoder.Valid(data)
 	return ok
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency.
+// Pretouch compiles vt's encoder/decoder type plans ahead-of-time to warm
+// schema caches and reduce first-request latency.
 //
 // Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 // a compile option to set the depth of recursive compile for the nested struct type.
@@ -162,7 +160,8 @@ func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return PretouchMany([]reflect.Type{vt}, opts...)
 }
 
-// PretouchMany compiles all JIT types in single moduledata, to reduce the overhead of `findmoduledata`
+// PretouchMany compiles encoder/decoder type plans for all vts ahead-of-time
+// in a batch to warm schema caches and reduce first-request latency.
 //
 // Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 // a compile option to set the depth of recursive compile for the nested struct type.
@@ -171,27 +170,22 @@ func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 		return nil
 	}
 
-	if err := encoder.PretouchMany(vts, opts...); err != nil {
-		return err
-	}
-	if err := decoder.PretouchMany(vts, opts...); err != nil {
-		return err
-	}
-
-	ptrVts := make([]reflect.Type, 0, len(vts))
+	allVts := make([]reflect.Type, 0, len(vts)*2)
 	for _, vt := range vts {
+		allVts = append(allVts, vt)
 		if vt.Kind() == reflect.Ptr {
-			ptrVts = append(ptrVts, vt.Elem())
+			allVts = append(allVts, vt.Elem())
 		} else {
-			ptrVts = append(ptrVts, reflect.PtrTo(vt))
+			allVts = append(allVts, reflect.PtrTo(vt))
 		}
 	}
 
-	if err := encoder.PretouchMany(ptrVts, opts...); err != nil {
+	if err := encoder.PretouchMany(allVts, opts...); err != nil {
 		return err
 	}
-	if err := decoder.PretouchMany(ptrVts, opts...); err != nil {
-		return err
-	}
-	return nil
+	return decoder.PretouchMany(allVts, opts...)
+}
+
+func init() {
+	api.RegisterNoCopyRawMessageType(reflect.TypeOf(NoCopyRawMessage(nil)))
 }

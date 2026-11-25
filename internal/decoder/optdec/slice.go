@@ -1,25 +1,50 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package optdec
 
 import (
 	"reflect"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type sliceDecoder struct {
-	elemType *rt.GoType
-	elemDec  decFunc
-	typ      reflect.Type
+	elemType     reflect.Type
+	elemDec      decFunc
+	structDec    *structDecoder
+	ptrStructDec *structDecoder
+	size         uintptr
+	typ          reflect.Type
+	zeroSlice    reflect.Value
+	emptySlice   reflect.Value
 }
 
-var (
-	emptyPtr = &struct{}{}
-)
+func (d *sliceDecoder) setNil(vp unsafe.Pointer) {
+	reflect.NewAt(d.typ, vp).Elem().Set(d.zeroSlice)
+}
+
+func (d *sliceDecoder) setEmpty(vp unsafe.Pointer) {
+	reflect.NewAt(d.typ, vp).Elem().Set(d.emptySlice)
+}
 
 func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		d.setNil(vp)
 		return nil
 	}
 
@@ -28,33 +53,64 @@ func (d *sliceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 		return error_mismatch(node, ctx, d.typ)
 	}
 
-	slice := rt.MakeSlice(vp, d.elemType, arr.Len())
-	elems := slice.Ptr
+	size := arr.Len()
+	if size == 0 {
+		d.setEmpty(vp)
+		return nil
+	}
+
+	rv := reflect.NewAt(d.typ, vp).Elem()
+	if rv.Cap() < size {
+		rv.Grow(size - rv.Len())
+	}
+	rv.SetLen(size)
+	elems := rv.UnsafePointer()
+
+	elemSize := d.size
 	next := arr.Children()
 
 	var gerr error
-	for i := 0; i < arr.Len(); i++ {
-		val := NewNode(next)
-		elem := unsafe.Pointer(uintptr(elems) + uintptr(i)*d.elemType.Size)
-		err := d.elemDec.FromDom(elem, val, ctx)
-		if gerr == nil && err != nil {
-			gerr = err
+	if sd := d.structDec; sd != nil {
+		for i := 0; i < size; i++ {
+			elem := unsafe.Add(elems, uintptr(i)*elemSize)
+			var err error
+			next, err = sd.decodeValueSlot(elem, next, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
 		}
-		next = val.Next()
+	} else if psd := d.ptrStructDec; psd != nil {
+		ptrs := unsafe.Slice((*unsafe.Pointer)(elems), size)
+		for i := 0; i < size; i++ {
+			var err error
+			next, err = psd.decodePtrSlot(&ptrs[i], next, d.elemDec, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+		}
+	} else {
+		for i := 0; i < size; i++ {
+			val := NewNode(next)
+			elem := unsafe.Add(elems, uintptr(i)*elemSize)
+			err := d.elemDec.FromDom(elem, val, ctx)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+			next = val.Next()
+		}
 	}
-
-	*(*rt.GoSlice)(vp) = *slice
 	return gerr
 }
 
 type arrayDecoder struct {
 	len      int
-	elemType *rt.GoType
+	elemType reflect.Type
 	elemDec  decFunc
 	typ      reflect.Type
+	size     uintptr
+	zeroElem reflect.Value
 }
 
-//go:nocheckptr
 func (d *arrayDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
 		return nil
@@ -67,10 +123,11 @@ func (d *arrayDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 
 	next := arr.Children()
 	i := 0
+	elemSize := d.size
 
 	var gerr error
 	for ; i < d.len && i < arr.Len(); i++ {
-		elem := unsafe.Pointer(uintptr(vp) + uintptr(i)*d.elemType.Size)
+		elem := unsafe.Add(vp, uintptr(i)*elemSize)
 		val := NewNode(next)
 		err := d.elemDec.FromDom(elem, val, ctx)
 		if gerr == nil && err != nil {
@@ -80,37 +137,54 @@ func (d *arrayDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 	}
 
 	/* zero rest of array */
-	addr := uintptr(vp) + uintptr(i)*d.elemType.Size
-	n := uintptr(d.len-i) * d.elemType.Size
-
-	/* the boundary pointer may points to another unknown object, so we need to avoid using it */
-	if n != 0 {
-		rt.ClearMemory(d.elemType, unsafe.Pointer(addr), n)
+	for ; i < d.len; i++ {
+		elem := unsafe.Add(vp, uintptr(i)*elemSize)
+		reflect.NewAt(d.elemType, elem).Elem().Set(d.zeroElem)
 	}
 	return gerr
 }
+
+var (
+	zeroSliceEface  = reflect.Zero(sliceEfaceType)
+	emptySliceEface = reflect.MakeSlice(sliceEfaceType, 0, 0)
+)
 
 type sliceEfaceDecoder struct {
 }
 
 func (d *sliceEfaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]interface{})(vp) = nil
 		return nil
 	}
 
-	/* if slice is empty, just call `AsSliceEface` */
-	if ((*rt.GoSlice)(vp)).Len == 0 {
+	/* only take the fast path when no backing array elements can be reused */
+	if cap(*(*[]interface{})(vp)) == 0 {
 		return node.AsSliceEface(ctx, vp)
 	}
 
 	decoder := sliceDecoder{
-		elemType: rt.AnyType,
-		elemDec:  &efaceDecoder{},
-		typ:      rt.SliceEfaceType.Pack(),
+		elemType:   anyType,
+		elemDec:    &efaceDecoder{},
+		size:       anyType.Size(),
+		typ:        sliceEfaceType,
+		zeroSlice:  zeroSliceEface,
+		emptySlice: emptySliceEface,
 	}
 
 	return decoder.FromDom(vp, node, ctx)
+}
+
+type sliceIntDecoder struct {
+}
+
+func (d *sliceIntDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]int)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceInt(ctx, vp)
 }
 
 type sliceI32Decoder struct {
@@ -118,7 +192,7 @@ type sliceI32Decoder struct {
 
 func (d *sliceI32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]int32)(vp) = nil
 		return nil
 	}
 
@@ -130,11 +204,23 @@ type sliceI64Decoder struct {
 
 func (d *sliceI64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]int64)(vp) = nil
 		return nil
 	}
 
 	return node.AsSliceI64(ctx, vp)
+}
+
+type sliceUintDecoder struct {
+}
+
+func (d *sliceUintDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]uint)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceUint(ctx, vp)
 }
 
 type sliceU32Decoder struct {
@@ -142,7 +228,7 @@ type sliceU32Decoder struct {
 
 func (d *sliceU32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]uint32)(vp) = nil
 		return nil
 	}
 
@@ -154,7 +240,7 @@ type sliceU64Decoder struct {
 
 func (d *sliceU64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]uint64)(vp) = nil
 		return nil
 	}
 
@@ -166,36 +252,72 @@ type sliceStringDecoder struct {
 
 func (d *sliceStringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]string)(vp) = nil
 		return nil
 	}
 
 	return node.AsSliceString(ctx, vp)
 }
 
+type sliceF64Decoder struct {
+}
+
+func (d *sliceF64Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]float64)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceF64(ctx, vp)
+}
+
+type sliceF32Decoder struct {
+}
+
+func (d *sliceF32Decoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]float32)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceF32(ctx, vp)
+}
+
+type sliceBoolDecoder struct {
+}
+
+func (d *sliceBoolDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if node.IsNull() {
+		*(*[]bool)(vp) = nil
+		return nil
+	}
+
+	return node.AsSliceBool(ctx, vp)
+}
+
 type sliceBytesDecoder struct {
+	typ      reflect.Type
+	elemType reflect.Type
 }
 
 func (d *sliceBytesDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]byte)(vp) = nil
 		return nil
 	}
 
-	s, err := node.AsSliceBytes(ctx)
-	*(*[]byte)(vp) = s
-	return err
+	return node.AsSliceBytesInto(ctx, vp, d.typ, d.elemType)
 }
 
 type sliceBytesUnmarshalerDecoder struct {
-	elemType *rt.GoType
+	elemType reflect.Type
 	elemDec  decFunc
 	typ      reflect.Type
 }
 
 func (d *sliceBytesUnmarshalerDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
 	if node.IsNull() {
-		*(*rt.GoSlice)(vp) = rt.GoSlice{}
+		*(*[]byte)(vp) = nil
 		return nil
 	}
 
@@ -215,14 +337,17 @@ func (d *sliceBytesUnmarshalerDecoder) FromDom(vp unsafe.Pointer, node Node, ctx
 		return error_mismatch(node, ctx, d.typ)
 	}
 
-	slice := rt.MakeSlice(vp, d.elemType, arr.Len())
-	elems := slice.Ptr
+	s := prepareSlice((*[]byte)(vp), arr.Len())
+	var elems unsafe.Pointer
+	if len(s) > 0 {
+		elems = unsafe.Pointer(unsafe.SliceData(s))
+	}
 
 	var gerr error
 	next := arr.Children()
 	for i := 0; i < arr.Len(); i++ {
 		child := NewNode(next)
-		elem := unsafe.Pointer(uintptr(elems) + uintptr(i)*d.elemType.Size)
+		elem := unsafe.Add(elems, i)
 		err := d.elemDec.FromDom(elem, child, ctx)
 		if gerr == nil && err != nil {
 			gerr = err
@@ -230,6 +355,6 @@ func (d *sliceBytesUnmarshalerDecoder) FromDom(vp unsafe.Pointer, node Node, ctx
 		next = child.Next()
 	}
 
-	*(*rt.GoSlice)(vp) = *slice
+	*(*[]byte)(vp) = s
 	return gerr
 }

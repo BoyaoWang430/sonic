@@ -1,3 +1,21 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package optdec
 
 import (
@@ -13,8 +31,15 @@ type efaceDecoder struct {
 }
 
 func (d *efaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
-	/* check the defined pointer type for issue 379 */
-	eface := (*rt.GoEface)(vp)
+	cur := *(*interface{})(vp)
+	if cur == nil {
+		ret, err := node.AsEface(ctx)
+		if err != nil {
+			return err
+		}
+		*(*interface{})(vp) = ret
+		return nil
+	}
 
 	/*
 		 not pointer type, or nil pointer, or self-pointed interface{}, such as
@@ -24,7 +49,9 @@ func (d *efaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 			return v
 			``` see `issue758_test.go`.
 	*/
-	if eface.Value == nil || eface.Type.Kind() != reflect.Ptr || eface.Value == vp {
+	rv := reflect.ValueOf(cur)
+	vt := rv.Type()
+	if vt.Kind() != reflect.Ptr || rv.IsNil() || rv.UnsafePointer() == vp {
 		ret, err := node.AsEface(ctx)
 		if err != nil {
 			return err
@@ -34,23 +61,22 @@ func (d *efaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 	}
 
 	if node.IsNull() {
-		if eface.Type.Indirect() || (!eface.Type.Indirect() && eface.Type.Pack().Elem().Kind() != reflect.Ptr) {
+		if vt.Elem().Kind() != reflect.Ptr {
 			*(*interface{})(vp) = nil
 			return nil
 		}
 	}
 
-	etp := rt.PtrElem(eface.Type)
-	vp = eface.Value
+	etp := vt.Elem()
+	dst := rv.UnsafePointer()
 
-	if eface.Type.IsNamed() {
+	/* check the defined pointer type for issue 379 */
+	if vt.Name() != "" {
 		// check named pointer type, avoid call its `Unmarshaler`
-		newp := vp
-		etp = eface.Type
-		vp = unsafe.Pointer(&newp)
-	} else if !eface.Type.Indirect() {
-		// check direct value
-		etp = rt.UnpackType(eface.Type.Pack().Elem())
+		ptrSlot := reflect.New(vt)
+		*(*unsafe.Pointer)(ptrSlot.UnsafePointer()) = dst
+		etp = vt
+		dst = ptrSlot.UnsafePointer()
 	}
 
 	dec, err := findOrCompile(etp)
@@ -58,37 +84,40 @@ func (d *efaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 		return err
 	}
 
-	return dec.FromDom(vp, node, ctx)
+	return dec.FromDom(dst, node, ctx)
 }
 
 type ifaceDecoder struct {
-	typ *rt.GoType
+	typ     reflect.Type
+	zeroVal reflect.Value
 }
 
 func (d *ifaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	iv := reflect.NewAt(d.typ, vp).Elem()
 	if node.IsNull() {
-		*(*unsafe.Pointer)(vp) = nil
+		iv.Set(d.zeroVal)
 		return nil
 	}
 
-	iface := *(*rt.GoIface)(vp)
-	if iface.Itab == nil {
+	if iv.IsNil() {
 		return error_type(d.typ)
 	}
 
-	vt := iface.Itab.Vt
-	if vt.Kind() != reflect.Ptr || iface.Value == nil {
+	ev := iv.Elem()
+	vt := ev.Type()
+	if vt.Kind() != reflect.Ptr || ev.IsNil() {
 		return error_type(d.typ)
 	}
 
-	etp := rt.PtrElem(vt)
-	vp = iface.Value
+	etp := vt.Elem()
+	dst := ev.UnsafePointer()
 
 	/* check the defined pointer type for issue 379 */
-	if vt.IsNamed() {
-		newp := vp
+	if vt.Name() != "" {
+		ptrSlot := reflect.New(vt)
+		*(*unsafe.Pointer)(ptrSlot.UnsafePointer()) = dst
 		etp = vt
-		vp = unsafe.Pointer(&newp)
+		dst = ptrSlot.UnsafePointer()
 	}
 
 	dec, err := findOrCompile(etp)
@@ -96,53 +125,134 @@ func (d *ifaceDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error
 		return err
 	}
 
-	return dec.FromDom(vp, node, ctx)
+	return dec.FromDom(dst, node, ctx)
 }
 
 type unmarshalTextDecoder struct {
-	typ *rt.GoType
+	typ      reflect.Type
+	elemType reflect.Type
 }
 
 func (d *unmarshalTextDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if d.typ.Kind() == reflect.Interface {
+		iv := reflect.NewAt(d.typ, vp).Elem()
+		if node.IsNull() {
+			iv.Set(reflect.Zero(d.typ))
+			return nil
+		}
+		if iv.IsNil() {
+			return error_type(d.typ)
+		}
+		ev := iv.Elem()
+		if ev.Kind() != reflect.Ptr || ev.IsNil() {
+			return error_type(d.typ)
+		}
+		txt, ok := node.AsStringText(ctx)
+		if !ok {
+			return error_mismatch(node, ctx, d.typ)
+		}
+		return iv.Interface().(encoding.TextUnmarshaler).UnmarshalText(txt)
+	}
+
 	if node.IsNull() {
-		*(*unsafe.Pointer)(vp) = nil
+		if d.elemType != nil {
+			switch d.elemType.Kind() {
+			case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface:
+				reflect.NewAt(d.elemType, vp).Elem().Set(reflect.Zero(d.elemType))
+			}
+		}
 		return nil
 	}
 
 	txt, ok := node.AsStringText(ctx)
 	if !ok {
-		return error_mismatch(node, ctx, d.typ.Pack())
+		return error_mismatch(node, ctx, d.typ)
 	}
 
-	v := *(*interface{})(unsafe.Pointer(&rt.GoEface{
-		Type:  d.typ,
-		Value: vp,
-	}))
-
-	// fast path
-	if u, ok := v.(encoding.TextUnmarshaler); ok {
-		return u.UnmarshalText(txt)
-	}
-
-	// slow path
-	rv := reflect.ValueOf(v)
-	if u, ok := rv.Interface().(encoding.TextUnmarshaler); ok {
-		return u.UnmarshalText(txt)
-	}
-
-	return error_type(d.typ)
+	return reflect.NewAt(d.elemType, vp).Interface().(encoding.TextUnmarshaler).UnmarshalText(txt)
 }
 
-type unmarshalJSONDecoder struct {
-	typ    *rt.GoType
+var (
+	noCopyRawMessageType    reflect.Type
+	noCopyRawMessagePtrType reflect.Type
+	jsonRawMessageType      = reflect.TypeOf(json.RawMessage(nil))
+)
+
+// RegisterNoCopyRawMessageType registers sonic.NoCopyRawMessage exact type identity.
+func RegisterNoCopyRawMessageType(vt reflect.Type) {
+	noCopyRawMessageType = vt
+	noCopyRawMessagePtrType = reflect.PtrTo(vt)
+}
+
+type rawMessageDecoder struct{}
+
+func (d *rawMessageDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	raw := node.AsRaw(ctx)
+	*(*[]byte)(vp) = append((*(*[]byte)(vp))[:0], raw...)
+	return nil
+}
+
+type noCopyRawMessageDecoder struct {
 	strOpt bool
 }
 
+func (d *noCopyRawMessageDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
+	if d.strOpt {
+		if node.IsNull() {
+			*(*[]byte)(vp) = []byte("null")
+			return nil
+		}
+		s, ok := node.AsStringText(ctx)
+		if !ok {
+			return error_mismatch(node, ctx, noCopyRawMessageType)
+		}
+		*(*[]byte)(vp) = s
+		return nil
+	}
+	raw := node.AsRaw(ctx)
+	if ctx.options&(1<<_F_copy_string) != 0 {
+		*(*[]byte)(vp) = []byte(raw)
+	} else {
+		*(*[]byte)(vp) = rt.Str2Mem(raw)
+	}
+	return nil
+}
+
+type unmarshalJSONDecoder struct {
+	typ      reflect.Type
+	elemType reflect.Type
+	strOpt   bool
+}
+
 func (d *unmarshalJSONDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) error {
-	v := *(*interface{})(unsafe.Pointer(&rt.GoEface{
-		Type:  d.typ,
-		Value: vp,
-	}))
+	if d.typ.Kind() == reflect.Interface {
+		iv := reflect.NewAt(d.typ, vp).Elem()
+		if node.IsNull() {
+			iv.Set(reflect.Zero(d.typ))
+			return nil
+		}
+		if iv.IsNil() {
+			return error_type(d.typ)
+		}
+		ev := iv.Elem()
+		if ev.Kind() != reflect.Ptr || ev.IsNil() {
+			return error_type(d.typ)
+		}
+		if noCopyRawMessagePtrType != nil && ev.Type() == noCopyRawMessagePtrType {
+			return (&noCopyRawMessageDecoder{strOpt: d.strOpt}).FromDom(ev.UnsafePointer(), node, ctx)
+		}
+		var input []byte
+		if d.strOpt {
+			s, ok := node.AsStringText(ctx)
+			if !ok {
+				return error_mismatch(node, ctx, d.typ)
+			}
+			input = s
+		} else {
+			input = []byte(node.AsRaw(ctx))
+		}
+		return iv.Interface().(json.Unmarshaler).UnmarshalJSON(input)
+	}
 
 	var input []byte
 	if d.strOpt && node.IsNull() {
@@ -150,23 +260,12 @@ func (d *unmarshalJSONDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *contex
 	} else if d.strOpt {
 		s, ok := node.AsStringText(ctx)
 		if !ok {
-			return error_mismatch(node, ctx, d.typ.Pack())
+			return error_mismatch(node, ctx, d.typ)
 		}
 		input = s
 	} else {
 		input = []byte(node.AsRaw(ctx))
 	}
 
-	// fast path
-	if u, ok := v.(json.Unmarshaler); ok {
-		return u.UnmarshalJSON((input))
-	}
-
-	// slow path
-	rv := reflect.ValueOf(v)
-	if u, ok := rv.Interface().(json.Unmarshaler); ok {
-		return u.UnmarshalJSON(input)
-	}
-
-	return error_type(d.typ)
+	return reflect.NewAt(d.elemType, vp).Interface().(json.Unmarshaler).UnmarshalJSON(input)
 }

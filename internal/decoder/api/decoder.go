@@ -1,3 +1,5 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
 /*
  * Copyright 2021 ByteDance Inc.
  *
@@ -64,9 +66,10 @@ func (self *Decoder) SetOptions(opts Options) {
 
 // Decoder is the decoder context object
 type Decoder struct {
-	i int
-	f uint64
-	s string
+	i    int
+	f    uint64
+	s    string
+	sess *inputSession
 }
 
 // NewDecoder creates a new decoder instance.
@@ -82,6 +85,7 @@ func (self *Decoder) Pos() int {
 func (self *Decoder) Reset(s string) {
 	self.s = s
 	self.i = 0
+	self.sess = nil
 	// self.f = 0
 }
 
@@ -111,7 +115,55 @@ func (self *Decoder) CheckTrailings() error {
 // Decode parses the JSON-encoded data from current position and stores the result
 // in the value pointed to by val.
 func (self *Decoder) Decode(val interface{}) error {
-	return decodeImpl(&self.s, &self.i, self.f, val)
+	return decodeSessionImpl(&self.s, &self.i, self.f, val, &self.sess)
+}
+
+// UnmarshalString decodes a single JSON document from an immutable string input
+// and checks for trailing non-whitespace bytes without heap-allocating a Decoder
+// wrapper. Unescaped decoded strings borrow from buf unless OptionCopyString is set.
+func UnmarshalString(buf string, flags uint64, val interface{}) error {
+	updated, pos, err := decodeOneImpl(buf, flags, val)
+	if err != nil {
+		return err
+	}
+	if pos != len(updated) {
+		for pos < len(updated) && (types.SPACE_MASK&(1<<updated[pos])) != 0 {
+			pos++
+		}
+		if pos != len(updated) {
+			return SyntaxError{
+				Src:  updated,
+				Pos:  pos,
+				Code: types.ERR_INVALID_CHAR,
+			}
+		}
+	}
+	return nil
+}
+
+func isUntypedDOMTarget(val interface{}) bool {
+	switch val.(type) {
+	case *interface{}, *map[string]interface{}, *[]interface{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// UnmarshalBytes is the caller-owned []byte input adapter. It borrows buf only
+// for the duration of the call: materialized strings are detached (either via a
+// single owned string snapshot on untyped DOM when copyString is false, or via
+// bounded OptionCopyString slabs), and any returned error is detached from buf
+// via errors.DetachSource so callers may mutate or reuse buf immediately.
+func UnmarshalBytes(buf []byte, copyString bool, flags uint64, val interface{}) error {
+	if !copyString && isUntypedDOMTarget(val) {
+		return UnmarshalString(string(buf), flags, val)
+	}
+	err := UnmarshalString(rt.Mem2Str(buf), flags|uint64(OptionCopyString), val)
+	if err != nil {
+		return errors.DetachSource(err, buf)
+	}
+	return nil
 }
 
 // UseInt64 indicates the Decoder to unmarshal an integer into an interface{} as an
@@ -153,8 +205,8 @@ func (self *Decoder) ValidateString() {
 	self.f |= 1 << _F_validate_string
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency.
+// Pretouch compiles vt's decoder type plan ahead-of-time to warm schema caches
+// and reduce first-request latency.
 //
 // Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 // a compile option to set the depth of recursive compile for the nested struct type.
@@ -162,8 +214,8 @@ func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return PretouchMany([]reflect.Type{vt}, opts...)
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-// in order to reduce the first-hit latency.
+// PretouchMany compiles decoder type plans for all vts ahead-of-time to warm
+// schema caches and reduce first-request latency.
 func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return pretouchManyImpl(vts, opts...)
 }

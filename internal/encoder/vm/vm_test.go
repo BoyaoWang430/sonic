@@ -39,7 +39,6 @@ func TestMain(m *testing.M) {
 		println("stop GC looping!")
 	}()
 	time.Sleep(time.Millisecond)
-	encoder.ForceUseVM()
 	m.Run()
 }
 

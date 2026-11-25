@@ -20,9 +20,11 @@ import (
 	"errors"
 )
 
-// NoCopyRawMessage is a NOCOPY raw encoded JSON value.
-// It implements [Marshaler] and [Unmarshaler] and can
-// be used to delay JSON decoding or precompute a JSON encoding.
+// NoCopyRawMessage is a raw encoded JSON value that borrows from immutable string
+// inputs (UnmarshalString / Decoder) when CopyString is disabled, and detaches a
+// standalone copy when CopyString is enabled or when decoding via Unmarshal([]byte)
+// or StreamDecoder. Treat decoded NoCopyRawMessage slices as read-only; use
+// encoding/json.RawMessage when unconditional standalone ownership is required.
 type NoCopyRawMessage []byte
 
 // MarshalJSON returns m as the JSON encoding of m.

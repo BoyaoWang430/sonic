@@ -16,13 +16,9 @@
 
 package ast
 
-import (
-	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
-)
+import "unsafe"
 
 //go:nosplit
 func mem2ptr(s []byte) unsafe.Pointer {
-	return (*rt.GoSlice)(unsafe.Pointer(&s)).Ptr
+	return unsafe.Pointer(unsafe.SliceData(s))
 }

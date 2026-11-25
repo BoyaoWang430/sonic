@@ -27,7 +27,6 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,7 +131,7 @@ func TestNodeSortKeys2(t *testing.T) {
 //go:noinline
 func stackObj() interface{} {
 	var a int = 1
-	return rt.UnpackEface(a).Pack()
+	return a
 }
 
 func TestLoadAll(t *testing.T) {
@@ -723,8 +722,7 @@ func TestCheckError_Empty(t *testing.T) {
 	n = newRawNode("[hello]", types.V_ARRAY, false)
 	n.parseRaw(true)
 	p := NewParser("[hello]")
-	p.noLazy = true
-	p.skipValue = false
+	p.mode = parseModeEager
 	_, x := p.Parse()
 	if n.Error() != newSyntaxError(p.syntaxError(x)).Error() {
 		t.Fatal(n.Check())
@@ -1963,3 +1961,56 @@ func TestNewBytesEmpty(t *testing.T) {
 	}
 }
 
+func TestGenericSkipsEmptyNodes(t *testing.T) {
+	arr := NewArray([]Node{{}, NewNumber("1"), {}, NewString("x")})
+	gotArr, err := arr.Array()
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{float64(1), "x"}, gotArr)
+
+	gotArrNum, err := arr.ArrayUseNumber()
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{json.Number("1"), "x"}, gotArrNum)
+
+	gotIface, err := arr.Interface()
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{float64(1), "x"}, gotIface)
+
+	obj := NewObject([]Pair{
+		{Key: "empty", Value: Node{}},
+		{Key: "a", Value: NewNumber("1")},
+		{Key: "nested", Value: NewArray([]Node{{}, NewBool(true)})},
+	})
+	gotMap, err := obj.Map()
+	require.NoError(t, err)
+	require.Equal(t, map[string]interface{}{"a": float64(1), "nested": []interface{}{true}}, gotMap)
+
+	gotMapNum, err := obj.MapUseNumber()
+	require.NoError(t, err)
+	require.Equal(t, map[string]interface{}{"a": json.Number("1"), "nested": []interface{}{true}}, gotMapNum)
+}
+
+func TestConcurrentRawInterfaceAndGet(t *testing.T) {
+	for i := 0; i < 64; i++ {
+		root := NewRawConcurrentRead("{\"a\":[1,2,3],\"b\":{\"k\":\"v\"}}")
+		done := make(chan struct{}, 4)
+		go func() {
+			_, _ = root.Interface()
+			done <- struct{}{}
+		}()
+		go func() {
+			_, _ = root.InterfaceUseNumber()
+			done <- struct{}{}
+		}()
+		go func() {
+			_, _ = root.Map()
+			done <- struct{}{}
+		}()
+		go func() {
+			_ = root.Get("b").Get("k")
+			done <- struct{}{}
+		}()
+		for j := 0; j < 4; j++ {
+			<-done
+		}
+	}
+}

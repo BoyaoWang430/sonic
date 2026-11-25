@@ -17,11 +17,12 @@
 package encoder
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"unsafe"
 
-	"github.com/bytedance/sonic/internal/rt"
+	"github.com/bytedance/sonic/internal/encoder/ir"
 	"github.com/bytedance/sonic/option"
 	"github.com/stretchr/testify/assert"
 )
@@ -32,6 +33,54 @@ func TestCompiler_Compile(t *testing.T) {
 	p.Disassemble()
 }
 
+type customRootMarshaler struct {
+	X int
+}
+
+func (c customRootMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`"custom"`), nil
+}
+
+func TestCompilerExplicitRootSpec(t *testing.T) {
+	type pureItem struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	type condItem struct {
+		ID   int    `json:"id"`
+		Name string `json:"name,omitempty"`
+	}
+
+	cePure, err := NewCompiler().CompileEncoder(reflect.TypeOf(pureItem{}), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootPureStruct, cePure.Root.Kind)
+	assert.True(t, cePure.Root.HasPureSpecs)
+	assert.True(t, cePure.Root.HasDenseSpecs)
+
+	ceCondPtr, err := NewCompiler().CompileEncoder(reflect.TypeOf((*condItem)(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootDirectPtr, ceCondPtr.Root.Kind)
+	assert.True(t, ceCondPtr.Root.HasPureSpecs)
+	assert.False(t, ceCondPtr.Root.HasDenseSpecs)
+
+	ceSlice, err := NewCompiler().CompileEncoder(reflect.TypeOf([]pureItem(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootPureSlice, ceSlice.Root.Kind)
+	assert.Equal(t, reflect.TypeOf(pureItem{}).Size(), ceSlice.Root.ElemSize)
+
+	cePtrSlice, err := NewCompiler().CompileEncoder(reflect.TypeOf([]*pureItem(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootPurePtrSlice, cePtrSlice.Root.Kind)
+
+	ceMap, err := NewCompiler().CompileEncoder(reflect.TypeOf(map[string]int(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootBuiltinMap, ceMap.Root.Kind)
+
+	ceCustom, err := NewCompiler().CompileEncoder(reflect.TypeOf((*customRootMarshaler)(nil)), false)
+	assert.NoError(t, err)
+	assert.Equal(t, ir.RootGeneric, ceCustom.Root.Kind)
+}
+
 func TestReflectDirect(t *testing.T) {
 	type A struct {
 		A int
@@ -40,14 +89,10 @@ func TestReflectDirect(t *testing.T) {
 	var a A
 	var b = &a
 	println("b:", unsafe.Pointer(b))
-	v := rt.UnpackEface(a)
 	vv := reflect.ValueOf(a)
-	_ = vv
-	println("v:", v.Type.KindFlags, v.Value)
-	pv := rt.UnpackEface(&a)
+	println("v:", vv.Kind().String())
 	pvv := reflect.ValueOf(&a)
-	_ = pvv
-	println("pv:", pv.Type.KindFlags, pv.Value)
+	println("pv:", pvv.Kind().String(), pvv.UnsafePointer())
 }
 
 func TestPretouchTypeVM(t *testing.T) {
@@ -66,10 +111,99 @@ func TestPretouchTypeVM(t *testing.T) {
 			MaxInlineDepth: 1,
 			RecursiveDepth: 1000,
 		},
-		0,
+		false,
 	)
 	assert.NoError(t, err)
-	assert.Contains(t, sub, reflect.TypeOf(subA{}))
-	assert.Contains(t, sub, reflect.TypeOf(subB{}))
-	assert.Contains(t, sub, reflect.TypeOf(subC{}))
+	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subA{}), pv: false})
+	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subB{}), pv: false})
+	assert.Contains(t, sub, vmPretouchKey{vt: reflect.TypeOf(subC{}), pv: false})
+}
+
+func TestExplicitAndDefaultMaxInlineDepth(t *testing.T) {
+	assert.Equal(t, 16, option.DefaultMaxInlineDepth)
+
+	type defLeaf struct{ X int }
+	type defMid struct{ B [1]defLeaf }
+	type defRoot struct{ A [1]defMid }
+
+	defSub, err := pretouchTypeVM(reflect.TypeOf(defRoot{}), option.DefaultCompileOptions(), false)
+	assert.NoError(t, err)
+	assert.Empty(t, defSub, "default MaxInlineDepth(16) inlines shallow nested structs directly")
+
+	type expLeaf struct{ X int }
+	type expMid struct{ B [1]expLeaf }
+	type expRoot struct{ A [1]expMid }
+
+	explicitOpts := option.DefaultCompileOptions()
+	option.WithCompileMaxInlineDepth(3)(&explicitOpts)
+	expSub, err := pretouchTypeVM(reflect.TypeOf(expRoot{}), explicitOpts, false)
+	assert.NoError(t, err)
+	assert.Contains(t, expSub, vmPretouchKey{vt: reflect.TypeOf(expLeaf{}), pv: false}, "explicit WithCompileMaxInlineDepth(3) stops inlining at depth 3")
+}
+
+func TestStructFieldsCompilation(t *testing.T) {
+	type embedded struct {
+		E string `json:"e"`
+	}
+	type sample struct {
+		A int    `json:"a"`
+		B string `json:"b,omitempty"`
+		embedded
+		P *int   `json:"p,omitempty"`
+		C bool   `json:"c"`
+		D uint64 `json:"d,omitempty"`
+	}
+
+	for _, batchSpecs := range []bool{true, false} {
+		p, err := NewCompiler().withBatchSpecs(batchSpecs).Compile(reflect.TypeOf(sample{}), false)
+		assert.NoError(t, err)
+		var runs []int
+		for _, ins := range p {
+			if ins.Op() == ir.OP_struct_fields {
+				runs = append(runs, len(ins.VFields()))
+			}
+		}
+		if batchSpecs {
+			assert.Equal(t, []int{6}, runs)
+		} else {
+			assert.Empty(t, runs)
+		}
+	}
+}
+
+func TestStructFieldsPtrScalarSemantics(t *testing.T) {
+	type ptrSample struct {
+		A *int     `json:"a"`
+		B *int     `json:"b,omitempty"`
+		C *string  `json:"c"`
+		D *string  `json:"d,omitempty"`
+		E *bool    `json:"e"`
+		F *bool    `json:"f,omitempty"`
+		G *float64 `json:"g,omitempty"`
+		H *int     `json:"h,string,omitempty"`
+	}
+
+	zeroInt := 0
+	emptyStr := ""
+	falseBool := false
+	zeroFloat := 0.0
+	seven := 7
+
+	cases := []ptrSample{
+		{},
+		{A: &zeroInt, B: &zeroInt, C: &emptyStr, D: &emptyStr, E: &falseBool, F: &falseBool, G: &zeroFloat, H: &seven},
+	}
+
+	for _, tc := range cases {
+		want, err := json.Marshal(tc)
+		assert.NoError(t, err)
+
+		gotDefault, err := Encode(tc, 0)
+		assert.NoError(t, err)
+		assert.Equal(t, string(want), string(gotDefault))
+
+		gotOmitNull, err := Encode(tc, SortMapKeys)
+		assert.NoError(t, err)
+		assert.Equal(t, string(want), string(gotOmitNull))
+	}
 }

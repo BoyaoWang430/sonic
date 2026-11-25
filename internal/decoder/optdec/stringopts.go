@@ -1,15 +1,32 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package optdec
 
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"unsafe"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
 type ptrStrDecoder struct {
-	typ   *rt.GoType
+	typ   reflect.Type
 	deref decFunc
 }
 
@@ -31,7 +48,7 @@ func (d *ptrStrDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) erro
 	}
 
 	if *(*unsafe.Pointer)(vp) == nil {
-		*(*unsafe.Pointer)(vp) = rt.Mallocgc(d.typ.Size, d.typ, true)
+		*(*unsafe.Pointer)(vp) = reflect.New(d.typ).UnsafePointer()
 	}
 
 	return d.deref.FromDom(*(*unsafe.Pointer)(vp), node, ctx)
@@ -267,12 +284,12 @@ func (d *f32StringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 		return nil
 	}
 
-	ret, err := ParseF64(s)
-	if err != nil || ret > math.MaxFloat32 || ret < -math.MaxFloat32 {
+	ret, ok := parseExactFloat32Slice(s)
+	if !ok {
 		return error_mismatch(node, ctx, float32Type)
 	}
 
-	*(*float32)(vp) = float32(ret)
+	*(*float32)(vp) = ret
 	return nil
 }
 
@@ -293,7 +310,7 @@ func (d *f64StringDecoder) FromDom(vp unsafe.Pointer, node Node, ctx *context) e
 	}
 
 	ret, err := ParseF64(s)
-	if err != nil {
+	if err != nil || math.IsNaN(ret) || math.IsInf(ret, 0) {
 		return error_mismatch(node, ctx, float64Type)
 	}
 

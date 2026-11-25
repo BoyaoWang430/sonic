@@ -1,5 +1,18 @@
-//go:build amd64
-// +build amd64
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package encoder
 
@@ -20,30 +33,6 @@ type testMutualA struct {
 type testMutualB struct {
 	ID int          `json:"id"`
 	A  *testMutualA `json:"a,omitempty"`
-}
-
-func TestPretouchTypeX86(t *testing.T) {
-	type subA struct{}
-	type subB struct{}
-	type subC struct{}
-	type data struct {
-		SubA subA
-		SubB subB
-		SubC subC
-	}
-
-	sub, err := pretouchTypeX86(
-		reflect.TypeOf(data{}),
-		option.CompileOptions{
-			MaxInlineDepth: 1,
-			RecursiveDepth: 1000,
-		},
-		0,
-	)
-	assert.NoError(t, err)
-	assert.Contains(t, sub, reflect.TypeOf(subA{}))
-	assert.Contains(t, sub, reflect.TypeOf(subB{}))
-	assert.Contains(t, sub, reflect.TypeOf(subC{}))
 }
 
 func TestPretouchEncodeMultiLevelStructWithRec(t *testing.T) {

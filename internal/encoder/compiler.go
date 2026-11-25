@@ -20,92 +20,142 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/bytedance/sonic/internal/caching"
 	"github.com/bytedance/sonic/internal/encoder/ir"
+	"github.com/bytedance/sonic/internal/encoder/prim"
 	"github.com/bytedance/sonic/internal/encoder/vars"
 	"github.com/bytedance/sonic/internal/encoder/vm"
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
 	"github.com/bytedance/sonic/option"
 )
 
-func ForceUseVM() {
+func init() {
 	vm.SetCompiler(makeEncoderVM)
-	pretouchType = pretouchTypeVM
-	encodeTypedPointer = vm.EncodeTypedPointer
-	vars.UseVM = true
 }
 
-var encodeTypedPointer func(buf *[]byte, vt *rt.GoType, vp *unsafe.Pointer, sb *vars.Stack, fv uint64) error
-
-func makeEncoderVM(vt *rt.GoType, ex ...interface{}) (interface{}, error) {
-	pp, err := NewCompiler().Compile(vt.Pack(), ex[0].(bool))
+func makeEncoderVM(vt reflect.Type, ex ...interface{}) (interface{}, error) {
+	pv := ex[0].(bool)
+	omitNull := false
+	if len(ex) > 1 {
+		omitNull = ex[1].(bool)
+	}
+	c := NewCompiler()
+	c.opts.EncOnlyOmitNull = omitNull
+	ce, err := c.CompileEncoder(vt, pv)
 	if err != nil {
 		return nil, err
 	}
-	return &pp, nil
+	return &ce, nil
 }
 
-var pretouchType func(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error)
-
-func pretouchTypeVM(_vt reflect.Type, opts option.CompileOptions, v uint8) (map[reflect.Type]uint8, error) {
+func pretouchTypeVM(vt reflect.Type, opts option.CompileOptions, pv bool) (map[vmPretouchKey]struct{}, error) {
 	/* compile function */
 	compiler := NewCompiler().apply(opts)
-	encoder := func(vt *rt.GoType, ex ...interface{}) (interface{}, error) {
-		pp, err := compiler.Compile(vt.Pack(), ex[0].(bool))
+	omitNull := opts.EncOnlyOmitNull
+	encoder := func(vt reflect.Type, ex ...interface{}) (interface{}, error) {
+		ce, err := compiler.CompileEncoder(vt, ex[0].(bool))
 		if err != nil {
 			return nil, err
 		}
-		return &pp, nil
+		return &ce, nil
 	}
 
 	/* find or compile */
-	vt := rt.UnpackType(_vt)
-	if val := vars.GetProgram(vt); val != nil {
+	if val := vars.GetProgramMode(vt, pv, omitNull); val != nil {
 		return nil, nil
-	} else if _, err := vars.ComputeProgram(vt, encoder, v == 1); err == nil {
+	} else if _, err := vars.ComputeProgramMode(vt, encoder, pv, omitNull); err == nil {
 		return compiler.rec, nil
 	} else {
 		return nil, err
 	}
 }
 
-func pretouchRec(vtm map[reflect.Type]uint8, opts option.CompileOptions) error {
+type vmPretouchKey struct {
+	vt reflect.Type
+	pv bool
+}
+
+func pretouchRecVMBatch(vtm map[vmPretouchKey]struct{}, opts option.CompileOptions) error {
 	if opts.RecursiveDepth < 0 || len(vtm) == 0 {
 		return nil
 	}
-	next := make(map[reflect.Type]uint8)
-	for vt, v := range vtm {
-		sub, err := pretouchType(vt, opts, v)
-		if err != nil {
-			return err
+	omitNull := opts.EncOnlyOmitNull
+	seen := make(map[vmPretouchKey]struct{}, len(vtm)*2)
+	var batchVal []caching.ProgramBatchItem
+	var batchPV []caching.ProgramBatchItem
+
+	for opts.RecursiveDepth >= 0 && len(vtm) > 0 {
+		next := make(map[vmPretouchKey]struct{})
+		for key := range vtm {
+			if key.vt == nil {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			if vars.GetProgramMode(key.vt, key.pv, omitNull) != nil {
+				continue
+			}
+			compiler := NewCompiler().apply(opts)
+			ce, err := compiler.CompileEncoder(key.vt, key.pv)
+			if err != nil {
+				return err
+			}
+			prog := &ce
+			if key.pv {
+				batchPV = append(batchPV, caching.ProgramBatchItem{Vt: key.vt, Fn: prog})
+			} else {
+				batchVal = append(batchVal, caching.ProgramBatchItem{Vt: key.vt, Fn: prog})
+			}
+			for subKey := range compiler.rec {
+				if _, ok := seen[subKey]; !ok {
+					next[subKey] = struct{}{}
+				}
+			}
 		}
-		for svt, v := range sub {
-			next[svt] = v
-		}
+		opts.RecursiveDepth--
+		vtm = next
 	}
-	opts.RecursiveDepth -= 1
-	return pretouchRec(next, opts)
+	if len(batchVal) > 0 {
+		vars.PutProgramsMode(batchVal, false, omitNull)
+	}
+	if len(batchPV) > 0 {
+		vars.PutProgramsMode(batchPV, true, omitNull)
+	}
+	return nil
 }
 
 type Compiler struct {
-	opts option.CompileOptions
-	pv   bool
-	tab  map[reflect.Type]bool
-	rec  map[reflect.Type]uint8
+	opts              option.CompileOptions
+	pv                bool
+	disableBatchSpecs bool
+	tab               map[reflect.Type]bool
+	rec               map[vmPretouchKey]struct{}
+	root              ir.RootSpec
+	lastPureSpecs     []ir.StructFieldSpec
+	lastPureOK        bool
+	lastPtrSpecs      []ir.StructFieldSpec
+	lastPtrOK         bool
 }
 
 func NewCompiler() *Compiler {
 	return &Compiler{
 		opts: option.DefaultCompileOptions(),
 		tab:  map[reflect.Type]bool{},
-		rec:  map[reflect.Type]uint8{},
+		rec:  map[vmPretouchKey]struct{}{},
 	}
+}
+
+func (self *Compiler) withBatchSpecs(enabled bool) *Compiler {
+	self.disableBatchSpecs = !enabled
+	return self
 }
 
 func (self *Compiler) apply(opts option.CompileOptions) *Compiler {
 	self.opts = opts
 	if self.opts.RecursiveDepth > 0 {
-		self.rec = map[reflect.Type]uint8{}
+		self.rec = map[vmPretouchKey]struct{}{}
 	}
 	return self
 }
@@ -120,15 +170,36 @@ func (self *Compiler) rescue(ep *error) {
 	}
 }
 
-func (self *Compiler) Compile(vt reflect.Type, pv bool) (ret ir.Program, err error) {
+func (self *Compiler) CompileEncoder(vt reflect.Type, pv bool) (ret ir.CompiledEncoder, err error) {
 	defer self.rescue(&err)
-	self.compileOne(&ret, 0, vt, pv)
+	self.root = ir.RootSpec{
+		Kind:        ir.RootGeneric,
+		Addressable: pv,
+	}
+	self.lastPureSpecs = nil
+	self.lastPureOK = false
+	self.lastPtrSpecs = nil
+	self.lastPtrOK = false
+	self.compileOne(&ret.Program, 0, vt, pv)
+	ret.Root = self.root
 	return
 }
 
+func (self *Compiler) Compile(vt reflect.Type, pv bool) (ret ir.Program, err error) {
+	ce, err := self.CompileEncoder(vt, pv)
+	return ce.Program, err
+}
+
 func (self *Compiler) compileOne(p *ir.Program, sp int, vt reflect.Type, pv bool) {
+	self.lastPureSpecs = nil
+	self.lastPureOK = false
+	self.lastPtrSpecs = nil
+	self.lastPtrOK = false
 	if self.tab[vt] {
 		p.Vp(ir.OP_recurse, vt, pv)
+		if self.opts.RecursiveDepth > 0 {
+			self.rec[vmPretouchKey{vt: vt, pv: pv}] = struct{}{}
+		}
 	} else {
 		self.compileRec(p, sp, vt, pv)
 	}
@@ -137,9 +208,20 @@ func (self *Compiler) compileOne(p *ir.Program, sp int, vt reflect.Type, pv bool
 func (self *Compiler) tryCompileMarshaler(p *ir.Program, vt reflect.Type, pv bool) bool {
 	pt := reflect.PtrTo(vt)
 
+	if !self.disableBatchSpecs {
+		if pv && pt.Implements(prim.JSONAppenderType) {
+			self.addMarshalerOp(p, ir.OP_marshal_append_p, pt, prim.JSONAppenderType)
+			return true
+		}
+		if vt.Implements(prim.JSONAppenderType) {
+			self.compileMarshaler(p, ir.OP_marshal_append, vt, prim.JSONAppenderType)
+			return true
+		}
+	}
+
 	/* check for addressable `json.Marshaler` with pointer receiver */
 	if pv && pt.Implements(vars.JsonMarshalerType) {
-		addMarshalerOp(p, ir.OP_marshal_p, pt, vars.JsonMarshalerType)
+		self.addMarshalerOp(p, ir.OP_marshal_p, pt, vars.JsonMarshalerType)
 		return true
 	}
 
@@ -151,7 +233,7 @@ func (self *Compiler) tryCompileMarshaler(p *ir.Program, vt reflect.Type, pv boo
 
 	/* check for addressable `encoding.TextMarshaler` with pointer receiver */
 	if pv && pt.Implements(vars.EncodingTextMarshalerType) {
-		addMarshalerOp(p, ir.OP_marshal_text_p, pt, vars.EncodingTextMarshalerType)
+		self.addMarshalerOp(p, ir.OP_marshal_text_p, pt, vars.EncodingTextMarshalerType)
 		return true
 	}
 
@@ -222,17 +304,29 @@ func (self *Compiler) compileOps(p *ir.Program, sp int, vt reflect.Type) {
 	case reflect.Ptr:
 		self.compilePtr(p, sp, vt.Elem())
 	case reflect.Slice:
-		self.compileSlice(p, sp, vt.Elem())
+		self.compileSlice(p, sp, vt)
 	case reflect.Struct:
 		self.compileStruct(p, sp, vt)
 	default:
 		self.compileUnsupportedType(p, vt)
 	}
+	if vt.Kind() != reflect.Struct {
+		self.lastPureSpecs = nil
+		self.lastPureOK = false
+	}
+	if vt.Kind() != reflect.Ptr {
+		self.lastPtrSpecs = nil
+		self.lastPtrOK = false
+	}
 }
 
-func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op ir.Op, fn func(*ir.Program, int, reflect.Type)) {
+func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op ir.Op, nilType reflect.Type, fn func(*ir.Program, int, reflect.Type)) {
 	x := p.PC()
-	p.Add(ir.OP_is_nil)
+	if nilType != nil {
+		p.Rtt(ir.OP_is_nil, nilType)
+	} else {
+		p.Add(ir.OP_is_nil)
+	}
 	fn(p, sp, vt)
 	e := p.PC()
 	p.Add(ir.OP_goto)
@@ -242,27 +336,72 @@ func (self *Compiler) compileNil(p *ir.Program, sp int, vt reflect.Type, nil_op 
 }
 
 func (self *Compiler) compilePtr(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_null, self.compilePtrBody)
+	self.compileNil(p, sp, vt, ir.OP_null, nil, self.compilePtrBody)
 }
 
 func (self *Compiler) compilePtrBody(p *ir.Program, sp int, vt reflect.Type) {
 	p.Tag(sp)
 	p.Add(ir.OP_save)
 	p.Add(ir.OP_deref)
+	bodyStart := p.PC()
 	self.compileOne(p, sp+1, vt, true)
+	bodyEnd := p.PC()
+	var innerPureSpecs []ir.StructFieldSpec
+	var innerPureOK bool
+	if vt.Kind() == reflect.Struct {
+		innerPureSpecs, innerPureOK = self.lastPureSpecs, self.lastPureOK
+	}
 	p.Add(ir.OP_drop)
+
+	self.lastPureSpecs = nil
+	self.lastPureOK = false
+	self.lastPtrSpecs = innerPureSpecs
+	self.lastPtrOK = innerPureOK
+	if sp == 0 && !self.pv {
+		var denseSpecs []ir.StructFieldSpec
+		var hasDense bool
+		if innerPureOK {
+			denseSpecs, hasDense = ir.BuildDenseSpecs(innerPureSpecs)
+		}
+		self.root = ir.RootSpec{
+			Kind:          ir.RootDirectPtr,
+			Addressable:   true,
+			HasPureSpecs:  innerPureOK,
+			HasDenseSpecs: hasDense,
+			BodyStartPC:   bodyStart,
+			BodyEndPC:     bodyEnd,
+			PureSpecs:     innerPureSpecs,
+			DenseSpecs:    denseSpecs,
+		}
+	}
 }
 
 func (self *Compiler) compileMap(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_empty_obj, self.compileMapBody)
+	self.compileNil(p, sp, vt, ir.OP_empty_obj, vt, self.compileMapBody)
 }
 
 func (self *Compiler) compileMapBody(p *ir.Program, sp int, vt reflect.Type) {
 	p.Tag(sp + 1)
 	p.Int(ir.OP_byte, '{')
 	e := p.PC()
-	p.Add(ir.OP_is_zero_map)
+	p.Rtt(ir.OP_is_zero_map, vt)
 	p.Add(ir.OP_save)
+	if !self.disableBatchSpecs {
+		if kind, ok := vars.BuiltinMapKind(vt); ok {
+			p.Add(ir.OP_save)
+			p.Int(ir.OP_map_string_any, kind)
+			p.Add(ir.OP_drop_2)
+			p.Pin(e)
+			p.Int(ir.OP_byte, '}')
+			if sp == 0 && !self.pv {
+				self.root = ir.RootSpec{
+					Kind:           ir.RootBuiltinMap,
+					BuiltinMapKind: kind,
+				}
+			}
+			return
+		}
+	}
 	p.Rtt(ir.OP_map_iter, vt)
 	p.Add(ir.OP_save)
 	i := p.PC()
@@ -347,8 +486,10 @@ func (self *Compiler) compileMapBodyTextKey(p *ir.Program, vk reflect.Type) {
 }
 
 func (self *Compiler) compileMapBodyUtextKey(p *ir.Program, vk reflect.Type) {
-	if vk.Kind() != reflect.Ptr {
-		addMarshalerOp(p, ir.OP_marshal_text, vk, vars.EncodingTextMarshalerType)
+	if vk.Kind() == reflect.Interface {
+		p.Rtt(ir.OP_marshal_text_key, vk)
+	} else if vk.Kind() != reflect.Ptr {
+		self.addMarshalerOp(p, ir.OP_marshal_text, vk, vars.EncodingTextMarshalerType)
 	} else {
 		self.compileMapBodyUtextPtr(p, vk)
 	}
@@ -357,7 +498,7 @@ func (self *Compiler) compileMapBodyUtextKey(p *ir.Program, vk reflect.Type) {
 func (self *Compiler) compileMapBodyUtextPtr(p *ir.Program, vk reflect.Type) {
 	i := p.PC()
 	p.Add(ir.OP_is_nil)
-	addMarshalerOp(p, ir.OP_marshal_text, vk, vars.EncodingTextMarshalerType)
+	self.addMarshalerOp(p, ir.OP_marshal_text, vk, vars.EncodingTextMarshalerType)
 	j := p.PC()
 	p.Add(ir.OP_goto)
 	p.Pin(i)
@@ -365,38 +506,67 @@ func (self *Compiler) compileMapBodyUtextPtr(p *ir.Program, vk reflect.Type) {
 	p.Pin(j)
 }
 
-func (self *Compiler) compileSlice(p *ir.Program, sp int, vt reflect.Type) {
-	self.compileNil(p, sp, vt, ir.OP_empty_arr, self.compileSliceBody)
-}
-
-func (self *Compiler) compileSliceBody(p *ir.Program, sp int, vt reflect.Type) {
-	if vars.IsSimpleByte(vt) {
-		p.Add(ir.OP_bin)
-	} else {
-		self.compileSliceArray(p, sp, vt)
+func (self *Compiler) compileSlice(p *ir.Program, sp int, st reflect.Type) {
+	elem := st.Elem()
+	if vars.IsSimpleByte(elem) {
+		if st == vars.ByteSliceType {
+			p.Add(ir.OP_bin)
+		} else {
+			self.compileNil(p, sp, st, ir.OP_empty_arr, st, func(p *ir.Program, _ int, st reflect.Type) {
+				p.Rtt(ir.OP_bin, st)
+			})
+		}
+		return
 	}
+	if self.compileFloatSlice(p, sp, st) {
+		return
+	}
+	self.compileSliceArray(p, sp, st)
 }
 
-func (self *Compiler) compileSliceArray(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) compileSliceArray(p *ir.Program, sp int, st reflect.Type) {
+	elem := st.Elem()
 	p.Tag(sp)
-	p.Int(ir.OP_byte, '[')
-	e := p.PC()
-	p.Add(ir.OP_is_nil)
-	p.Add(ir.OP_save)
-	p.Add(ir.OP_slice_len)
-	i := p.PC()
-	p.Rtt(ir.OP_slice_next, vt)
-	self.compileOne(p, sp+1, vt, true)
-	j := p.PC()
-	p.Rtt(ir.OP_slice_next, vt)
-	p.Int(ir.OP_byte, ',')
-	self.compileOne(p, sp+1, vt, true)
-	p.Int(ir.OP_goto, j)
-	p.Pin(i)
-	p.Pin(j)
+	done := p.PC()
+	p.Rtt(ir.OP_slice_begin, st)
+	self.compileOne(p, sp+1, elem, true)
+	elemPureSpecs, elemPureOK := self.lastPureSpecs, self.lastPureOK
+	elemPtrSpecs, elemPtrOK := self.lastPtrSpecs, self.lastPtrOK
+	loop := p.PC()
+	p.Rtt(ir.OP_slice_next, elem)
+	self.compileOne(p, sp+1, elem, true)
+	p.Int(ir.OP_goto, loop)
+	p.Pin(loop)
 	p.Add(ir.OP_drop)
-	p.Pin(e)
 	p.Int(ir.OP_byte, ']')
+	p.Pin(done)
+
+	if sp == 0 && !self.pv {
+		if elem.Kind() == reflect.Struct && elemPureOK {
+			denseSpecs, hasDense := ir.BuildDenseSpecs(elemPureSpecs)
+			self.root = ir.RootSpec{
+				Kind:          ir.RootPureSlice,
+				Addressable:   true,
+				HasPureSpecs:  true,
+				HasDenseSpecs: hasDense,
+				ElemSize:      elem.Size(),
+				MinElemBytes:  ir.MinValueSliceElemBytes(elemPureSpecs, denseSpecs, hasDense),
+				PureSpecs:     elemPureSpecs,
+				DenseSpecs:    denseSpecs,
+			}
+		} else if elem.Kind() == reflect.Ptr && elem.Elem().Kind() == reflect.Struct && elemPtrOK {
+			denseSpecs, hasDense := ir.BuildDenseSpecs(elemPtrSpecs)
+			self.root = ir.RootSpec{
+				Kind:          ir.RootPurePtrSlice,
+				Addressable:   true,
+				HasPureSpecs:  true,
+				HasDenseSpecs: hasDense,
+				MinElemBytes:  ir.MinPtrSliceElemBytes,
+				PureSpecs:     elemPtrSpecs,
+				DenseSpecs:    denseSpecs,
+			}
+		}
+	}
 }
 
 func (self *Compiler) compileArray(p *ir.Program, sp int, vt reflect.Type, nb int) {
@@ -432,97 +602,504 @@ func (self *Compiler) compileString(p *ir.Program, vt reflect.Type) {
 }
 
 func (self *Compiler) compileStruct(p *ir.Program, sp int, vt reflect.Type) {
-	if sp >= self.opts.MaxInlineDepth || p.PC() >= vars.MAX_ILBUF || (sp > 0 && vt.NumField() >= vars.MAX_FIELDS) {
+	maxDepth := self.opts.MaxInlineDepth
+	if sp >= maxDepth || p.PC() >= vars.MAX_ILBUF || (self.disableBatchSpecs && sp > 0 && vt.NumField() >= vars.MAX_FIELDS) {
 		p.Vp(ir.OP_recurse, vt, self.pv)
 		if self.opts.RecursiveDepth > 0 {
-			if self.pv {
-				self.rec[vt] = 1
-			} else {
-				self.rec[vt] = 0
+			self.rec[vmPretouchKey{vt: vt, pv: self.pv}] = struct{}{}
+		}
+		self.lastPureSpecs = nil
+		self.lastPureOK = false
+	} else {
+		pureSpecs, isPure := self.compileStructBody(p, sp, vt)
+		self.lastPureSpecs = pureSpecs
+		self.lastPureOK = isPure
+		if sp == 0 && !self.pv && isPure {
+			denseSpecs, hasDense := ir.BuildDenseSpecs(pureSpecs)
+			self.root = ir.RootSpec{
+				Kind:          ir.RootPureStruct,
+				HasPureSpecs:  true,
+				HasDenseSpecs: hasDense,
+				PureSpecs:     pureSpecs,
+				DenseSpecs:    denseSpecs,
 			}
 		}
-	} else {
-		self.compileStructBody(p, sp, vt)
 	}
 }
 
-func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) isCustomMarshaler(vt reflect.Type, pv bool) bool {
+	pt := reflect.PtrTo(vt)
+	if !self.disableBatchSpecs && ((pv && pt.Implements(prim.JSONAppenderType)) || vt.Implements(prim.JSONAppenderType)) {
+		return true
+	}
+	if pv && pt.Implements(vars.JsonMarshalerType) {
+		return true
+	}
+	if vt.Implements(vars.JsonMarshalerType) {
+		return true
+	}
+	if pv && pt.Implements(vars.EncodingTextMarshalerType) {
+		return true
+	}
+	if vt.Implements(vars.EncodingTextMarshalerType) {
+		return true
+	}
+	return false
+}
+
+func specNoCommaSkip(hasGuaranteedField bool) uint8 {
+	if hasGuaranteedField {
+		return 0
+	}
+	return 1
+}
+
+func (self *Compiler) tryCompilePureStructSpecs(vt reflect.Type, depth int) ([]ir.StructFieldSpec, bool) {
+	maxDepth := self.opts.MaxInlineDepth
+	if self.disableBatchSpecs || depth >= maxDepth || self.tab[vt] || self.isCustomMarshaler(vt, true) {
+		return nil, false
+	}
+	savedPV := self.pv
+	self.pv = true
+	self.tab[vt] = true
+	defer func() {
+		self.pv = savedPV
+		delete(self.tab, vt)
+	}()
+
+	var specs []ir.StructFieldSpec
+	var build func(curType reflect.Type, baseOffset uintptr, curDepth int) bool
+	build = func(curType reflect.Type, baseOffset uintptr, curDepth int) bool {
+		fvs := resolveEncodedStruct(curType)
+		hasGuaranteedField := false
+		for i := range fvs {
+			ef := &fvs[i]
+			fv := ef.meta
+			if fv.Type.Kind() == reflect.Array {
+				if fv.Type.Len() == 0 && (fv.Opts&resolver.F_omitempty) != 0 {
+					continue
+				}
+				return false
+			}
+			if childOffset, ok := self.tryFlattenNestedStruct(ef, baseOffset, curDepth); ok {
+				specs = append(specs, ir.StructFieldSpec{
+					Ptr:         unsafe.Pointer(ef.commaKeyPtr()),
+					KeyLen:      uint8(ef.commaKeyLen + 1),
+					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
+					Kind:        ir.OP_struct_begin,
+				})
+				self.tab[fv.Type] = true
+				okChild := build(fv.Type, childOffset, curDepth+1)
+				delete(self.tab, fv.Type)
+				if !okChild {
+					return false
+				}
+				specs = append(specs, ir.StructFieldSpec{
+					Kind: ir.OP_struct_end,
+				})
+				hasGuaranteedField = true
+				continue
+			}
+			spec, ok := self.tryCompileStructFieldSpec(ef, baseOffset, hasGuaranteedField, curDepth)
+			if !ok {
+				return false
+			}
+			specs = append(specs, spec)
+			if spec.Flags&(ir.SpecFlagOmitEmpty|ir.SpecFlagOmitNil) == 0 {
+				hasGuaranteedField = true
+			}
+		}
+		return true
+	}
+	if !build(vt, 0, depth) {
+		return nil, false
+	}
+	cp := make([]ir.StructFieldSpec, len(specs))
+	copy(cp, specs)
+	return cp, true
+}
+
+func (self *Compiler) tryCompileStructFieldSpec(ef *encodedField, baseOffset uintptr, hasGuaranteedField bool, depth int) (ir.StructFieldSpec, bool) {
+	fv := ef.meta
+	if self.disableBatchSpecs || ef.keyNeedsSanitize || ef.commaKeyLen > 255 || len(ef.owner) == 0 {
+		return ir.StructFieldSpec{}, false
+	}
+	if (fv.Opts & resolver.F_omitzero) != 0 {
+		return ir.StructFieldSpec{}, false
+	}
+	offset := baseOffset
+	for _, o := range fv.Path {
+		if o.Kind == resolver.F_deref {
+			return ir.StructFieldSpec{}, false
+		}
+		offset += o.Size
+	}
+	ft := fv.Type
+	if self.tab[ft] || self.isCustomMarshaler(ft, self.pv) {
+		return ir.StructFieldSpec{}, false
+	}
+	isPtr := false
+	isPtrStruct := false
+	var kind ir.Op
+	specPtr := unsafe.Pointer(ef.commaKeyPtr())
+	if ft.Kind() == reflect.Ptr && (fv.Opts&resolver.F_stringize) == 0 {
+		et := ft.Elem()
+		if !self.tab[et] && !self.isCustomMarshaler(ft, true) && !self.isCustomMarshaler(et, true) {
+			switch et.Kind() {
+			case reflect.Bool,
+				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+				reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+				reflect.Float32, reflect.Float64:
+				ft = et
+				isPtr = true
+			case reflect.String:
+				if et != vars.JsonNumberType {
+					ft = et
+					isPtr = true
+				}
+			case reflect.Struct:
+				elemSpecs, ok := self.tryCompilePureStructSpecs(et, depth+2)
+				if ok {
+					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
+					specPtr = unsafe.Pointer(&ir.StructPtrSpec{
+						KeyPtr:     ef.commaKeyPtr(),
+						Specs:      elemSpecs,
+						DenseSpecs: denseSpecs,
+						IsDense:    isDense,
+					})
+					kind = ir.OP_ptr_struct
+					isPtrStruct = true
+				}
+			}
+		}
+	}
+	if isPtrStruct {
+		// kind and specPtr already populated for *SubStruct.
+	} else if (fv.Opts & resolver.F_stringize) != 0 {
+		if ft != vars.JsonNumberType && ft.Kind() == reflect.String {
+			kind = ir.OP_quote
+		} else {
+			return ir.StructFieldSpec{}, false
+		}
+	} else {
+		switch ft.Kind() {
+		case reflect.Bool:
+			kind = ir.OP_bool
+		case reflect.Int:
+			kind = ir.OP_int()
+		case reflect.Int8:
+			kind = ir.OP_i8
+		case reflect.Int16:
+			kind = ir.OP_i16
+		case reflect.Int32:
+			kind = ir.OP_i32
+		case reflect.Int64:
+			kind = ir.OP_i64
+		case reflect.Uint:
+			kind = ir.OP_uint()
+		case reflect.Uint8:
+			kind = ir.OP_u8
+		case reflect.Uint16:
+			kind = ir.OP_u16
+		case reflect.Uint32:
+			kind = ir.OP_u32
+		case reflect.Uint64:
+			kind = ir.OP_u64
+		case reflect.Uintptr:
+			kind = ir.OP_uintptr()
+		case reflect.Float32:
+			kind = ir.OP_f32
+		case reflect.Float64:
+			kind = ir.OP_f64
+		case reflect.String:
+			if ft != vars.JsonNumberType {
+				kind = ir.OP_str
+			} else {
+				kind = ir.OP_number
+			}
+		case reflect.Interface:
+			if ft.NumMethod() == 0 {
+				kind = ir.OP_eface
+			} else {
+				return ir.StructFieldSpec{}, false
+			}
+		case reflect.Slice:
+			if (fv.Opts&resolver.F_omitempty) != 0 && self.opts.EncOnlyOmitNull {
+				return ir.StructFieldSpec{}, false
+			}
+			et := ft.Elem()
+			if self.tab[et] || self.isCustomMarshaler(et, true) {
+				return ir.StructFieldSpec{}, false
+			}
+			switch ft {
+			case vars.ByteSliceType:
+				kind = ir.OP_bin
+			case vars.AnySliceType:
+				kind = ir.OP_slice_eface
+			case vars.BoolSliceType:
+				kind = ir.OP_slice_bool
+			case vars.Float64SliceType:
+				kind = ir.OP_f64_slice
+			case vars.Float32SliceType:
+				kind = ir.OP_f32_slice
+			case vars.IntSliceType:
+				if ir.OP_int() == ir.OP_i64 {
+					kind = ir.OP_slice_i64
+				} else {
+					kind = ir.OP_slice_i32
+				}
+			case vars.Int64SliceType:
+				kind = ir.OP_slice_i64
+			case vars.Int32SliceType:
+				kind = ir.OP_slice_i32
+			case vars.UintSliceType:
+				if ir.OP_uint() == ir.OP_u64 {
+					kind = ir.OP_slice_u64
+				} else {
+					kind = ir.OP_slice_u32
+				}
+			case vars.Uint64SliceType:
+				kind = ir.OP_slice_u64
+			case vars.Uint32SliceType:
+				kind = ir.OP_slice_u32
+			case vars.StringSliceType:
+				kind = ir.OP_slice_str
+			default:
+				if et.Kind() == reflect.Struct {
+					elemSpecs, ok := self.tryCompilePureStructSpecs(et, depth+2)
+					if !ok {
+						return ir.StructFieldSpec{}, false
+					}
+					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
+					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
+						KeyPtr:       ef.commaKeyPtr(),
+						SliceType:    ft,
+						ElemSize:     et.Size(),
+						MinElemBytes: ir.MinValueSliceElemBytes(elemSpecs, denseSpecs, isDense),
+						Specs:        elemSpecs,
+						DenseSpecs:   denseSpecs,
+						IsDense:      isDense,
+					})
+					kind = ir.OP_slice_struct
+				} else if et.Kind() == reflect.Ptr {
+					pt := et.Elem()
+					if pt.Kind() != reflect.Struct || self.tab[et] || self.tab[pt] || self.isCustomMarshaler(et, true) || self.isCustomMarshaler(pt, true) {
+						return ir.StructFieldSpec{}, false
+					}
+					elemSpecs, ok := self.tryCompilePureStructSpecs(pt, depth+2)
+					if !ok {
+						return ir.StructFieldSpec{}, false
+					}
+					denseSpecs, isDense := ir.BuildDenseSpecs(elemSpecs)
+					specPtr = unsafe.Pointer(&ir.StructSliceSpec{
+						KeyPtr:       ef.commaKeyPtr(),
+						SliceType:    ft,
+						ElemSize:     et.Size(),
+						MinElemBytes: ir.MinPtrSliceElemBytes,
+						Specs:        elemSpecs,
+						DenseSpecs:   denseSpecs,
+						IsDense:      isDense,
+					})
+					kind = ir.OP_slice_ptr_struct
+				} else {
+					return ir.StructFieldSpec{}, false
+				}
+			}
+		default:
+			return ir.StructFieldSpec{}, false
+		}
+	}
+	var flags uint8
+	if isPtrStruct {
+		if (fv.Opts & resolver.F_omitempty) != 0 {
+			flags |= ir.SpecFlagOmitNil
+		}
+	} else if isPtr {
+		flags |= ir.SpecFlagIsPtr
+		if (fv.Opts & resolver.F_omitempty) != 0 {
+			flags |= ir.SpecFlagOmitNil
+		}
+	} else if (fv.Opts&resolver.F_omitempty) != 0 && (!self.opts.EncOnlyOmitNull || kind == ir.OP_eface) {
+		flags |= ir.SpecFlagOmitEmpty
+	}
+	return ir.StructFieldSpec{
+		Ptr:         specPtr,
+		Offset:      offset,
+		KeyLen:      uint8(ef.commaKeyLen),
+		NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
+		Kind:        kind,
+		Flags:       flags,
+	}, true
+}
+
+func (self *Compiler) tryFlattenNestedStruct(ef *encodedField, baseOffset uintptr, sp int) (uintptr, bool) {
+	fv := ef.meta
+	maxDepth := self.opts.MaxInlineDepth
+	if self.disableBatchSpecs || sp+1 >= maxDepth || !ef.hasStructBegin || len(ef.owner) == 0 {
+		return 0, false
+	}
+	ft := fv.Type
+	if ft.Kind() != reflect.Struct || (fv.Opts&(resolver.F_omitempty|resolver.F_omitzero|resolver.F_stringize)) != 0 {
+		return 0, false
+	}
+	offset := baseOffset
+	for _, o := range fv.Path {
+		if o.Kind == resolver.F_deref {
+			return 0, false
+		}
+		offset += o.Size
+	}
+	if self.tab[ft] || self.isCustomMarshaler(ft, self.pv) {
+		return 0, false
+	}
+	return offset, true
+}
+
+func (self *Compiler) compileStructBody(p *ir.Program, sp int, vt reflect.Type) ([]ir.StructFieldSpec, bool) {
 	p.Tag(sp)
 	p.Int(ir.OP_byte, '{')
 	p.Add(ir.OP_save)
 	p.Add(ir.OP_cond_set)
 
-	/* compile each field */
-	fvs := resolver.ResolveStruct(vt)
-	for i, fv := range fvs {
-		var s []int
-		var o resolver.Offset
+	var specs []ir.StructFieldSpec
+	allSpecs := true
+	flushSpecs := func() {
+		if len(specs) > 0 {
+			p.Fields(specs)
+			specs = nil
+		}
+	}
 
-		/* "omitempty" for arrays */
-		if fv.Type.Kind() == reflect.Array {
-			if fv.Type.Len() == 0 && (fv.Opts&resolver.F_omitempty) != 0 {
+	var compileFields func(curType reflect.Type, baseOffset uintptr, depth int)
+	compileFields = func(curType reflect.Type, baseOffset uintptr, depth int) {
+		fvs := resolveEncodedStruct(curType)
+		hasPreviousField := false
+		hasGuaranteedField := false
+		for i := range fvs {
+			ef := &fvs[i]
+			fv := ef.meta
+			var s []int
+
+			/* "omitempty" for arrays */
+			if fv.Type.Kind() == reflect.Array {
+				if fv.Type.Len() == 0 && (fv.Opts&resolver.F_omitempty) != 0 {
+					continue
+				}
+			}
+
+			if childOffset, ok := self.tryFlattenNestedStruct(ef, baseOffset, depth); ok {
+				specs = append(specs, ir.StructFieldSpec{
+					Ptr:         unsafe.Pointer(ef.commaKeyPtr()),
+					KeyLen:      uint8(ef.commaKeyLen + 1),
+					NoCommaSkip: specNoCommaSkip(hasGuaranteedField),
+					Kind:        ir.OP_struct_begin,
+				})
+				self.tab[fv.Type] = true
+				compileFields(fv.Type, childOffset, depth+1)
+				delete(self.tab, fv.Type)
+				specs = append(specs, ir.StructFieldSpec{
+					Kind: ir.OP_struct_end,
+				})
+				hasPreviousField = true
+				hasGuaranteedField = true
 				continue
 			}
-		}
 
-		/* index to the field */
-		for _, o = range fv.Path {
-			if p.Int(ir.OP_index, int(o.Size)); o.Kind == resolver.F_deref {
-				s = append(s, p.PC())
-				p.Add(ir.OP_is_nil)
-				p.Add(ir.OP_deref)
-			}
-		}
-
-		/* check for "omitempty" option */
-		if fv.Type.Kind() != reflect.Struct && fv.Type.Kind() != reflect.Array && (fv.Opts&resolver.F_omitempty) != 0 {
-			if self.opts.EncOnlyOmitNull {
-				x := p.PC()
-				if self.compileStructFieldOmitNilPtr(p, fv.Type) {
-					s = append(s, x)
+			if spec, ok := self.tryCompileStructFieldSpec(ef, baseOffset, hasGuaranteedField, depth); ok {
+				specs = append(specs, spec)
+				hasPreviousField = true
+				if spec.Flags&(ir.SpecFlagOmitEmpty|ir.SpecFlagOmitNil) == 0 {
+					hasGuaranteedField = true
 				}
-			} else {
-				s = append(s, p.PC())
-				self.compileStructFieldEmpty(p, fv.Type)
+				continue
 			}
+			allSpecs = false
+			flushSpecs()
+
+			/* index to the field relative to the saved root struct pointer */
+			hasDeref := false
+			for idx, o := range fv.Path {
+				off := int(o.Size)
+				if idx == 0 {
+					off += int(baseOffset)
+				}
+				if p.Int(ir.OP_index, off); o.Kind == resolver.F_deref {
+					hasDeref = true
+					s = append(s, p.PC())
+					p.Add(ir.OP_is_nil)
+					p.Add(ir.OP_deref)
+				}
+			}
+			fieldCanAddr := self.pv || hasDeref
+
+			/* check for "omitempty" option */
+			if fv.Type.Kind() != reflect.Struct && fv.Type.Kind() != reflect.Array && (fv.Opts&resolver.F_omitempty) != 0 {
+				if self.opts.EncOnlyOmitNull {
+					x := p.PC()
+					if self.compileStructFieldOmitNilPtr(p, fv.Type) {
+						s = append(s, x)
+					}
+				} else {
+					s = append(s, p.PC())
+					self.compileStructFieldEmpty(p, fv.Type)
+				}
+			}
+			/* check for "omitzero" option */
+			if fv.Opts&resolver.F_omitzero != 0 {
+				s = append(s, p.PC())
+				p.VFieldAddr(ir.OP_is_zero, fv, fieldCanAddr)
+			}
+
+			/* A non-skippable field guarantees a comma before every later field. */
+			key := ef.paddedCommaKey[1:]
+			if hasGuaranteedField {
+				key = ef.paddedCommaKey
+			} else if hasPreviousField || len(s) != 0 {
+				/* Earlier fields may all have been omitted. */
+				j := p.PC()
+				p.Add(ir.OP_cond_testc)
+				p.Int(ir.OP_byte, ',')
+				p.Pin(j)
+			}
+			hasPreviousField = true
+			if len(s) == 0 {
+				hasGuaranteedField = true
+			}
+
+			/* compile the key and value */
+			ft := fv.Type
+			p.Str(ir.OP_text, key)
+
+			/* check for "stringnize" option */
+			if (fv.Opts & resolver.F_stringize) == 0 {
+				self.compileOne(p, sp+1, ft, fieldCanAddr)
+			} else {
+				self.compileStructFieldStr(p, sp+1, ft, fieldCanAddr)
+			}
+
+			/* patch the skipping jumps and reload the struct pointer */
+			p.Rel(s)
+			p.Add(ir.OP_load)
 		}
-		/* check for "omitzero" option */
-		if fv.Opts&resolver.F_omitzero != 0 {
-			s = append(s, p.PC())
-			p.VField(ir.OP_is_zero, &fvs[i])
-		}
+	}
 
-		/* add the comma if not the first element */
-		i := p.PC()
-		p.Add(ir.OP_cond_testc)
-		p.Int(ir.OP_byte, ',')
-		p.Pin(i)
-
-		/* compile the key and value */
-		ft := fv.Type
-		p.Str(ir.OP_text, Quote(fv.Name)+":")
-
-		/* check for "stringnize" option */
-		if (fv.Opts & resolver.F_stringize) == 0 {
-			self.compileOne(p, sp+1, ft, self.pv)
-		} else {
-			self.compileStructFieldStr(p, sp+1, ft)
-		}
-
-		/* patch the skipping jumps and reload the struct pointer */
-		p.Rel(s)
-		p.Add(ir.OP_load)
+	compileFields(vt, 0, sp)
+	hadSpecs := len(specs) > 0
+	flushSpecs()
+	var pureSpecs []ir.StructFieldSpec
+	if allSpecs && hadSpecs {
+		pureSpecs = (*p)[len(*p)-1].VFields()
 	}
 
 	/* end of object */
 	p.Add(ir.OP_drop)
 	p.Int(ir.OP_byte, '}')
+	return pureSpecs, allSpecs
 }
 
-func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Type, fieldCanAddr bool) {
 	// NOTICE: according to encoding/json, Marshaler type has higher priority than string option
-	// see issue:
-	if self.tryCompileMarshaler(p, vt, self.pv) {
+	if self.tryCompileMarshaler(p, vt, fieldCanAddr) {
 		return
 	}
 
@@ -537,41 +1114,17 @@ func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Ty
 
 	/* check if it can be stringized */
 	switch ft.Kind() {
-	case reflect.Bool:
-		sv = true
-	case reflect.Int:
-		sv = true
-	case reflect.Int8:
-		sv = true
-	case reflect.Int16:
-		sv = true
-	case reflect.Int32:
-		sv = true
-	case reflect.Int64:
-		sv = true
-	case reflect.Uint:
-		sv = true
-	case reflect.Uint8:
-		sv = true
-	case reflect.Uint16:
-		sv = true
-	case reflect.Uint32:
-		sv = true
-	case reflect.Uint64:
-		sv = true
-	case reflect.Uintptr:
-		sv = true
-	case reflect.Float32:
-		sv = true
-	case reflect.Float64:
-		sv = true
-	case reflect.String:
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64,
+		reflect.String:
 		sv = true
 	}
 
 	/* if it's not, ignore the "string" and follow the regular path */
 	if !sv {
-		self.compileOne(p, sp, vt, self.pv)
+		self.compileOne(p, sp, vt, fieldCanAddr)
 		return
 	}
 
@@ -581,13 +1134,14 @@ func (self *Compiler) compileStructFieldStr(p *ir.Program, sp int, vt reflect.Ty
 		vt = vt.Elem()
 		p.Add(ir.OP_is_nil)
 		p.Add(ir.OP_deref)
+		fieldCanAddr = true
 	}
 
 	/* special case of a double-quoted string */
 	if ft != vars.JsonNumberType && ft.Kind() == reflect.String {
 		p.Add(ir.OP_quote)
 	} else {
-		self.compileStructFieldQuoted(p, sp, vt)
+		self.compileStructFieldQuoted(p, sp, vt, fieldCanAddr)
 	}
 
 	/* the "null" case of the pointer */
@@ -625,21 +1179,21 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 	case reflect.Uint64:
 		p.Add(ir.OP_is_zero_8)
 	case reflect.Uintptr:
-		p.Add(ir.OP_is_nil)
+		p.Add(ir.OP_is_zero_ints())
 	case reflect.Float32:
-		p.Add(ir.OP_is_zero_4)
+		p.Add(ir.OP_is_zero_f32)
 	case reflect.Float64:
-		p.Add(ir.OP_is_zero_8)
+		p.Add(ir.OP_is_zero_f64)
 	case reflect.String:
 		p.Add(ir.OP_is_nil_p1)
 	case reflect.Interface:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 	case reflect.Map:
-		p.Add(ir.OP_is_zero_map)
+		p.Rtt(ir.OP_is_zero_map, vt)
 	case reflect.Ptr:
 		p.Add(ir.OP_is_nil)
 	case reflect.Slice:
-		p.Add(ir.OP_is_nil_p1)
+		p.Rtt(ir.OP_is_nil_p1, vt)
 	default:
 		panic(vars.Error_type(vt))
 	}
@@ -648,25 +1202,25 @@ func (self *Compiler) compileStructFieldEmpty(p *ir.Program, vt reflect.Type) {
 func (self *Compiler) compileStructFieldOmitNilPtr(p *ir.Program, vt reflect.Type) bool {
 	switch vt.Kind() {
 	case reflect.Interface:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 		return true
 	case reflect.Map:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 		return true
 	case reflect.Ptr:
 		p.Add(ir.OP_is_nil)
 		return true
 	case reflect.Slice:
-		p.Add(ir.OP_is_nil)
+		p.Rtt(ir.OP_is_nil, vt)
 		return true
 	default:
 		return false
 	}
 }
 
-func (self *Compiler) compileStructFieldQuoted(p *ir.Program, sp int, vt reflect.Type) {
+func (self *Compiler) compileStructFieldQuoted(p *ir.Program, sp int, vt reflect.Type, fieldCanAddr bool) {
 	p.Int(ir.OP_byte, '"')
-	self.compileOne(p, sp, vt, self.pv)
+	self.compileOne(p, sp, vt, fieldCanAddr)
 	p.Int(ir.OP_byte, '"')
 }
 
@@ -678,8 +1232,8 @@ func (self *Compiler) compileInterface(p *ir.Program, vt reflect.Type) {
 	}
 
 	x := p.PC()
-	p.Add(ir.OP_is_nil_p1)
-	p.Add(ir.OP_iface)
+	p.Rtt(ir.OP_is_nil, vt)
+	p.Rtt(ir.OP_iface, vt)
 
 	/* the "null" value */
 	e := p.PC()
@@ -699,13 +1253,13 @@ func (self *Compiler) compileMarshaler(p *ir.Program, op ir.Op, vt reflect.Type,
 
 	/* direct receiver */
 	if vk != reflect.Ptr {
-		addMarshalerOp(p, op, vt, mt)
+		self.addMarshalerOp(p, op, vt, mt)
 		return
 	}
 	/* value receiver with a pointer type, check for nil before calling the marshaler */
 	p.Add(ir.OP_is_nil)
 
-	addMarshalerOp(p, op, vt, mt)
+	self.addMarshalerOp(p, op, vt, mt)
 
 	i := p.PC()
 	p.Add(ir.OP_goto)
@@ -714,12 +1268,6 @@ func (self *Compiler) compileMarshaler(p *ir.Program, op ir.Op, vt reflect.Type,
 	p.Pin(i)
 }
 
-func addMarshalerOp(p *ir.Program, op ir.Op, vt reflect.Type, mt reflect.Type) {
-	if vars.UseVM {
-		itab := rt.GetItab(rt.IfaceType(rt.UnpackType(mt)), rt.UnpackType(vt), true)
-		p.Vtab(op, vt, itab)
-	} else {
-		// OPT: get itab here
-		p.Rtt(op, vt)
-	}
+func (self *Compiler) addMarshalerOp(p *ir.Program, op ir.Op, vt reflect.Type, _ reflect.Type) {
+	p.Rtt(op, vt)
 }

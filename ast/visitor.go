@@ -19,9 +19,11 @@ package ast
 import (
 	"encoding/json"
 	"errors"
+	"math"
 
+	"github.com/bytedance/sonic/internal/jsonscan"
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/native/types"
-	"github.com/bytedance/sonic/unquote"
 )
 
 // Visitor handles the callbacks during preorder traversal of a JSON AST.
@@ -102,229 +104,123 @@ type VisitorOptions struct {
 
 var defaultVisitorOptions = &VisitorOptions{}
 
-// Preorder decodes the whole JSON string and callbacks each AST node to visitor
-// during preorder traversal. Any visitor method with an error returned will
-// break the traversal and the given error will be directly returned. The opts
-// argument can be reused after every call.
+// Preorder decodes one JSON value prefix and callbacks each AST event to visitor
+// during preorder traversal via shared jsonscan.Machine ModeEventSink.
+// Any visitor method returning an error breaks the traversal and returns that error.
 func Preorder(str string, visitor Visitor, opts *VisitorOptions) error {
 	if opts == nil {
 		opts = defaultVisitorOptions
 	}
-	// process VisitorOptions first to guarantee that all options will be
-	// constant during decoding and make options more readable.
-	var (
-		optDecodeNumber = !opts.OnlyNumber
-	)
+	onlyNumber := opts.OnlyNumber
 
-	tv := &traverser{
-		parser: Parser{
-			s:         str,
-			noLazy:    true,
-			skipValue: false,
-		},
-		visitor: visitor,
+	m := acquireASTScanMachine()
+	m.Reset(jsonscan.ASTEventProfile(onlyNumber), jsonscan.ModeEventSink)
+	sink := astVisitorSink{
+		visitor:    visitor,
+		onlyNumber: onlyNumber,
 	}
-
-	if optDecodeNumber {
-		tv.parser.decodeNumber(true)
-	}
-
-	err := tv.decodeValue()
-
-	if optDecodeNumber {
-		tv.parser.decodeNumber(false)
-	}
-	return err
-}
-
-type traverser struct {
-	parser  Parser
-	visitor Visitor
-}
-
-// NOTE: keep in sync with (*Parser).Parse method.
-func (self *traverser) decodeValue() error {
-	switch val := self.parser.decodeValue(); val.Vt {
-	case types.V_EOF:
-		return types.ERR_EOF
-	case types.V_NULL:
-		return self.visitor.OnNull()
-	case types.V_TRUE:
-		return self.visitor.OnBool(true)
-	case types.V_FALSE:
-		return self.visitor.OnBool(false)
-	case types.V_STRING:
-		return self.decodeString(val.Iv, val.Ep)
-	case types.V_DOUBLE:
-		return self.visitor.OnFloat64(val.Dv,
-			json.Number(self.parser.s[val.Ep:self.parser.p]))
-	case types.V_INTEGER:
-		return self.visitor.OnInt64(val.Iv,
-			json.Number(self.parser.s[val.Ep:self.parser.p]))
-	case types.V_ARRAY:
-		return self.decodeArray()
-	case types.V_OBJECT:
-		return self.decodeObject()
+	m.ConfigureEventSink(&sink)
+	res := m.Step(str, true)
+	switch res.Reason {
+	case jsonscan.StopDone:
+		releaseASTScanMachine(m)
+		return nil
+	case jsonscan.StopUserAbort:
+		uerr := m.SinkErr()
+		numErr := sink.numParseErr
+		releaseASTScanMachine(m)
+		if numErr != 0 {
+			return numErr
+		}
+		return uerr
 	default:
-		return types.ParsingError(-val.Vt)
+		releaseASTScanMachine(m)
+		return mapScanErrorToAST(res.Code)
 	}
 }
 
-// NOTE: keep in sync with (*Parser).decodeArray method.
-func (self *traverser) decodeArray() error {
-	sp := self.parser.p
-	ns := len(self.parser.s)
+type astVisitorSink struct {
+	visitor     Visitor
+	onlyNumber  bool
+	numParseErr types.ParsingError
+}
 
-	/* allocate array space and parse every element */
-	if err := self.visitor.OnArrayBegin(_DEFAULT_NODE_CAP); err != nil {
+func (s *astVisitorSink) OnNull() error {
+	return s.visitor.OnNull()
+}
+
+func (s *astVisitorSink) OnBool(v bool) error {
+	return s.visitor.OnBool(v)
+}
+
+func (s *astVisitorSink) OnString(v string) error {
+	return s.visitor.OnString(v)
+}
+
+func (s *astVisitorSink) OnNumber(rawSpan string, lexRes jsonscan.LexNumberResult) error {
+	jn := json.Number(rawSpan)
+	if s.onlyNumber {
+		return s.visitor.OnFloat64(0, jn)
+	}
+	switch lexRes.HintKind {
+	case jsonscan.NumberHintUint:
+		if lexRes.HintBits <= math.MaxInt64 {
+			return s.visitor.OnInt64(int64(lexRes.HintBits), jn)
+		}
+		return s.visitor.OnFloat64(float64(lexRes.HintBits), jn)
+	case jsonscan.NumberHintSint:
+		return s.visitor.OnInt64(int64(lexRes.HintBits), jn)
+	case jsonscan.NumberHintFloat:
+		return s.visitor.OnFloat64(math.Float64frombits(lexRes.HintBits), jn)
+	}
+	resNum, perr := number.ParseValidatedNumber(rawSpan)
+	if perr != 0 {
+		s.numParseErr = perr
+		return errASTVisitorNumFault
+	}
+	switch resNum.Kind {
+	case number.Signed:
+		return s.visitor.OnInt64(resNum.Int64, jn)
+	case number.Unsigned:
+		if resNum.Uint64 <= math.MaxInt64 {
+			return s.visitor.OnInt64(int64(resNum.Uint64), jn)
+		}
+		return s.visitor.OnFloat64(float64(resNum.Uint64), jn)
+	default:
+		return s.visitor.OnFloat64(resNum.Float64, jn)
+	}
+}
+
+func (s *astVisitorSink) OnObjectBegin() (jsonscan.EventContainerAction, error) {
+	if err := s.visitor.OnObjectBegin(_DEFAULT_NODE_CAP); err != nil {
 		if err == VisitOPSkip {
-			// NOTICE: for user needs to skip entry object
-			self.parser.p -= 1
-			if _, e := self.parser.skipFast(); e != 0 {
-				return e
-			}
-			return self.visitor.OnArrayEnd()
+			return jsonscan.EventContainerSkip, nil
 		}
-		return err
+		return jsonscan.EventContainerContinue, err
 	}
-
-	/* check for EOF */
-	self.parser.p = self.parser.lspace(sp)
-	if self.parser.p >= ns {
-		return types.ERR_EOF
-	}
-
-	/* check for empty array */
-	if self.parser.s[self.parser.p] == ']' {
-		self.parser.p++
-		return self.visitor.OnArrayEnd()
-	}
-
-	for {
-		/* decode the value */
-		if err := self.decodeValue(); err != nil {
-			return err
-		}
-		self.parser.p = self.parser.lspace(self.parser.p)
-
-		/* check for EOF */
-		if self.parser.p >= ns {
-			return types.ERR_EOF
-		}
-
-		/* check for the next character */
-		switch self.parser.s[self.parser.p] {
-		case ',':
-			self.parser.p++
-		case ']':
-			self.parser.p++
-			return self.visitor.OnArrayEnd()
-		default:
-			return types.ERR_INVALID_CHAR
-		}
-	}
+	return jsonscan.EventContainerContinue, nil
 }
 
-// NOTE: keep in sync with (*Parser).decodeObject method.
-func (self *traverser) decodeObject() error {
-	sp := self.parser.p
-	ns := len(self.parser.s)
+func (s *astVisitorSink) OnObjectKey(key string) error {
+	return s.visitor.OnObjectKey(key)
+}
 
-	/* allocate object space and decode each pair */
-	if err := self.visitor.OnObjectBegin(_DEFAULT_NODE_CAP); err != nil {
+func (s *astVisitorSink) OnObjectEnd() error {
+	return s.visitor.OnObjectEnd()
+}
+
+func (s *astVisitorSink) OnArrayBegin() (jsonscan.EventContainerAction, error) {
+	if err := s.visitor.OnArrayBegin(_DEFAULT_NODE_CAP); err != nil {
 		if err == VisitOPSkip {
-			// NOTICE: for user needs to skip entry object
-			self.parser.p -= 1
-			if _, e := self.parser.skipFast(); e != 0 {
-				return e
-			}
-			return self.visitor.OnObjectEnd()
+			return jsonscan.EventContainerSkip, nil
 		}
-		return err
+		return jsonscan.EventContainerContinue, err
 	}
-
-	/* check for EOF */
-	self.parser.p = self.parser.lspace(sp)
-	if self.parser.p >= ns {
-		return types.ERR_EOF
-	}
-
-	/* check for empty object */
-	if self.parser.s[self.parser.p] == '}' {
-		self.parser.p++
-		return self.visitor.OnObjectEnd()
-	}
-
-	for {
-		var njs types.JsonState
-		var err types.ParsingError
-
-		/* decode the key */
-		if njs = self.parser.decodeValue(); njs.Vt != types.V_STRING {
-			return types.ERR_INVALID_CHAR
-		}
-
-		/* extract the key */
-		idx := self.parser.p - 1
-		key := self.parser.s[njs.Iv:idx]
-
-		/* check for escape sequence */
-		if njs.Ep != -1 {
-			if key, err = unquote.String(key); err != 0 {
-				return err
-			}
-		}
-
-		if err := self.visitor.OnObjectKey(key); err != nil {
-			return err
-		}
-
-		/* expect a ':' delimiter */
-		if err = self.parser.delim(); err != 0 {
-			return err
-		}
-
-		/* decode the value */
-		if err := self.decodeValue(); err != nil {
-			return err
-		}
-
-		self.parser.p = self.parser.lspace(self.parser.p)
-
-		/* check for EOF */
-		if self.parser.p >= ns {
-			return types.ERR_EOF
-		}
-
-		/* check for the next character */
-		switch self.parser.s[self.parser.p] {
-		case ',':
-			self.parser.p++
-		case '}':
-			self.parser.p++
-			return self.visitor.OnObjectEnd()
-		default:
-			return types.ERR_INVALID_CHAR
-		}
-	}
+	return jsonscan.EventContainerContinue, nil
 }
 
-// NOTE: keep in sync with (*Parser).decodeString method.
-func (self *traverser) decodeString(iv int64, ep int) error {
-	p := self.parser.p - 1
-	s := self.parser.s[iv:p]
-
-	/* fast path: no escape sequence */
-	if ep == -1 {
-		return self.visitor.OnString(s)
-	}
-
-	/* unquote the string */
-	out, err := unquote.String(s)
-	if err != 0 {
-		return err
-	}
-	return self.visitor.OnString(out)
+func (s *astVisitorSink) OnArrayEnd() error {
+	return s.visitor.OnArrayEnd()
 }
 
 // If visitor return this error on `OnObjectBegin()` or `OnArrayBegin()`,

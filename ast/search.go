@@ -19,6 +19,7 @@ package ast
 import (
 	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/internal/rt"
+	"strings"
 )
 
 // SearchOptions controls Searcher's behavior
@@ -43,8 +44,8 @@ type Searcher struct {
 func NewSearcher(str string) *Searcher {
 	return &Searcher{
 		parser: Parser{
-			s:      str,
-			noLazy: false,
+			s:    str,
+			mode: parseModeLazy,
 		},
 		SearchOptions: SearchOptions{
 			ValidateJSON: true,
@@ -54,8 +55,7 @@ func NewSearcher(str string) *Searcher {
 
 // GetByPathCopy search in depth from top json and returns a **Copied** json node at the path location
 func (self *Searcher) GetByPathCopy(path ...interface{}) (Node, error) {
-	self.CopyReturn = true
-	return self.getByPath(path...)
+	return self.getByPathOpts(true, path...)
 }
 
 // GetByPathNoCopy search in depth from top json and returns a **Referenced** json node at the path location
@@ -63,15 +63,99 @@ func (self *Searcher) GetByPathCopy(path ...interface{}) (Node, error) {
 // WARN: this search directly refer partial json from top json, which has faster speed,
 // may consumes more memory.
 func (self *Searcher) GetByPath(path ...interface{}) (Node, error) {
-	return self.getByPath(path...)
+	return self.getByPathOpts(self.CopyReturn, path...)
+}
+
+// GetManyByPath searches multiple paths in a single shared-prefix traversal and
+// returns results strictly in caller request order. A missing individual path
+// yields an empty V_NONE Node (!Exists()) at its slot without aborting sibling
+// paths; malformed JSON returns a SyntaxError.
+func (self *Searcher) GetManyByPath(paths ...[]interface{}) ([]Node, error) {
+	return self.getManyByPath(self.CopyReturn, paths...)
+}
+
+// GetManyByPathCopy is like GetManyByPath with CopyReturn forced true so each
+// matched Node owns an independent heap string copy without sibling retention.
+func (self *Searcher) GetManyByPathCopy(paths ...[]interface{}) ([]Node, error) {
+	return self.getManyByPath(true, paths...)
+}
+
+func (self *Searcher) getManyByPath(copyReturn bool, paths ...[]interface{}) ([]Node, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	plan, err := CompilePathPlan(paths...)
+	if err != nil {
+		panic("path must be either int(>=0) or string")
+	}
+	return self.getManyWithPlan(plan, copyReturn)
+}
+
+// GetManyWithPlan executes a precompiled PathPlan against the Searcher's input.
+func (self *Searcher) GetManyWithPlan(plan *PathPlan) ([]Node, error) {
+	return self.getManyWithPlan(plan, self.CopyReturn)
+}
+
+func (self *Searcher) getManyWithPlan(plan *PathPlan, copyReturn bool) ([]Node, error) {
+	if plan == nil || plan.NumPaths() == 0 {
+		return nil, nil
+	}
+	n := plan.NumPaths()
+	var stackSpans [16]locatedSpan
+	var spans []locatedSpan
+	if n <= len(stackSpans) {
+		spans = stackSpans[:n]
+	} else {
+		spans = make([]locatedSpan, n)
+	}
+	view := inputView{src: self.parser.s, base: 0}
+	if err := locateWithPlan(view, plan, self.ValidateJSON, spans); err != nil {
+		return nil, err
+	}
+
+	nodes := make([]Node, n)
+	for i := 0; i < n; i++ {
+		sp := spans[i]
+		if !sp.found || sp.start < 0 {
+			continue
+		}
+		t := switchRawType(view.src[sp.start])
+		if t == _V_NONE {
+			continue
+		}
+		var raw string
+		if copyReturn {
+			// Allocate an independent backing string per Node so retaining one
+			// small node never pins large sibling results or the source buffer.
+			raw = strings.Clone(view.src[sp.start:sp.end])
+		} else {
+			raw = view.src[sp.start:sp.end]
+		}
+		nodes[i] = newRawNode(raw, t, self.ConcurrentRead)
+	}
+	return nodes, nil
+}
+
+// SearchMany locates a batch of JSON paths over src in a single shared-prefix
+// pass and returns Nodes in caller request order.
+func SearchMany(src string, opts SearchOptions, paths ...[]interface{}) ([]Node, error) {
+	s := Searcher{
+		parser:        Parser{s: src, mode: parseModeLazy},
+		SearchOptions: opts,
+	}
+	return s.GetManyByPath(paths...)
 }
 
 func (self *Searcher) getByPath(path ...interface{}) (Node, error) {
-	var err types.ParsingError
-	var start int
+	return self.getByPathOpts(self.CopyReturn, path...)
+}
 
-	self.parser.p = 0
-	start, err = self.parser.getByPath(self.ValidateJSON, path...)
+func (self *Searcher) getByPathOpts(copyReturn bool, path ...interface{}) (Node, error) {
+	p := Parser{
+		s:    self.parser.s,
+		mode: self.parser.mode,
+	}
+	start, err := p.getByPath(self.ValidateJSON, path...)
 	if err != 0 {
 		// for compatibility with old version
 		if err == types.ERR_NOT_FOUND {
@@ -80,20 +164,20 @@ func (self *Searcher) getByPath(path ...interface{}) (Node, error) {
 		if err == types.ERR_UNSUPPORT_TYPE {
 			panic("path must be either int(>=0) or string")
 		}
-		return Node{}, self.parser.syntaxError(err)
+		return Node{}, p.syntaxError(err)
 	}
 
-	t := switchRawType(self.parser.s[start])
+	t := switchRawType(p.s[start])
 	if t == _V_NONE {
-		return Node{}, self.parser.ExportError(err)
+		return Node{}, p.ExportError(err)
 	}
 
 	// copy string to reducing memory usage
 	var raw string
-	if self.CopyReturn {
-		raw = rt.Mem2Str([]byte(self.parser.s[start:self.parser.p]))
+	if copyReturn {
+		raw = rt.Mem2Str([]byte(p.s[start:p.p]))
 	} else {
-		raw = self.parser.s[start:self.parser.p]
+		raw = p.s[start:p.p]
 	}
 	return newRawNode(raw, t, self.ConcurrentRead), nil
 }

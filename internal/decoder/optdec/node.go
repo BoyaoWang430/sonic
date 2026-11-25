@@ -1,195 +1,106 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package optdec
 
 import (
 	"encoding/json"
 	"math"
+	"reflect"
+	"strconv"
+	"sync"
 	"unsafe"
 
 	"github.com/bytedance/sonic/internal/envs"
+	"github.com/bytedance/sonic/internal/native/number"
 	"github.com/bytedance/sonic/internal/rt"
 )
 
-type Context struct {
-	Parser    *Parser
-	efacePool *efacePool
-	Stack     boundedStack
-	Utf8Inv   bool
-}
-
-func (ctx *Context) Options() uint64 {
-	return ctx.Parser.options
-}
-
-/************************* Stack and Pool Helper *******************/
-
-type parentStat struct {
-	con    unsafe.Pointer
-	remain uint64
-}
-type boundedStack struct {
-	stack []parentStat
-	index int
-}
-
-func newStack(size int) boundedStack {
-	return boundedStack{
-		stack: make([]parentStat, size+2),
-		index: 0,
+func prepareSlice[T any](vp *[]T, size int) []T {
+	if size == 0 {
+		return []T{}
 	}
-}
-
-//go:nosplit
-func (s *boundedStack) Pop() (unsafe.Pointer, int, bool) {
-	s.index--
-	con := s.stack[s.index].con
-	remain := s.stack[s.index].remain &^ (uint64(1) << 63)
-	isObj := (s.stack[s.index].remain & (uint64(1) << 63)) != 0
-	s.stack[s.index].con = nil
-	s.stack[s.index].remain = 0
-	return con, int(remain), isObj
-}
-
-//go:nosplit
-func (s *boundedStack) Push(p unsafe.Pointer, remain int, isObj bool) {
-	s.stack[s.index].con = p
-	s.stack[s.index].remain = uint64(remain)
-	if isObj {
-		s.stack[s.index].remain |= (uint64(1) << 63)
+	old := *vp
+	if cap(old) >= size {
+		return old[:size]
 	}
-	s.index++
-}
-
-type efacePool struct {
-	t64        rt.T64Pool
-	tslice     rt.TslicePool
-	tstring    rt.TstringPool
-	efaceSlice rt.SlicePool
-}
-
-func newEfacePool(stat *jsonStat, useNumber bool) *efacePool {
-	strs := int(stat.str)
-	nums := 0
-	if useNumber {
-		strs += int(stat.number)
-	} else {
-		nums = int(stat.number)
+	s := make([]T, size)
+	if len(old) > 0 {
+		copy(s, old)
 	}
+	return s
+}
 
-	return &efacePool{
-		t64:        rt.NewT64Pool(nums),
-		tslice:     rt.NewTslicePool(int(stat.array)),
-		tstring:    rt.NewTstringPool(strs),
-		efaceSlice: rt.NewPool(rt.AnyType, int(stat.array_elems)),
+func canUseFastMap(opts uint64, root reflect.Type) bool {
+	return envs.UseFastMap && (opts&(1<<_F_use_int64)) == 0 && (root == anyType || root == mapEfaceType || root == sliceEfaceType)
+}
+
+func NewContext(json string, pos int, opts uint64, root reflect.Type) (Context, error) {
+	return NewContextWithSession(json, pos, opts, root, nil)
+}
+
+func NewContextWithSession(json string, pos int, opts uint64, root reflect.Type, sess *InputSession) (Context, error) {
+	p := newParserFromSession(json, pos, opts, sess)
+	doc, ecode := p.scanDocument(opts, root, nil)
+	if ecode != SONIC_OK {
+		err := p.fixError(ecode)
+		p.free()
+		return Context{}, err
 	}
-}
-
-func (self *efacePool) GetMap(hint int) unsafe.Pointer {
-	m := make(map[string]interface{}, hint)
-	return *(*unsafe.Pointer)(unsafe.Pointer(&m))
-}
-
-func (self *efacePool) GetSlice(hint int) unsafe.Pointer {
-	return unsafe.Pointer(self.efaceSlice.GetSlice(hint))
-}
-
-func (self *efacePool) ConvTSlice(val rt.GoSlice, typ *rt.GoType, dst unsafe.Pointer) {
-	self.tslice.Conv(val, typ, (*interface{})(dst))
-}
-
-func (self *efacePool) ConvF64(val float64, dst unsafe.Pointer) {
-	self.t64.Conv(castU64(val), rt.Float64Type, (*interface{})(dst))
-}
-
-func (self *efacePool) ConvTstring(val string, dst unsafe.Pointer) {
-	self.tstring.Conv(val, (*interface{})(dst))
-}
-
-func (self *efacePool) ConvTnum(val json.Number, dst unsafe.Pointer) {
-	self.tstring.ConvNum(val, (*interface{})(dst))
-}
-
-/********************************************************/
-
-func canUseFastMap(opts uint64, root *rt.GoType) bool {
-	return envs.UseFastMap && (opts&(1<<_F_copy_string)) == 0 && (opts&(1<<_F_use_int64)) == 0 && (root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType)
-}
-
-func NewContext(json string, pos int, opts uint64, root *rt.GoType) (Context, error) {
-	ctx := Context{
-		Parser: newParser(json, pos, opts),
-	}
-	if root == rt.AnyType || root == rt.MapEfaceType || root == rt.SliceEfaceType {
-		ctx.Parser.isEface = true
-	}
-
-	ecode := ctx.Parser.parse()
-
-	if ecode != 0 {
-		return ctx, ctx.Parser.fixError(ecode)
-	}
-
-	useNumber := (opts & (1 << _F_use_number)) != 0
-	if canUseFastMap(opts, root) {
-		ctx.efacePool = newEfacePool(&ctx.Parser.nbuf.stat, useNumber)
-		ctx.Stack = newStack(int(ctx.Parser.nbuf.stat.max_depth))
-	}
-
-	return ctx, nil
-}
-
-func (ctx *Context) Delete() {
-	ctx.Parser.free()
-	ctx.Parser = nil
+	ctx := p.initDecodeContext(doc, opts, root)
+	ctx.ownedParser = p
+	return *ctx, nil
 }
 
 type Node struct {
-	cptr uintptr
+	ptr *node
 }
 
-func NewNode(cptr uintptr) Node {
-	return Node{cptr: cptr}
-}
-
-type Dom struct {
-	cdom uintptr
-}
-
-func (ctx *Context) Root() Node {
-	root := (uintptr)(((*rt.GoSlice)(unsafe.Pointer(&ctx.Parser.nodes))).Ptr)
-	return Node{cptr: root}
+func NewNode(ptr *node) Node {
+	return Node{ptr: ptr}
 }
 
 type Array struct {
-	cptr uintptr
+	ptr *node
 }
 
 type Object struct {
-	cptr uintptr
+	ptr *node
 }
 
 func (obj Object) Len() int {
-	cobj := ptrCast(obj.cptr)
-	return int(uint64(cobj.val) & ConLenMask)
+	return int(uint64(obj.ptr.val) & ConLenMask)
 }
 
 func (arr Array) Len() int {
-	carr := ptrCast(arr.cptr)
-	return int(uint64(carr.val) & ConLenMask)
+	return int(uint64(arr.ptr.val) & ConLenMask)
 }
 
-// / Helper functions to eliminate CGO calls
 func (val Node) Type() uint8 {
-	ctype := ptrCast(val.cptr)
-	return uint8(ctype.typ & TypeMask)
+	return uint8(val.ptr.typ & TypeMask)
 }
 
-func (val Node) Next() uintptr {
-	if val.Type() != KObject && val.Type() != KArray {
-		return PtrOffset(val.cptr, 1)
+func (val Node) Next() *node {
+	cobj := val.ptr
+	if uint8(cobj.typ)-KObject > 1 {
+		return PtrOffset(cobj, 1)
 	}
-	cobj := ptrCast(val.cptr)
-	offset := int64(uint64(cobj.val) >> ConLenBits)
-	return PtrOffset(val.cptr, offset)
+	return PtrOffset(cobj, int64(cobj.val>>ConLenBits))
 }
 
 func (val *Node) next() {
@@ -197,11 +108,11 @@ func (val *Node) next() {
 }
 
 type NodeIter struct {
-	next uintptr
+	next *node
 }
 
-func NewNodeIter(node Node) NodeIter {
-	return NodeIter{next: node.cptr}
+func NewNodeIter(n Node) NodeIter {
+	return NodeIter{next: n.ptr}
 }
 
 func (iter *NodeIter) Next() Node {
@@ -215,13 +126,11 @@ func (iter *NodeIter) Peek() Node {
 }
 
 func (val Node) U64() uint64 {
-	cnum := ptrCast(val.cptr)
-	return *(*uint64)((unsafe.Pointer)(&(cnum.val)))
+	return val.ptr.val
 }
 
 func (val Node) I64() int64 {
-	cnum := ptrCast(val.cptr)
-	return *(*int64)((unsafe.Pointer)(&(cnum.val)))
+	return int64(val.ptr.val)
 }
 
 func (val Node) IsNull() bool {
@@ -233,8 +142,7 @@ func (val Node) IsNumber() bool {
 }
 
 func (val Node) F64() float64 {
-	cnum := ptrCast(val.cptr)
-	return *(*float64)((unsafe.Pointer)(&(cnum.val)))
+	return math.Float64frombits(val.ptr.val)
 }
 
 func (val Node) Bool() bool {
@@ -245,11 +153,7 @@ func (self Node) AsU64(ctx *Context) (uint64, bool) {
 	if self.Type() == KUint {
 		return self.U64(), true
 	} else if self.Type() == KRawNumber {
-		num, err := ParseU64(self.Raw(ctx))
-		if err != nil {
-			return 0, false
-		}
-		return num, true
+		return parseValidRawU64(ctx.Doc.strRefCommon(self.Position(), int(self.ptr.val)))
 	} else {
 		return 0, false
 	}
@@ -261,16 +165,16 @@ func (val *Node) AsObj() (Object, bool) {
 		return ret, false
 	}
 	return Object{
-		cptr: val.cptr,
+		ptr: val.ptr,
 	}, true
 }
 
 func (val Node) Obj() Object {
-	return Object{cptr: val.cptr}
+	return Object{ptr: val.ptr}
 }
 
 func (val Node) Arr() Array {
-	return Array{cptr: val.cptr}
+	return Array{ptr: val.ptr}
 }
 
 func (val *Node) AsArr() (Array, bool) {
@@ -279,7 +183,7 @@ func (val *Node) AsArr() (Array, bool) {
 		return ret, false
 	}
 	return Array{
-		cptr: val.cptr,
+		ptr: val.ptr,
 	}, true
 }
 
@@ -290,11 +194,7 @@ func (self Node) AsI64(ctx *Context) (int64, bool) {
 	} else if typ == KSint {
 		return self.I64(), true
 	} else if typ == KRawNumber {
-		val, err := self.Number(ctx).Int64()
-		if err != nil {
-			return 0, false
-		}
-		return val, true
+		return parseValidRawI64(ctx.Doc.strRefCommon(self.Position(), int(self.ptr.val)))
 	} else {
 		return 0, false
 	}
@@ -306,6 +206,16 @@ func (self Node) AsByte(ctx *Context) (uint8, bool) {
 		return uint8(self.U64()), true
 	} else if typ == KSint && self.I64() == 0 {
 		return 0, true
+	} else if typ == KRawNumber {
+		raw := ctx.Doc.strRefCommon(self.Position(), int(self.ptr.val))
+		if raw == "-0" {
+			return 0, true
+		}
+		num, ok := parseValidRawU64(raw)
+		if !ok || num > math.MaxUint8 {
+			return 0, false
+		}
+		return uint8(num), true
 	} else {
 		return 0, false
 	}
@@ -418,17 +328,48 @@ func (val Node) ParseNumber(ctx *Context) (json.Number, bool) {
 	return json.Number(s), true
 }
 
+// sintToFloat64 / sintToFloat32 rely on the scanner invariant that non-negative
+// integer tokens always emit KUint; KSint with raw value 0 is produced exclusively
+// by "-0" (e.g. "-0"), so v == 0 unambiguously represents IEEE-754 negative zero.
+func sintToFloat64(v int64) float64 {
+	if v == 0 {
+		return math.Copysign(0, -1)
+	}
+	return float64(v)
+}
+
+func sintToFloat32(v int64) float32 {
+	if v == 0 {
+		return float32(math.Copysign(0, -1))
+	}
+	return float32(v)
+}
+
 func (val Node) AsF64(ctx *Context) (float64, bool) {
 	switch val.Type() {
 	case KUint:
 		return float64(val.U64()), true
 	case KSint:
-		return float64(val.I64()), true
+		return sintToFloat64(val.I64()), true
 	case KReal:
 		return float64(val.F64()), true
 	case KRawNumber:
-		f, err := val.Number(ctx).Float64()
-		return f, err == nil
+		return number.ParseValidJSONFloat64(ctx.Doc.strRefCommon(val.Position(), int(val.ptr.val)))
+	default:
+		return 0, false
+	}
+}
+
+func (val Node) AsF32(ctx *Context) (float32, bool) {
+	switch val.Type() {
+	case KUint:
+		return float32(val.U64()), true
+	case KSint:
+		return sintToFloat32(val.I64()), true
+	case KReal:
+		return realBitsToFloat32(val.ptr.val, ctx.Doc.Json, val.Position())
+	case KRawNumber:
+		return number.ParseValidJSONFloat32(ctx.Doc.strRefCommon(val.Position(), int(val.ptr.val)))
 	default:
 		return 0, false
 	}
@@ -446,32 +387,31 @@ func (val Node) AsBool() (bool, bool) {
 }
 
 func (val Node) AsStr(ctx *Context) (string, bool) {
-	switch val.Type() {
-	case KStringCommon:
-		s := val.StringRef(ctx)
-		if ctx.Options()&(1<<_F_copy_string) == 0 {
-			return s, true
-		}
-		return string(rt.Str2Mem(s)), true
-	case KStringEscaped:
-		return val.StringCopyEsc(ctx), true
-	default:
-		return "", false
+	cnode := val.ptr
+	t := uint8(cnode.typ)
+	if t == KStringCommon {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.strCommon(offset, int(cnode.val), ctx.options&(1<<_F_copy_string) != 0), true
 	}
+	if t == KStringEscaped {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.strEscaped(offset, cnode.val), true
+	}
+	return "", false
 }
 
 func (val Node) AsStrRef(ctx *Context) (string, bool) {
-	switch val.Type() {
-	case KStringEscaped:
-		node := ptrCast(val.cptr)
-		offset := val.Position()
-		len := int(node.val)
-		return rt.Mem2Str(ctx.Parser.JsonBytes()[offset : offset+len]), true
-	case KStringCommon:
-		return val.StringRef(ctx), true
-	default:
-		return "", false
+	cnode := val.ptr
+	t := uint8(cnode.typ)
+	if t == KStringCommon {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.Doc.strRefCommon(offset, int(cnode.val)), true
 	}
+	if t == KStringEscaped {
+		offset := int(cnode.typ >> PosBits)
+		return ctx.Doc.strRefEscaped(offset, cnode.val), true
+	}
+	return "", false
 }
 
 func (val Node) AsStringText(ctx *Context) ([]byte, bool) {
@@ -497,15 +437,14 @@ func (val Node) Number(ctx *Context) json.Number {
 }
 
 func (val Node) Raw(ctx *Context) string {
-	node := ptrCast(val.cptr)
-	len := int(node.val)
+	n := val.ptr
+	length := int(n.val)
 	offset := val.Position()
-	return ctx.Parser.Json[offset:int(offset+len)]
+	return ctx.strCommon(offset, length, ctx.options&(1<<_F_copy_string) != 0)
 }
 
 func (val Node) Position() int {
-	node := ptrCast(val.cptr)
-	return int(node.typ >> PosBits)
+	return int(val.ptr.typ >> PosBits)
 }
 
 func (val Node) AsNumber(ctx *Context) (json.Number, bool) {
@@ -534,38 +473,49 @@ func (val Node) NonstrAsNumber(ctx *Context) (json.Number, bool) {
 	}
 
 	start := val.Position()
-	end, ok := SkipNumberFast(ctx.Parser.Json, start)
+	end, ok := SkipNumberFast(ctx.Doc.Json, start)
 	if !ok {
 		return "", false
 	}
-	return json.Number(ctx.Parser.Json[start:end]), true
+	return json.Number(ctx.strCommon(start, end-start, ctx.options&(1<<_F_copy_string) != 0)), true
 }
 
 func (val Node) AsRaw(ctx *Context) string {
-	// fast path for unescaped strings
+	return val.rawSpan(&ctx.Doc)
+}
+
+func (val Node) rawSpan(doc *Document) string {
 	switch val.Type() {
-	case KNull:
-		return "null"
-	case KTrue:
-		return "true"
+	case KNull, KTrue:
+		pos := val.Position()
+		return doc.rawSlice(pos, pos+4)
 	case KFalse:
-		return "false"
+		pos := val.Position()
+		return doc.rawSlice(pos, pos+5)
 	case KStringCommon:
-		node := ptrCast(val.cptr)
-		len := int(node.val)
+		n := val.ptr
+		length := int(n.val)
 		offset := val.Position()
-		// add start and end quote
-		ref := rt.Str2Mem(ctx.Parser.Json)[offset-1 : offset+len+1]
-		return rt.Mem2Str(ref)
-	case KRawNumber:
-		fallthrough
-	case KRaw:
-		return val.Raw(ctx)
+		return doc.rawSlice(offset-1, offset+length+1)
+	case KRawNumber, KRaw:
+		n := val.ptr
+		length := int(n.val)
+		offset := val.Position()
+		return doc.rawSlice(offset, offset+length)
+	case KUint, KSint, KReal:
+		start := val.Position()
+		end, ok := SkipNumberFast(doc.Json, start)
+		if !ok {
+			break
+		}
+		return doc.rawSlice(start, end)
 	case KStringEscaped:
-		raw, _ := SkipOneFast(ctx.Parser.Json, val.Position()-1)
+		raw, _ := SkipOneFast(doc.Json, val.Position()-1)
 		return raw
+	case KObject, KArray:
+		return val.containerAsRaw(doc)
 	default:
-		raw, err := SkipOneFast(ctx.Parser.Json, val.Position())
+		raw, err := SkipOneFast(doc.Json, val.Position())
 		if err != nil {
 			break
 		}
@@ -574,46 +524,129 @@ func (val Node) AsRaw(ctx *Context) string {
 	panic("should always be valid json here")
 }
 
+func (val Node) containerAsRaw(doc *Document) string {
+	s := doc.Json
+	cnode := val.ptr
+	start := int(cnode.typ >> PosBits)
+	span := int(cnode.val >> ConLenBits)
+	if span <= 0 {
+		raw, err := SkipOneFast(s, start)
+		if err != nil {
+			panic("should always be valid json here")
+		}
+		return raw
+	}
+	curOff := 0
+	endOff := span
+	depth := 0
+	for curOff < endOff {
+		cn := PtrOffset(cnode, int64(curOff))
+		ctyp := uint8(cn.typ)
+		if ctyp != KObject && ctyp != KArray {
+			break
+		}
+		cspan := int(cn.val >> ConLenBits)
+		csize := int(cn.val & ConLenMask)
+		depth++
+		if cspan <= 1 {
+			break
+		}
+		if (ctyp == KObject && cspan == 1+2*csize) || (ctyp == KArray && cspan == 1+csize) {
+			curOff = endOff - 1
+			continue
+		}
+		childOff := curOff + 1
+		for {
+			vOff := childOff
+			if ctyp == KObject {
+				vOff++
+			}
+			vnode := PtrOffset(cnode, int64(vOff))
+			var nextOff int
+			if uint8(vnode.typ)-KObject > 1 {
+				nextOff = vOff + 1
+			} else {
+				nextOff = vOff + int(vnode.val>>ConLenBits)
+			}
+			if nextOff >= endOff {
+				curOff = vOff
+				break
+			}
+			childOff = nextOff
+		}
+	}
+	lnode := PtrOffset(cnode, int64(curOff))
+	ltyp := uint8(lnode.typ)
+	lpos := int(lnode.typ >> PosBits)
+	var pos int
+	switch ltyp {
+	case KObject, KArray:
+		pos = lpos + 1
+	case KStringCommon:
+		pos = lpos + int(lnode.val) + 1
+	case KNull, KTrue:
+		pos = lpos + 4
+	case KFalse:
+		pos = lpos + 5
+	case KRawNumber, KRaw:
+		pos = lpos + int(lnode.val)
+	case KUint, KSint, KReal:
+		pos, _ = SkipNumberFast(s, lpos)
+	case KStringEscaped:
+		raw, err := SkipOneFast(s, lpos-1)
+		if err != nil {
+			panic("should always be valid json here")
+		}
+		pos = lpos - 1 + len(raw)
+	default:
+		raw, err := SkipOneFast(s, start)
+		if err != nil {
+			panic("should always be valid json here")
+		}
+		return raw
+	}
+	for depth > 0 && pos < len(s) {
+		c := s[pos]
+		pos++
+		if c == '}' || c == ']' {
+			depth--
+		}
+	}
+	return doc.rawSlice(start, pos)
+}
+
 // reference from the input JSON as possible
 func (val Node) StringRef(ctx *Context) string {
 	return val.Raw(ctx)
 }
 
-//go:nocheckptr
-func ptrCast(p uintptr) *node {
-	return (*node)(unsafe.Pointer(p))
-}
-
 func (val Node) StringCopyEsc(ctx *Context) string {
-	// check whether there are in padded
-	node := ptrCast(val.cptr)
-	len := int(node.val)
+	n := val.ptr
 	offset := val.Position()
-	return string(ctx.Parser.JsonBytes()[offset : offset+len])
+	return ctx.strEscaped(offset, n.val)
 }
 
 func (val Node) Object() Object {
-	return Object{cptr: val.cptr}
+	return Object{ptr: val.ptr}
 }
 
 func (val Node) Array() Array {
-	return Array{cptr: val.cptr}
+	return Array{ptr: val.ptr}
 }
 
-func (val *Array) Children() uintptr {
-	return PtrOffset(val.cptr, 1)
+func (val *Array) Children() *node {
+	return PtrOffset(val.ptr, 1)
 }
 
-func (val *Object) Children() uintptr {
-	return PtrOffset(val.cptr, 1)
+func (val *Object) Children() *node {
+	return PtrOffset(val.ptr, 1)
 }
 
 func (val *Node) Equal(ctx *Context, lhs string) bool {
-	// check whether escaped
-	cstr := ptrCast(val.cptr)
-	offset := int(val.Position())
-	len := int(cstr.val)
-	return lhs == ctx.Parser.Json[offset:offset+len]
+	cstr := val.ptr
+	offset := val.Position()
+	length := int(cstr.val)
+	return lhs == ctx.Doc.strRefCommon(offset, length)
 }
 
 func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
@@ -623,22 +656,16 @@ func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
 
 	obj, ok := node.AsObj()
 	if !ok {
-		return newUnmatched(node.Position(), rt.MapEfaceType)
+		return newUnmatched(node.Position(), mapEfaceType)
 	}
 
 	var err, gerr error
 	size := obj.Len()
 
-	var m map[string]interface{}
-	if *(*unsafe.Pointer)(vp) == nil {
-		if ctx.efacePool != nil {
-			p := ctx.efacePool.GetMap(size)
-			m = *(*map[string]interface{})(unsafe.Pointer(&p))
-		} else {
-			m = make(map[string]interface{}, size)
-		}
-	} else {
-		m = *(*map[string]interface{})(vp)
+	dst := (*map[string]interface{})(vp)
+	m := *dst
+	if m == nil {
+		m = make(map[string]interface{}, size)
 	}
 
 	next := obj.Children()
@@ -647,29 +674,28 @@ func (node *Node) AsMapEface(ctx *Context, vp unsafe.Pointer) error {
 		key, _ := knode.AsStr(ctx)
 		val := NewNode(PtrOffset(next, 1))
 		m[key], err = val.AsEface(ctx)
-		next = val.cptr
+		next = val.ptr
 		if gerr == nil && err != nil {
 			gerr = err
 		}
 	}
 
-	*(*map[string]interface{})(vp) = m
+	*dst = m
 	return gerr
 }
 
 func (node *Node) AsMapString(ctx *Context, vp unsafe.Pointer) error {
 	obj, ok := node.AsObj()
 	if !ok {
-		return newUnmatched(node.Position(), rt.MapStringType)
+		return newUnmatched(node.Position(), mapStringType)
 	}
 
 	size := obj.Len()
 
-	var m map[string]string
-	if *(*unsafe.Pointer)(vp) == nil {
+	dst := (*map[string]string)(vp)
+	m := *dst
+	if m == nil {
 		m = make(map[string]string, size)
-	} else {
-		m = *(*map[string]string)(vp)
 	}
 
 	var gerr error
@@ -680,36 +706,42 @@ func (node *Node) AsMapString(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(PtrOffset(next, 1))
 		m[key], ok = val.AsStr(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.StringType)
+				gerr = newUnmatched(val.Position(), stringType)
 			}
 			next = val.Next()
 		} else {
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*map[string]string)(vp) = m
+	*dst = m
 	return gerr
 }
 
 func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceEfaceType)
+		return newUnmatched(node.Position(), sliceEfaceType)
 	}
 
 	size := arr.Len()
+	dst := (*[]interface{})(vp)
 	var s []interface{}
-	if size != 0 && ctx.efacePool != nil {
-		slice := rt.GoSlice{
-			Ptr: ctx.efacePool.GetSlice(size),
-			Len: size,
-			Cap: size,
-		}
-		*(*rt.GoSlice)(unsafe.Pointer(&s)) = slice
+	if size == 0 {
+		*dst = []interface{}{}
+		return nil
+	}
+	if cap(*dst) >= size {
+		s = (*dst)[:size]
+	} else if *dst == nil && ctx.sliceArenaEnabled {
+		s = ctx.allocEfaceSlice(size)
 	} else {
-		s = *(*[]interface{})((unsafe.Pointer)(rt.MakeSlice(vp, rt.AnyType, size)))
+		s = prepareSlice(dst, size)
 	}
 
 	*node = NewNode(arr.Children())
@@ -722,18 +754,53 @@ func (node *Node) AsSliceEface(ctx *Context, vp unsafe.Pointer) error {
 		}
 	}
 
-	*(*[]interface{})(vp) = s
-	return nil
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceInt(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceIntType)
+	}
+
+	size := arr.Len()
+	dst := (*[]int)(vp)
+	s := prepareSlice(dst, size)
+	next := arr.Children()
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsI64(ctx)
+		if !ok || ret > math.MaxInt || ret < math.MinInt {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), intType)
+			}
+			next = val.Next()
+		} else {
+			s[i] = int(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
 }
 
 func (node *Node) AsSliceI32(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceI32Type)
+		return newUnmatched(node.Position(), sliceI32Type)
 	}
 
 	size := arr.Len()
-	s := *(*[]int32)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Int32Type, size)))
+	dst := (*[]int32)(vp)
+	s := prepareSlice(dst, size)
 	next := arr.Children()
 
 	var gerr error
@@ -741,28 +808,33 @@ func (node *Node) AsSliceI32(ctx *Context, vp unsafe.Pointer) error {
 		val := NewNode(next)
 		ret, ok := val.AsI64(ctx)
 		if !ok || ret > math.MaxInt32 || ret < math.MinInt32 {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Int32Type)
+				gerr = newUnmatched(val.Position(), int32Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = int32(ret)
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]int32)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceI64(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceI64Type)
+		return newUnmatched(node.Position(), sliceI64Type)
 	}
 
 	size := arr.Len()
-	s := *(*[]int64)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Int64Type, size)))
+	dst := (*[]int64)(vp)
+	s := prepareSlice(dst, size)
 	next := arr.Children()
 
 	var gerr error
@@ -771,568 +843,1083 @@ func (node *Node) AsSliceI64(ctx *Context, vp unsafe.Pointer) error {
 
 		ret, ok := val.AsI64(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Int64Type)
+				gerr = newUnmatched(val.Position(), int64Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]int64)(vp) = s
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceUint(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceUintType)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]uint)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsU64(ctx)
+		if !ok || ret > math.MaxUint {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), uintType)
+			}
+			next = val.Next()
+		} else {
+			s[i] = uint(ret)
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceU32(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceU32Type)
+		return newUnmatched(node.Position(), sliceU32Type)
 	}
 
 	size := arr.Len()
 	next := arr.Children()
-	s := *(*[]uint32)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Uint32Type, size)))
+	dst := (*[]uint32)(vp)
+	s := prepareSlice(dst, size)
 
 	var gerr error
 	for i := 0; i < size; i++ {
 		val := NewNode(next)
 		ret, ok := val.AsU64(ctx)
 		if !ok || ret > math.MaxUint32 {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Uint32Type)
+				gerr = newUnmatched(val.Position(), uint32Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = uint32(ret)
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]uint32)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceU64(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceU64Type)
+		return newUnmatched(node.Position(), sliceU64Type)
 	}
 
 	size := arr.Len()
 	next := arr.Children()
 
-	s := *(*[]uint64)((unsafe.Pointer)(rt.MakeSlice(vp, rt.Uint64Type, size)))
+	dst := (*[]uint64)(vp)
+	s := prepareSlice(dst, size)
 	var gerr error
 	for i := 0; i < size; i++ {
 		val := NewNode(next)
 		ret, ok := val.AsU64(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.Uint64Type)
+				gerr = newUnmatched(val.Position(), uint64Type)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]uint64)(vp) = s
+	*dst = s
 	return gerr
 }
 
 func (node *Node) AsSliceString(ctx *Context, vp unsafe.Pointer) error {
 	arr, ok := node.AsArr()
 	if !ok {
-		return newUnmatched(node.Position(), rt.SliceStringType)
+		return newUnmatched(node.Position(), sliceStringType)
 	}
 
 	size := arr.Len()
 	next := arr.Children()
-	s := *(*[]string)((unsafe.Pointer)(rt.MakeSlice(vp, rt.StringType, size)))
+	dst := (*[]string)(vp)
+	s := prepareSlice(dst, size)
 
 	var gerr error
 	for i := 0; i < size; i++ {
 		val := NewNode(next)
 		ret, ok := val.AsStr(ctx)
 		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
 			if gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.StringType)
+				gerr = newUnmatched(val.Position(), stringType)
 			}
 			next = val.Next()
 		} else {
 			s[i] = ret
-			next = PtrOffset(val.cptr, 1)
+			next = PtrOffset(val.ptr, 1)
 		}
 	}
 
-	*(*[]string)(vp) = s
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceF64(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceF64Type)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]float64)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsF64(ctx)
+		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), float64Type)
+			}
+			next = val.Next()
+		} else {
+			s[i] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceF32(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceF32Type)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]float32)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsF32(ctx)
+		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), float32Type)
+			}
+			next = val.Next()
+		} else {
+			s[i] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
+	return gerr
+}
+
+func (node *Node) AsSliceBool(ctx *Context, vp unsafe.Pointer) error {
+	arr, ok := node.AsArr()
+	if !ok {
+		return newUnmatched(node.Position(), sliceBoolType)
+	}
+
+	size := arr.Len()
+	next := arr.Children()
+	dst := (*[]bool)(vp)
+	s := prepareSlice(dst, size)
+
+	var gerr error
+	for i := 0; i < size; i++ {
+		val := NewNode(next)
+		ret, ok := val.AsBool()
+		if !ok {
+			if val.IsNull() {
+				next = PtrOffset(val.ptr, 1)
+				continue
+			}
+			if gerr == nil {
+				gerr = newUnmatched(val.Position(), boolType)
+			}
+			next = val.Next()
+		} else {
+			s[i] = ret
+			next = PtrOffset(val.ptr, 1)
+		}
+	}
+
+	*dst = s
 	return gerr
 }
 
 func (val *Node) AsSliceBytes(ctx *Context) ([]byte, error) {
+	var out []byte
+	if err := val.AsSliceBytesInto(ctx, unsafe.Pointer(&out), bytesType, byteType); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (val *Node) AsSliceBytesInto(ctx *Context, vp unsafe.Pointer, sliceType, elemType reflect.Type) error {
 	var origin []byte
 	switch val.Type() {
 	case KStringEscaped:
-		node := ptrCast(val.cptr)
+		n := val.ptr
 		offset := val.Position()
-		len := int(node.val)
-		origin = ctx.Parser.JsonBytes()[offset : offset+len]
+		origin = ctx.Doc.bytesEscaped(offset, n.val)
 	case KStringCommon:
 		origin = rt.Str2Mem(val.StringRef(ctx))
 	case KArray:
 		arr := val.Array()
 		size := arr.Len()
-		a := make([]byte, size)
-		elem := NewNode(arr.Children())
+		dst := (*[]byte)(vp)
+		a := prepareSlice(dst, size)
+		next := arr.Children()
 		var gerr error
-		var ok bool
 		for i := 0; i < size; i++ {
-			a[i], ok = elem.AsByte(ctx)
-			if !ok && gerr == nil {
-				gerr = newUnmatched(val.Position(), rt.BytesType)
+			elem := NewNode(next)
+			b, ok := elem.AsByte(ctx)
+			if !ok {
+				if elem.IsNull() {
+					next = PtrOffset(elem.ptr, 1)
+					continue
+				}
+				if gerr == nil {
+					gerr = newUnmatched(elem.Position(), elemType)
+				}
+				next = elem.Next()
+			} else {
+				a[i] = b
+				next = PtrOffset(elem.ptr, 1)
 			}
-			elem = NewNode(PtrOffset(elem.cptr, 1))
 		}
-		return a, gerr
+		*dst = a
+		return gerr
 	default:
-		return nil, newUnmatched(val.Position(), rt.BytesType)
+		return newUnmatched(val.Position(), sliceType)
 	}
 
 	b64, err := rt.DecodeBase64(origin)
 	if err != nil {
-		return nil, newUnmatched(val.Position(), rt.BytesType)
+		*(*[]byte)(vp) = nil
+		return newUnmatched(val.Position(), sliceType)
 	}
-	return b64, nil
+	*(*[]byte)(vp) = b64
+	return nil
+}
+
+const (
+	smallUintAnyLimit = 1024
+	smallNegIntLimit  = 64
+)
+
+var (
+	emptyEfaceSliceAny  any = []interface{}{}
+	emptyStringAny      any = ""
+	smallFloat64Any     [smallUintAnyLimit]any
+	smallNegFloat64Any  [smallNegIntLimit + 1]any
+	smallASCIIStringAny [128]any
+
+	smallInt64Once sync.Once
+	smallInt64Any  *[smallUintAnyLimit]any
+
+	// Pre-boxed canonical json.Number values populated in package init() so all
+	// readers (AsEfaceFallback, fromObjFast, etc.) observe fully initialized
+	// read-only tables on cold start without per-call synchronization.
+	smallJSONNumberAny    [smallUintAnyLimit]any
+	smallNegJSONNumberAny [smallNegIntLimit + 1]any
+)
+
+func initSmallJSONNumbers() {
+	buf := make([]byte, 0, 4200)
+	var posOff [smallUintAnyLimit + 1]uint16
+	for i := 0; i < smallUintAnyLimit; i++ {
+		posOff[i] = uint16(len(buf))
+		buf = strconv.AppendInt(buf, int64(i), 10)
+	}
+	posOff[smallUintAnyLimit] = uint16(len(buf))
+	var negOff [smallNegIntLimit + 2]uint16
+	for i := 1; i <= smallNegIntLimit; i++ {
+		negOff[i] = uint16(len(buf))
+		buf = strconv.AppendInt(buf, int64(-i), 10)
+	}
+	negOff[smallNegIntLimit+1] = uint16(len(buf))
+	s := string(buf)
+	for i := 0; i < smallUintAnyLimit; i++ {
+		smallJSONNumberAny[i] = json.Number(s[posOff[i]:posOff[i+1]])
+	}
+	for i := 1; i <= smallNegIntLimit; i++ {
+		smallNegJSONNumberAny[i] = json.Number(s[negOff[i]:negOff[i+1]])
+	}
+}
+
+func rawNumberToAny(jsonStr string, off, n int) any {
+	switch n {
+	case 1:
+		d := jsonStr[off] - '0'
+		if d <= 9 {
+			return smallJSONNumberAny[d]
+		}
+	case 2:
+		c0 := jsonStr[off]
+		d1 := jsonStr[off+1] - '0'
+		if c0 == '-' {
+			if d1 >= 1 && d1 <= 9 {
+				return smallNegJSONNumberAny[d1]
+			}
+		} else {
+			d0 := c0 - '0'
+			if d0 >= 1 && d0 <= 9 && d1 <= 9 {
+				return smallJSONNumberAny[uint(d0)*10+uint(d1)]
+			}
+		}
+	case 3:
+		c0 := jsonStr[off]
+		d1 := jsonStr[off+1] - '0'
+		d2 := jsonStr[off+2] - '0'
+		if c0 == '-' {
+			if d1 >= 1 && d1 <= 6 && d2 <= 9 {
+				if v := uint(d1)*10 + uint(d2); v <= smallNegIntLimit {
+					return smallNegJSONNumberAny[v]
+				}
+			}
+		} else {
+			d0 := c0 - '0'
+			if d0 >= 1 && d0 <= 9 && d1 <= 9 && d2 <= 9 {
+				return smallJSONNumberAny[uint(d0)*100+uint(d1)*10+uint(d2)]
+			}
+		}
+	case 4:
+		if jsonStr[off] == '1' && jsonStr[off+1] == '0' {
+			d2 := jsonStr[off+2] - '0'
+			d3 := jsonStr[off+3] - '0'
+			if d2 <= 2 && d3 <= 9 {
+				if v := 1000 + uint(d2)*10 + uint(d3); v < smallUintAnyLimit {
+					return smallJSONNumberAny[v]
+				}
+			}
+		}
+	}
+	return json.Number(jsonStr[off : off+n])
+}
+
+func init() {
+	for i := 0; i < smallUintAnyLimit; i++ {
+		smallFloat64Any[i] = float64(i)
+	}
+	smallNegFloat64Any[0] = math.Copysign(0, -1)
+	for i := 1; i <= smallNegIntLimit; i++ {
+		smallNegFloat64Any[i] = float64(-i)
+	}
+	for i := 0; i < 128; i++ {
+		smallASCIIStringAny[i] = string(byte(i))
+	}
+	initSmallJSONNumbers()
+}
+
+func uintToFloat64Any(v uint64) any {
+	if v < smallUintAnyLimit {
+		return smallFloat64Any[v]
+	}
+	return float64(v)
+}
+
+func sintToFloat64Any(v int64) any {
+	if v > 0 {
+		if v < smallUintAnyLimit {
+			return smallFloat64Any[v]
+		}
+		return float64(v)
+	}
+	if v >= -smallNegIntLimit {
+		return smallNegFloat64Any[-v]
+	}
+	return float64(v)
+}
+
+func uintToInt64Any(v uint64) any {
+	if v < smallUintAnyLimit {
+		smallInt64Once.Do(func() {
+			var tbl [smallUintAnyLimit]any
+			for i := 0; i < smallUintAnyLimit; i++ {
+				tbl[i] = int64(i)
+			}
+			smallInt64Any = &tbl
+		})
+		return smallInt64Any[v]
+	}
+	return int64(v)
+}
+
+func strAnySlotIdx(s string) uint32 {
+	n := len(s)
+	return ((uint32(n) * 2654435761) ^
+		(uint32(s[0]) * 2246822519) ^
+		(uint32(s[n-1]) * 3266489917) ^
+		(uint32(s[n>>1]) * 668265263)) >> 27
+}
+
+func strCommonAnyRaw(ctx *Context, jsonStr string, off, length int, copyStr bool) any {
+	if length == 0 {
+		return emptyStringAny
+	}
+	if !copyStr {
+		return jsonStr[off : off+length]
+	}
+	if length == 1 {
+		b := jsonStr[off]
+		if b < 0x80 {
+			return smallASCIIStringAny[b]
+		}
+	}
+	raw := jsonStr[off : off+length]
+	if length <= 128 {
+		h := strAnySlotIdx(raw)
+		bit := uint32(1) << h
+		slot := &ctx.strAnyCache[h]
+		if (ctx.strAnyBorrowedMask&bit) == 0 && len(slot.s) == length && slot.s == raw {
+			return slot.v
+		}
+		out := ctx.copyArenaString(raw)
+		boxed := any(out)
+		slot.s = out
+		slot.v = boxed
+		ctx.strAnyMask |= bit
+		ctx.strAnyBorrowedMask &^= bit
+		return boxed
+	}
+	return ctx.copyArenaString(raw)
+}
+
+func strCommonAnyNoCopy(ctx *Context, jsonStr string, off, length int) any {
+	if length == 0 {
+		return emptyStringAny
+	}
+	raw := jsonStr[off : off+length]
+	if length <= 32 {
+		h := strAnySlotIdx(raw)
+		bit := uint32(1) << h
+		slot := &ctx.strAnyCache[h]
+		if (ctx.strAnyBorrowedMask&bit) != 0 && len(slot.s) == length && slot.s == raw {
+			return slot.v
+		}
+		boxed := any(raw)
+		slot.s = raw
+		slot.v = boxed
+		ctx.strAnyMask |= bit
+		ctx.strAnyBorrowedMask |= bit
+		return boxed
+	}
+	return raw
+}
+
+func strCommonAny(ctx *Context, off, length int, copyStr bool) any {
+	return strCommonAnyRaw(ctx, ctx.Doc.Json, off, length, copyStr)
+}
+
+func strEscapedAny(ctx *Context, off int, val uint64) any {
+	b := ctx.Doc.bytesEscaped(off, val)
+	n := len(b)
+	if n == 0 {
+		return emptyStringAny
+	}
+	if n == 1 && b[0] < 0x80 {
+		return smallASCIIStringAny[b[0]]
+	}
+	if n <= 256 {
+		tmp := rt.Mem2Str(b)
+		h := strAnySlotIdx(tmp)
+		bit := uint32(1) << h
+		slot := &ctx.strAnyCache[h]
+		if (ctx.strAnyBorrowedMask&bit) == 0 && len(slot.s) == n && slot.s == tmp {
+			return slot.v
+		}
+		copied := ctx.strEscapedBytes(b)
+		boxed := any(copied)
+		slot.s = copied
+		slot.v = boxed
+		ctx.strAnyMask |= bit
+		ctx.strAnyBorrowedMask &^= bit
+		return boxed
+	}
+	return ctx.strEscapedBytes(b)
 }
 
 // AsEface will always ok, because we have parse in native.
 func (node *Node) AsEface(ctx *Context) (interface{}, error) {
-	if ctx.efacePool != nil {
-		iter := NewNodeIter(*node)
-		v := AsEfaceFast(&iter, ctx)
-		*node = iter.Peek()
-		return v, nil
-	} else {
-		return node.AsEfaceFallback(ctx)
+	if ctx.isEface && (ctx.options&(1<<_F_use_int64)) == 0 && node.ptr == ctx.Root().ptr && !ctx.sliceArenaEnabled {
+		ctx.initSliceArena()
 	}
-}
-
-func parseSingleNode(node Node, ctx *Context) interface{} {
-	var v interface{}
-	switch node.Type() {
-	case KObject:
-		v = map[string]interface{}{}
-	case KArray:
-		v = []interface{}{}
-	case KStringCommon:
-		v = node.StringRef(ctx)
-	case KStringEscaped:
-		v = node.StringCopyEsc(ctx)
-	case KTrue:
-		v = true
-	case KFalse:
-		v = false
-	case KNull:
-		v = nil
-	case KUint:
-		v = float64(node.U64())
-	case KSint:
-		v = float64(node.I64())
-	case KReal:
-		v = float64(node.F64())
-	case KRawNumber:
-		v = node.Number(ctx)
-	default:
-		panic("unreachable for as eface")
-	}
-	return v
-}
-
-func castU64(val float64) uint64 {
-	return *((*uint64)(unsafe.Pointer((&val))))
-}
-
-func AsEfaceFast(iter *NodeIter, ctx *Context) interface{} {
-	var mp, sp, parent unsafe.Pointer // current container pointer
-	var node Node
-	var size int
-	var isObj bool
-	var slice rt.GoSlice
-	var val unsafe.Pointer
-	var vt **rt.GoType
-	var vp *unsafe.Pointer
-	var rootM unsafe.Pointer
-	var rootS rt.GoSlice
-	var root interface{}
-	var key string
-
-	node = iter.Next()
-
-	switch node.Type() {
-	case KObject:
-		size = node.Object().Len()
-		if size != 0 {
-			ctx.Stack.Push(nil, 0, true)
-			mp = ctx.efacePool.GetMap(size)
-			rootM = mp
-			isObj = true
-			goto _object_key
-		} else {
-			return rt.GoEface{
-				Type:  rt.MapEfaceType,
-				Value: ctx.efacePool.GetMap(0),
-			}.Pack()
-		}
-	case KArray:
-		size = node.Array().Len()
-		if size != 0 {
-			ctx.Stack.Push(nil, 0, false)
-			sp = ctx.efacePool.GetSlice(size)
-			slice = rt.GoSlice{
-				Ptr: sp,
-				Len: size,
-				Cap: size,
-			}
-			rootS = slice
-			isObj = false
-			val = sp
-			goto _arr_val
-		} else {
-			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, unsafe.Pointer(&root))
-		}
-	case KStringCommon:
-		ctx.efacePool.ConvTstring(node.StringRef(ctx), unsafe.Pointer(&root))
-	case KStringEscaped:
-		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), unsafe.Pointer(&root))
-	case KTrue:
-		root = true
-	case KFalse:
-		root = false
-	case KNull:
-		root = nil
-	case KUint:
-		ctx.efacePool.ConvF64(float64(node.U64()), unsafe.Pointer(&root))
-	case KSint:
-		ctx.efacePool.ConvF64(float64(node.I64()), unsafe.Pointer(&root))
-	case KReal:
-		ctx.efacePool.ConvF64(node.F64(), unsafe.Pointer(&root))
-	case KRawNumber:
-		ctx.efacePool.ConvTnum(node.Number(ctx), unsafe.Pointer(&root))
-	default:
-		panic("unreachable for as eface")
-	}
-	return root
-
-_object_key:
-	node = iter.Next()
-	if node.Type() == KStringCommon {
-		key = node.StringRef(ctx)
-	} else {
-		key = node.StringCopyEsc(ctx)
-	}
-
-	// interface{} slot in map bucket
-	val = rt.Mapassign_faststr(rt.MapEfaceMapType, mp, key)
-	vt = &(*rt.GoEface)(val).Type
-	vp = &(*rt.GoEface)(val).Value
-
-	// parse value node
-	node = iter.Next()
-	switch node.Type() {
-	case KObject:
-		newSize := node.Object().Len()
-		newMp := ctx.efacePool.GetMap(newSize)
-		*vt = rt.MapEfaceType
-		*vp = newMp
-		remain := size - 1
-		isObj = true
-		if newSize != 0 {
-			if remain > 0 {
-				ctx.Stack.Push(mp, remain, true)
-			}
-			mp = newMp
-			size = newSize
-			goto _object_key
-		}
-	case KArray:
-		newSize := node.Array().Len()
-		if newSize == 0 {
-			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, val)
-			break
-		}
-
-		newSp := ctx.efacePool.GetSlice(newSize)
-		// pack to []interface{}
-		ctx.efacePool.ConvTSlice(rt.GoSlice{
-			Ptr: newSp,
-			Len: newSize,
-			Cap: newSize,
-		}, rt.SliceEfaceType, val)
-		remain := size - 1
-		if remain > 0 {
-			ctx.Stack.Push(mp, remain, true)
-		}
-		val = newSp
-		isObj = false
-		size = newSize
-		goto _arr_val
-	case KStringCommon:
-		ctx.efacePool.ConvTstring(node.StringRef(ctx), val)
-	case KStringEscaped:
-		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), val)
-	case KTrue:
-		rt.ConvTBool(true, (*interface{})(val))
-	case KFalse:
-		rt.ConvTBool(false, (*interface{})(val))
-	case KNull:
-		// Write nil explicitly. A fresh slot is already zero, but for a
-		// duplicate key mapassign returns the *existing* slot, which still
-		// holds the previous value; falling through would wrongly keep it
-		// instead of overwriting it with null like encoding/json does.
-		*(*any)(val) = nil
-	case KUint:
-		ctx.efacePool.ConvF64(float64(node.U64()), val)
-	case KSint:
-		ctx.efacePool.ConvF64(float64(node.I64()), val)
-	case KReal:
-		ctx.efacePool.ConvF64(node.F64(), val)
-	case KRawNumber:
-		ctx.efacePool.ConvTnum(node.Number(ctx), val)
-	default:
-		panic("unreachable for as eface")
-	}
-
-	// check size
-	size -= 1
-	if size != 0 {
-		goto _object_key
-	}
-
-	parent, size, isObj = ctx.Stack.Pop()
-
-	// parent is empty
-	if parent == nil {
-		if isObj {
-			return rt.GoEface{
-				Type:  rt.MapEfaceType,
-				Value: rootM,
-			}.Pack()
-		} else {
-			ctx.efacePool.ConvTSlice(rootS, rt.SliceEfaceType, (unsafe.Pointer)(&root))
-			return root
-		}
-	}
-
-	// continue to parse parent
-	if isObj {
-		mp = parent
-		goto _object_key
-	} else {
-		val = rt.PtrAdd(parent, rt.AnyType.Size)
-		goto _arr_val
-	}
-
-_arr_val:
-	// interface{} slot in slice
-	vt = &(*rt.GoEface)(val).Type
-	vp = &(*rt.GoEface)(val).Value
-
-	// parse value node
-	node = iter.Next()
-	switch node.Type() {
-	case KObject:
-		newSize := node.Object().Len()
-		newMp := ctx.efacePool.GetMap(newSize)
-		*vt = rt.MapEfaceType
-		*vp = newMp
-		remain := size - 1
-		if newSize != 0 {
-			// push next array elem into stack
-			if remain > 0 {
-				ctx.Stack.Push(val, remain, false)
-			}
-			mp = newMp
-			size = newSize
-			isObj = true
-			goto _object_key
-		}
-	case KArray:
-		newSize := node.Array().Len()
-		if newSize == 0 {
-			ctx.efacePool.ConvTSlice(rt.EmptySlice, rt.SliceEfaceType, val)
-			break
-		}
-
-		newSp := ctx.efacePool.GetSlice(newSize)
-		// pack to []interface{}
-		ctx.efacePool.ConvTSlice(rt.GoSlice{
-			Ptr: newSp,
-			Len: newSize,
-			Cap: newSize,
-		}, rt.SliceEfaceType, val)
-
-		remain := size - 1
-		if remain > 0 {
-			ctx.Stack.Push(val, remain, false)
-		}
-
-		val = newSp
-		isObj = false
-		size = newSize
-		goto _arr_val
-	case KStringCommon:
-		ctx.efacePool.ConvTstring(node.StringRef(ctx), val)
-	case KStringEscaped:
-		ctx.efacePool.ConvTstring(node.StringCopyEsc(ctx), val)
-	case KTrue:
-		rt.ConvTBool(true, (*interface{})(val))
-	case KFalse:
-		rt.ConvTBool(false, (*interface{})(val))
-	case KNull:
-		// Write nil explicitly. A fresh slot is already zero, but for a
-		// duplicate key mapassign returns the *existing* slot, which still
-		// holds the previous value; falling through would wrongly keep it
-		// instead of overwriting it with null like encoding/json does.
-		*(*any)(val) = nil
-	case KUint:
-		ctx.efacePool.ConvF64(float64(node.U64()), val)
-	case KSint:
-		ctx.efacePool.ConvF64(float64(node.I64()), val)
-	case KReal:
-		ctx.efacePool.ConvF64(node.F64(), val)
-	case KRawNumber:
-		ctx.efacePool.ConvTnum(node.Number(ctx), val)
-	default:
-		panic("unreachable for as eface")
-	}
-
-	// check size
-	size -= 1
-	if size != 0 {
-		val = rt.PtrAdd(val, rt.AnyType.Size)
-		goto _arr_val
-	}
-
-	parent, size, isObj = ctx.Stack.Pop()
-
-	// parent is empty
-	if parent == nil {
-		if isObj {
-			return rt.GoEface{
-				Type:  rt.MapEfaceType,
-				Value: rootM,
-			}.Pack()
-		} else {
-			ctx.efacePool.ConvTSlice(rootS, rt.SliceEfaceType, unsafe.Pointer(&root))
-			return root
-		}
-	}
-
-	// continue to parse parent
-	if isObj {
-		mp = parent
-		goto _object_key
-	} else {
-		val = rt.PtrAdd(parent, rt.AnyType.Size)
-		goto _arr_val
-	}
+	return node.AsEfaceFallback(ctx)
 }
 
 func (node *Node) AsEfaceFallback(ctx *Context) (interface{}, error) {
-	switch node.Type() {
+	opts := ctx.options
+	copyStr := opts&(1<<_F_copy_string) != 0
+	numSpecial := opts&((1<<_F_use_number)|(1<<_F_use_int64)) != 0
+	if !copyStr {
+		if !numSpecial {
+			val, next, err := decodeEfaceAtFastNoCopy(node.ptr, ctx, ctx.Doc.Json)
+			node.ptr = next
+			return val, err
+		}
+		if (opts&(1<<_F_use_number)) != 0 && (opts&(1<<_F_use_int64)) == 0 {
+			val, next, err := decodeEfaceAtUseNumberNoCopy(node.ptr, ctx, ctx.Doc.Json)
+			node.ptr = next
+			return val, err
+		}
+	}
+	val, next, err := decodeEfaceAt(node.ptr, ctx, opts, copyStr, numSpecial)
+	node.ptr = next
+	return val, err
+}
+
+func decodeEfaceAtFastNoCopy(cur *node, ctx *Context, jsonStr string) (interface{}, *node, error) {
+	switch uint8(cur.typ) {
 	case KObject:
-		obj := node.Object()
-		size := obj.Len()
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return make(map[string]interface{}), next, nil
+		}
 		m := make(map[string]interface{}, size)
-		*node = NewNode(obj.Children())
+		cur = next
 		var gerr, err error
 		for i := 0; i < size; i++ {
-			key, _ := node.AsStr(ctx)
-			*node = NewNode(PtrOffset(node.cptr, 1))
-			m[key], err = node.AsEfaceFallback(ctx)
+			knode := cur
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				off := int(knode.typ >> PosBits)
+				key = jsonStr[off : off+int(knode.val)]
+			} else {
+				key = ctx.strEscaped(int(knode.typ>>PosBits), knode.val)
+			}
+			vptr := PtrOffset(cur, 1)
+			vnode := vptr
+			switch uint8(vnode.typ) {
+			case KNull:
+				m[key] = nil
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KTrue:
+				m[key] = true
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KFalse:
+				m[key] = false
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringCommon:
+				off := int(vnode.typ >> PosBits)
+				n := int(vnode.val)
+				if n == 0 {
+					m[key] = emptyStringAny
+				} else {
+					m[key] = jsonStr[off : off+n]
+				}
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringEscaped:
+				m[key] = strEscapedAny(ctx, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KUint:
+				m[key] = uintToFloat64Any(vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KSint:
+				m[key] = sintToFloat64Any(int64(vnode.val))
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KReal:
+				m[key] = math.Float64frombits(vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					m[key] = emptyEfaceSliceAny
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
+			}
+			m[key], cur, err = decodeEfaceAtFastNoCopy(vptr, ctx, jsonStr)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
-		return m, gerr
+		return m, cur, gerr
 	case KArray:
-		arr := node.Array()
-		size := arr.Len()
-		a := make([]interface{}, size)
-		*node = NewNode(arr.Children())
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return emptyEfaceSliceAny, next, nil
+		}
+		var a []interface{}
+		if ctx.sliceArenaEnabled {
+			a = ctx.allocEfaceSlice(size)
+		} else {
+			a = make([]interface{}, size)
+		}
+		cur = next
 		var gerr, err error
 		for i := 0; i < size; i++ {
-			a[i], err = node.AsEfaceFallback(ctx)
+			vnode := cur
+			switch uint8(vnode.typ) {
+			case KNull:
+				cur = PtrOffset(cur, 1)
+				continue
+			case KTrue:
+				a[i] = true
+				cur = PtrOffset(cur, 1)
+				continue
+			case KFalse:
+				a[i] = false
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringCommon:
+				off := int(vnode.typ >> PosBits)
+				n := int(vnode.val)
+				if n == 0 {
+					a[i] = emptyStringAny
+				} else {
+					a[i] = jsonStr[off : off+n]
+				}
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringEscaped:
+				a[i] = strEscapedAny(ctx, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KUint:
+				a[i] = uintToFloat64Any(vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KSint:
+				a[i] = sintToFloat64Any(int64(vnode.val))
+				cur = PtrOffset(cur, 1)
+				continue
+			case KReal:
+				a[i] = math.Float64frombits(vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					a[i] = emptyEfaceSliceAny
+					cur = PtrOffset(cur, 1)
+					continue
+				}
+			}
+			a[i], cur, err = decodeEfaceAtFastNoCopy(cur, ctx, jsonStr)
 			if gerr == nil && err != nil {
 				gerr = err
 			}
 		}
-		return a, gerr
+		return a, cur, gerr
 	case KStringCommon:
-		str, _ := node.AsStr(ctx)
-		*node = NewNode(PtrOffset(node.cptr, 1))
-		return str, nil
+		off := int(cur.typ >> PosBits)
+		n := int(cur.val)
+		if n == 0 {
+			return emptyStringAny, PtrOffset(cur, 1), nil
+		}
+		return jsonStr[off : off+n], PtrOffset(cur, 1), nil
 	case KStringEscaped:
-		str := node.StringCopyEsc(ctx)
-		*node = NewNode(PtrOffset(node.cptr, 1))
-		return str, nil
+		return strEscapedAny(ctx, int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
 	case KTrue:
-		*node = NewNode(PtrOffset(node.cptr, 1))
-		return true, nil
+		return true, PtrOffset(cur, 1), nil
 	case KFalse:
-		*node = NewNode(PtrOffset(node.cptr, 1))
-		return false, nil
+		return false, PtrOffset(cur, 1), nil
 	case KNull:
-		*node = NewNode(PtrOffset(node.cptr, 1))
-		return nil, nil
+		return nil, PtrOffset(cur, 1), nil
+	case KUint:
+		return uintToFloat64Any(cur.val), PtrOffset(cur, 1), nil
+	case KSint:
+		return sintToFloat64Any(int64(cur.val)), PtrOffset(cur, 1), nil
+	case KReal:
+		return math.Float64frombits(cur.val), PtrOffset(cur, 1), nil
 	default:
-		// use float64
-		if ctx.Parser.options&(1<<_F_use_number) != 0 {
-			num, ok := node.AsNumber(ctx)
-			if !ok {
-				// skip the unmatched type
-				*node = NewNode(node.Next())
-				return nil, newUnmatched(node.Position(), rt.JsonNumberType)
+		nd := Node{ptr: cur}
+		num, ok := nd.AsF64(ctx)
+		if !ok {
+			return nil, nd.Next(), newUnmatched(nd.Position(), float64Type)
+		}
+		return num, PtrOffset(cur, 1), nil
+	}
+}
+
+func decodeEfaceAtUseNumberNoCopy(cur *node, ctx *Context, jsonStr string) (interface{}, *node, error) {
+	switch uint8(cur.typ) {
+	case KObject:
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return make(map[string]interface{}), next, nil
+		}
+		m := make(map[string]interface{}, size)
+		cur = next
+		var gerr, err error
+		for i := 0; i < size; i++ {
+			knode := cur
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				off := int(knode.typ >> PosBits)
+				key = jsonStr[off : off+int(knode.val)]
 			} else {
-				*node = NewNode(PtrOffset(node.cptr, 1))
-				return num, nil
+				key = ctx.strEscaped(int(knode.typ>>PosBits), knode.val)
 			}
-		} else if ctx.Parser.options&(1<<_F_use_int64) != 0 {
-			// first try int64
-			i, ok := node.AsI64(ctx)
-			if ok {
-				*node = NewNode(PtrOffset(node.cptr, 1))
-				return i, nil
+			vptr := PtrOffset(cur, 1)
+			vnode := vptr
+			switch uint8(vnode.typ) {
+			case KNull:
+				m[key] = nil
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KTrue:
+				m[key] = true
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KFalse:
+				m[key] = false
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringCommon:
+				m[key] = strCommonAnyNoCopy(ctx, jsonStr, int(vnode.typ>>PosBits), int(vnode.val))
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringEscaped:
+				m[key] = strEscapedAny(ctx, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KRawNumber:
+				m[key] = rawNumberToAny(jsonStr, int(vnode.typ>>PosBits), int(vnode.val))
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					m[key] = emptyEfaceSliceAny
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
 			}
-
-			// is not integer, then use float64
-			f, ok := node.AsF64(ctx)
-			if ok {
-				*node = NewNode(PtrOffset(node.cptr, 1))
-				return f, nil
+			m[key], cur, err = decodeEfaceAtUseNumberNoCopy(vptr, ctx, jsonStr)
+			if gerr == nil && err != nil {
+				gerr = err
 			}
-
-			// skip the unmatched type
-			*node = NewNode(node.Next())
-			return nil, newUnmatched(node.Position(), rt.Int64Type)
+		}
+		return m, cur, gerr
+	case KArray:
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return emptyEfaceSliceAny, next, nil
+		}
+		var a []interface{}
+		if ctx.sliceArenaEnabled {
+			a = ctx.allocEfaceSlice(size)
 		} else {
-			num, ok := node.AsF64(ctx)
-			if !ok {
-				// skip the unmatched type
-				*node = NewNode(node.Next())
-				return nil, newUnmatched(node.Position(), rt.Float64Type)
-			} else {
-				*node = NewNode(PtrOffset(node.cptr, 1))
-				return num, nil
+			a = make([]interface{}, size)
+		}
+		cur = next
+		var gerr, err error
+		for i := 0; i < size; i++ {
+			vnode := cur
+			switch uint8(vnode.typ) {
+			case KNull:
+				cur = PtrOffset(cur, 1)
+				continue
+			case KTrue:
+				a[i] = true
+				cur = PtrOffset(cur, 1)
+				continue
+			case KFalse:
+				a[i] = false
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringCommon:
+				a[i] = strCommonAnyNoCopy(ctx, jsonStr, int(vnode.typ>>PosBits), int(vnode.val))
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringEscaped:
+				a[i] = strEscapedAny(ctx, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KRawNumber:
+				a[i] = rawNumberToAny(jsonStr, int(vnode.typ>>PosBits), int(vnode.val))
+				cur = PtrOffset(cur, 1)
+				continue
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					a[i] = emptyEfaceSliceAny
+					cur = PtrOffset(cur, 1)
+					continue
+				}
 			}
+			a[i], cur, err = decodeEfaceAtUseNumberNoCopy(cur, ctx, jsonStr)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+		}
+		return a, cur, gerr
+	case KStringCommon:
+		off := int(cur.typ >> PosBits)
+		n := int(cur.val)
+		if n == 0 {
+			return emptyStringAny, PtrOffset(cur, 1), nil
+		}
+		return jsonStr[off : off+n], PtrOffset(cur, 1), nil
+	case KStringEscaped:
+		return strEscapedAny(ctx, int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
+	case KTrue:
+		return true, PtrOffset(cur, 1), nil
+	case KFalse:
+		return false, PtrOffset(cur, 1), nil
+	case KNull:
+		return nil, PtrOffset(cur, 1), nil
+	case KRawNumber:
+		return rawNumberToAny(jsonStr, int(cur.typ>>PosBits), int(cur.val)), PtrOffset(cur, 1), nil
+	default:
+		nd := Node{ptr: cur}
+		num, ok := nd.AsNumber(ctx)
+		if !ok {
+			return nil, nd.Next(), newUnmatched(nd.Position(), jsonNumberType)
+		}
+		return num, PtrOffset(cur, 1), nil
+	}
+}
+
+func decodeEfaceAt(cur *node, ctx *Context, opts uint64, copyStr bool, numSpecial bool) (interface{}, *node, error) {
+	switch uint8(cur.typ) {
+	case KObject:
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return make(map[string]interface{}), next, nil
+		}
+		m := make(map[string]interface{}, size)
+		cur = next
+		var gerr, err error
+		for i := 0; i < size; i++ {
+			knode := cur
+			var key string
+			if uint8(knode.typ) == KStringCommon {
+				key = ctx.strCommon(int(knode.typ>>PosBits), int(knode.val), copyStr)
+			} else {
+				key = ctx.strEscaped(int(knode.typ>>PosBits), knode.val)
+			}
+			vptr := PtrOffset(cur, 1)
+			vnode := vptr
+			switch uint8(vnode.typ) {
+			case KNull:
+				m[key] = nil
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KTrue:
+				m[key] = true
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KFalse:
+				m[key] = false
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringCommon:
+				m[key] = strCommonAny(ctx, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KStringEscaped:
+				m[key] = strEscapedAny(ctx, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(vptr, 1)
+				continue
+			case KUint:
+				if !numSpecial {
+					m[key] = uintToFloat64Any(vnode.val)
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
+			case KSint:
+				if !numSpecial {
+					m[key] = sintToFloat64Any(int64(vnode.val))
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
+			case KReal:
+				if !numSpecial {
+					m[key] = math.Float64frombits(vnode.val)
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					m[key] = emptyEfaceSliceAny
+					cur = PtrOffset(vptr, 1)
+					continue
+				}
+			}
+			m[key], cur, err = decodeEfaceAt(vptr, ctx, opts, copyStr, numSpecial)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+		}
+		return m, cur, gerr
+	case KArray:
+		size := int(uint32(cur.val))
+		next := PtrOffset(cur, 1)
+		if size == 0 {
+			return emptyEfaceSliceAny, next, nil
+		}
+		var a []interface{}
+		if ctx.sliceArenaEnabled {
+			a = ctx.allocEfaceSlice(size)
+		} else {
+			a = make([]interface{}, size)
+		}
+		cur = next
+		var gerr, err error
+		for i := 0; i < size; i++ {
+			vnode := cur
+			switch uint8(vnode.typ) {
+			case KNull:
+				cur = PtrOffset(cur, 1)
+				continue
+			case KTrue:
+				a[i] = true
+				cur = PtrOffset(cur, 1)
+				continue
+			case KFalse:
+				a[i] = false
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringCommon:
+				a[i] = strCommonAny(ctx, int(vnode.typ>>PosBits), int(vnode.val), copyStr)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KStringEscaped:
+				a[i] = strEscapedAny(ctx, int(vnode.typ>>PosBits), vnode.val)
+				cur = PtrOffset(cur, 1)
+				continue
+			case KUint:
+				if !numSpecial {
+					a[i] = uintToFloat64Any(vnode.val)
+					cur = PtrOffset(cur, 1)
+					continue
+				}
+			case KSint:
+				if !numSpecial {
+					a[i] = sintToFloat64Any(int64(vnode.val))
+					cur = PtrOffset(cur, 1)
+					continue
+				}
+			case KReal:
+				if !numSpecial {
+					a[i] = math.Float64frombits(vnode.val)
+					cur = PtrOffset(cur, 1)
+					continue
+				}
+			case KArray:
+				if (uint64(vnode.val) & ConLenMask) == 0 {
+					a[i] = emptyEfaceSliceAny
+					cur = PtrOffset(cur, 1)
+					continue
+				}
+			}
+			a[i], cur, err = decodeEfaceAt(cur, ctx, opts, copyStr, numSpecial)
+			if gerr == nil && err != nil {
+				gerr = err
+			}
+		}
+		return a, cur, gerr
+	case KStringCommon:
+		return strCommonAny(ctx, int(cur.typ>>PosBits), int(cur.val), copyStr), PtrOffset(cur, 1), nil
+	case KStringEscaped:
+		return strEscapedAny(ctx, int(cur.typ>>PosBits), cur.val), PtrOffset(cur, 1), nil
+	case KTrue:
+		return true, PtrOffset(cur, 1), nil
+	case KFalse:
+		return false, PtrOffset(cur, 1), nil
+	case KNull:
+		return nil, PtrOffset(cur, 1), nil
+	case KUint:
+		if !numSpecial {
+			return uintToFloat64Any(cur.val), PtrOffset(cur, 1), nil
+		}
+		if opts&(1<<_F_use_int64) != 0 && cur.val <= math.MaxInt64 {
+			return uintToInt64Any(cur.val), PtrOffset(cur, 1), nil
+		}
+		fallthrough
+	default:
+		nd := Node{ptr: cur}
+		if opts&(1<<_F_use_number) != 0 {
+			num, ok := nd.AsNumber(ctx)
+			if !ok {
+				return nil, nd.Next(), newUnmatched(nd.Position(), jsonNumberType)
+			}
+			return num, PtrOffset(cur, 1), nil
+		} else if opts&(1<<_F_use_int64) != 0 {
+			i, ok := nd.AsI64(ctx)
+			if ok {
+				return i, PtrOffset(cur, 1), nil
+			}
+			f, ok := nd.AsF64(ctx)
+			if ok {
+				return f, PtrOffset(cur, 1), nil
+			}
+			return nil, nd.Next(), newUnmatched(nd.Position(), int64Type)
+		} else {
+			num, ok := nd.AsF64(ctx)
+			if !ok {
+				return nil, nd.Next(), newUnmatched(nd.Position(), float64Type)
+			}
+			return num, PtrOffset(cur, 1), nil
 		}
 	}
 }
 
 //go:nosplit
-func PtrOffset(ptr uintptr, off int64) uintptr {
-	return uintptr(int64(ptr) + off*int64(unsafe.Sizeof(node{})))
+func PtrOffset(ptr *node, off int64) *node {
+	return (*node)(unsafe.Add(unsafe.Pointer(ptr), uintptr(off)*unsafe.Sizeof(node{})))
 }

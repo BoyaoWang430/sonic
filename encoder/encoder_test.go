@@ -23,6 +23,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -534,4 +536,179 @@ func BenchmarkEncode_Float32(b *testing.B) {
 			b.Run(name, lib.test)
 		}
 	}
+}
+
+type longKeyNested struct {
+	VeryLongNestedStructFieldName38Chars string `json:"very_long_nested_struct_field_name_38"`
+	UltraLongNestedField72Chars          int64  `json:"ultra_long_nested_struct_field_name_exceeding_sixty_four_bytes_threshold"`
+}
+
+type longKeyItem struct {
+	ProfileBackgroundImageURLHTTPS string        `json:"profile_background_image_url_https"`
+	LongBoolFieldNameThirtySixChar bool          `json:"long_bool_field_name_thirty_six_char"`
+	LongNullAnyFieldThirtySevenCh  interface{}   `json:"long_null_any_field_thirty_seven_ch"`
+	LongEmptySliceFieldThirtyEight []int         `json:"long_empty_slice_field_thirty_eight"`
+	LongNestedStructThirtyNineChar longKeyNested `json:"long_nested_struct_thirty_nine_char"`
+	UltraLongStringField74Chars    string        `json:"ultra_long_string_field_name_exceeding_sixty_four_bytes_fast_copy_limit_74"`
+	UltraLongBoolField70Chars      bool          `json:"ultra_long_bool_field_name_exceeding_sixty_four_bytes_fast_copy_limit"`
+	UltraLongNullField70Chars      interface{}   `json:"ultra_long_null_field_name_exceeding_sixty_four_bytes_fast_copy_limit"`
+}
+
+type longKeyRoot struct {
+	Items []longKeyItem `json:"long_struct_slice_field_name_thirty_eight"`
+}
+
+func TestLongStructKeysAndDeepStack(t *testing.T) {
+	v := longKeyRoot{
+		Items: []longKeyItem{
+			{
+				ProfileBackgroundImageURLHTTPS: "https://si0.twimg.com/images/themes/theme1/bg.png?a=1&b=2",
+				LongBoolFieldNameThirtySixChar: true,
+				LongNullAnyFieldThirtySevenCh:  nil,
+				LongEmptySliceFieldThirtyEight: []int{},
+				LongNestedStructThirtyNineChar: longKeyNested{
+					VeryLongNestedStructFieldName38Chars: "<tag>&val",
+					UltraLongNestedField72Chars:          -9876543210,
+				},
+				UltraLongStringField74Chars: "hello <world> & friends",
+				UltraLongBoolField70Chars:   false,
+				UltraLongNullField70Chars:   nil,
+			},
+			{
+				ProfileBackgroundImageURLHTTPS: "",
+				LongBoolFieldNameThirtySixChar: false,
+				LongNullAnyFieldThirtySevenCh:  "non-nil",
+				LongEmptySliceFieldThirtyEight: nil,
+				LongNestedStructThirtyNineChar: longKeyNested{
+					VeryLongNestedStructFieldName38Chars: "plain",
+					UltraLongNestedField72Chars:          42,
+				},
+				UltraLongStringField74Chars: "",
+				UltraLongBoolField70Chars:   true,
+				UltraLongNullField70Chars:   123,
+			},
+		},
+	}
+
+	wantEsc, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEsc, err := Encode(&v, SortMapKeys|EscapeHTML|CompactMarshaler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotEsc) != string(wantEsc) {
+		t.Fatalf("EscapeHTML mismatch:\ngot:  %s\nwant: %s", gotEsc, wantEsc)
+	}
+
+	var rawBuf bytes.Buffer
+	enc := json.NewEncoder(&rawBuf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		t.Fatal(err)
+	}
+	wantFast := bytes.TrimSuffix(rawBuf.Bytes(), []byte("\n"))
+	gotFast, err := Encode(&v, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotFast) != string(wantFast) {
+		t.Fatalf("fast mode mismatch:\ngot:  %s\nwant: %s", gotFast, wantFast)
+	}
+
+	// Exercise Stack.sbExtra overflow beyond inlineStackCap (64 levels).
+	var deep interface{} = "leaf"
+	for i := 0; i < 96; i++ {
+		deep = []interface{}{deep}
+	}
+	wantDeep, err := json.Marshal(deep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDeep, err := Encode(deep, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDeep) != string(wantDeep) {
+		t.Fatalf("deep stack mismatch: len(got)=%d len(want)=%d", len(gotDeep), len(wantDeep))
+	}
+}
+
+func TestRootSizeHintShrinkAndConcurrent(t *testing.T) {
+	type payloadStruct struct {
+		ID   int64    `json:"id"`
+		Body string   `json:"body"`
+		Tags []string `json:"tags"`
+	}
+
+	large := payloadStruct{
+		ID:   1,
+		Body: strings.Repeat("x", 16384),
+		Tags: []string{"a", "b", "c"},
+	}
+	small := payloadStruct{
+		ID:   2,
+		Body: "tiny",
+		Tags: []string{"z"},
+	}
+
+	// 1. Prime sizeHint with a 16KB payload and verify subsequent large encode.
+	for i := 0; i < 3; i++ {
+		out, err := Encode(&large, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := json.Marshal(large)
+		if !bytes.Equal(out, want) {
+			t.Fatalf("large mismatch at iter %d", i)
+		}
+	}
+
+	// 2. Nil pointer and empty slice must not corrupt output or panic.
+	var nilPtr *payloadStruct
+	if out, err := Encode(nilPtr, 0); err != nil || string(out) != "null" {
+		t.Fatalf("nilPtr = %q, %v", out, err)
+	}
+	if out, err := Encode([]payloadStruct{}, 0); err != nil || string(out) != "[]" {
+		t.Fatalf("empty slice = %q, %v", out, err)
+	}
+
+	// 3. Regime shift to a tiny payload must shrink-copy so callers never retain >2x backing arrays.
+	outSmall, err := Encode(&small, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSmall, _ := json.Marshal(small)
+	if !bytes.Equal(outSmall, wantSmall) {
+		t.Fatalf("small mismatch: %s", outSmall)
+	}
+	if cap(outSmall) > 1024 {
+		t.Fatalf("expected shrunk backing slice, got len=%d cap=%d", len(outSmall), cap(outSmall))
+	}
+
+	// 4. Concurrent encodes across goroutines mixing sizes.
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if (id+i)%2 == 0 {
+					got, err := Encode(&large, 0)
+					if err != nil || len(got) < 16384 {
+						t.Errorf("concurrent large err=%v len=%d", err, len(got))
+						return
+					}
+				} else {
+					got, err := Encode(&small, 0)
+					if err != nil || !bytes.Equal(got, wantSmall) {
+						t.Errorf("concurrent small err=%v", err)
+						return
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }

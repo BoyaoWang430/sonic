@@ -31,12 +31,6 @@ import (
 
 const (
 	_S_cond = iota
-	_S_init
-)
-
-var (
-	_T_json_Marshaler         = rt.UnpackType(vars.JsonMarshalerType)
-	_T_encoding_TextMarshaler = rt.UnpackType(vars.EncodingTextMarshalerType)
 )
 
 func print_instr(buf []byte, pc int, op ir.Op, ins *ir.Instr, p unsafe.Pointer) {
@@ -49,8 +43,11 @@ func print_instr(buf []byte, pc int, op ir.Op, ins *ir.Instr, p unsafe.Pointer) 
 }
 
 func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.Program) error {
-	pl := len(*prog)
-	if pl <= 0 {
+	return ExecuteRange(b, p, s, flags, prog, 0, len(*prog))
+}
+
+func ExecuteRange(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.Program, startPC int, endPC int) error {
+	if startPC >= endPC {
 		return nil
 	}
 
@@ -58,10 +55,11 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 	var x int
 	var q unsafe.Pointer
 	var f uint64
+	sanitize := flags & alg.SanitizeMask
 
 	var pro = &(*prog)[0]
-	for pc := 0; pc < pl; {
-		ins := (*ir.Instr)(rt.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc)))
+	for pc := startPC; pc < endPC; {
+		ins := (*ir.Instr)(unsafe.Add(unsafe.Pointer(pro), ir.OpSize*uintptr(pc)))
 		pc++
 		op := ins.Op()
 
@@ -74,11 +72,25 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			buf = append(buf, v)
 		case ir.OP_text:
 			v := ins.Vs()
-			buf = append(buf, v...)
+			if sanitize != 0 && ins.NeedsSanitize() {
+				buf = alg.AppendSanitizedLiteral(buf, v, sanitize)
+			} else {
+				buf = append(buf, v...)
+			}
+		case ir.OP_struct_fields:
+			var err error
+			if sanitize == 0 {
+				buf, f, err = encodeStructFieldsDefault(buf, p, ins.VFields(), f, s, flags)
+			} else {
+				buf, f, err = encodeStructFieldsSanitized(buf, p, ins.VFields(), f, s, flags, sanitize)
+			}
+			if err != nil {
+				return err
+			}
 		case ir.OP_deref:
 			p = *(*unsafe.Pointer)(p)
 		case ir.OP_index:
-			p = rt.Add(p, uintptr(ins.I64()))
+			p = unsafe.Add(p, uintptr(ins.I64()))
 		case ir.OP_load:
 			// NOTICE: load CANNOT change f!
 			x, _, p, q = s.Load()
@@ -96,26 +108,26 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			f := flags
 			if pv {
 				f |= (1 << alg.BitPointerValue)
+			} else {
+				f &^= (1 << alg.BitPointerValue)
 			}
 			*b = buf
-			if vt.Indirect() {
-				if err := EncodeTypedPointer(b, vt, (*unsafe.Pointer)(rt.NoEscape(unsafe.Pointer(&p))), s, f); err != nil {
-					return err
-				}
-			} else {
-				vp := (*unsafe.Pointer)(p)
-				if err := EncodeTypedPointer(b, vt, vp, s, f); err != nil {
-					return err
-				}
+			if err := EncodeValuePointer(b, vt, p, s, f); err != nil {
+				return err
 			}
 			buf = *b
 		case ir.OP_is_nil:
-			if is_nil(p) {
+			if is_nil(p, ins.Vr()) {
 				pc = ins.Vi()
 				continue
 			}
 		case ir.OP_is_nil_p1:
-			if (*rt.GoEface)(p).Value == nil {
+			if vt := ins.Vr(); vt != nil {
+				if isEmptySlice(p, vt) {
+					pc = ins.Vi()
+					continue
+				}
+			} else if len(*(*string)(p)) == 0 {
 				pc = ins.Vi()
 				continue
 			}
@@ -123,7 +135,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			buf = append(buf, 'n', 'u', 'l', 'l')
 		case ir.OP_str:
 			v := *(*string)(p)
-			buf = alg.Quote(buf, v, false)
+			buf = alg.QuoteFlags(buf, v, false, sanitize)
 		case ir.OP_bool:
 			if *(*bool)(p) {
 				buf = append(buf, 't', 'r', 'u', 'e')
@@ -174,12 +186,100 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				return vars.ERR_nan_or_infinite
 			}
 			buf = alg.F64toa(buf, v)
+		case ir.OP_f32_slice:
+			var v []float32
+			if st := ins.Vr(); st != nil {
+				rv := reflect.NewAt(st, p).Elem()
+				if rv.IsNil() {
+					if has_opts(flags, alg.BitNoNullSliceOrMap) {
+						buf = append(buf, '[', ']')
+					} else {
+						buf = append(buf, 'n', 'u', 'l', 'l')
+					}
+					continue
+				}
+				n := rv.Len()
+				if n == 0 {
+					buf = append(buf, '[', ']')
+					continue
+				}
+				v = unsafe.Slice((*float32)(rv.UnsafePointer()), n)
+			} else {
+				v = *(*[]float32)(p)
+				if v == nil {
+					if has_opts(flags, alg.BitNoNullSliceOrMap) {
+						buf = append(buf, '[', ']')
+					} else {
+						buf = append(buf, 'n', 'u', 'l', 'l')
+					}
+					continue
+				}
+			}
+			if !s.Save(x, f, p, q) {
+				return vars.ERR_too_deep
+			}
+			var err error
+			buf, err = appendFloat32Slice(buf, v, flags)
+			if err != nil {
+				return err
+			}
+			s.Drop()
+		case ir.OP_f64_slice:
+			var v []float64
+			if st := ins.Vr(); st != nil {
+				rv := reflect.NewAt(st, p).Elem()
+				if rv.IsNil() {
+					if has_opts(flags, alg.BitNoNullSliceOrMap) {
+						buf = append(buf, '[', ']')
+					} else {
+						buf = append(buf, 'n', 'u', 'l', 'l')
+					}
+					continue
+				}
+				n := rv.Len()
+				if n == 0 {
+					buf = append(buf, '[', ']')
+					continue
+				}
+				v = unsafe.Slice((*float64)(rv.UnsafePointer()), n)
+			} else {
+				v = *(*[]float64)(p)
+				if v == nil {
+					if has_opts(flags, alg.BitNoNullSliceOrMap) {
+						buf = append(buf, '[', ']')
+					} else {
+						buf = append(buf, 'n', 'u', 'l', 'l')
+					}
+					continue
+				}
+			}
+			if !s.Save(x, f, p, q) {
+				return vars.ERR_too_deep
+			}
+			var err error
+			buf, err = appendFloat64Slice(buf, v, flags)
+			if err != nil {
+				return err
+			}
+			s.Drop()
 		case ir.OP_bin:
+			if vt := ins.Vr(); vt != nil {
+				buf = rt.EncodeBase64(buf, reflect.NewAt(vt, p).Elem().Bytes())
+				continue
+			}
 			v := *(*[]byte)(p)
+			if v == nil {
+				if has_opts(flags, alg.BitNoNullSliceOrMap) {
+					buf = append(buf, '[', ']')
+				} else {
+					buf = append(buf, 'n', 'u', 'l', 'l')
+				}
+				continue
+			}
 			buf = rt.EncodeBase64(buf, v)
 		case ir.OP_quote:
 			v := *(*string)(p)
-			buf = alg.Quote(buf, v, true)
+			buf = alg.QuoteFlags(buf, v, true, sanitize)
 		case ir.OP_number:
 			v := *(*json.Number)(p)
 			if v == "" {
@@ -191,26 +291,41 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 		case ir.OP_eface:
 			*b = buf
-			if err := EncodeTypedPointer(b, *(**rt.GoType)(p), (*unsafe.Pointer)(rt.Add(p, 8)), s, flags); err != nil {
+			if err := encodeAnyValue(b, *(*any)(p), s, flags); err != nil {
 				return err
 			}
 			buf = *b
 		case ir.OP_iface:
+			rv := reflect.NewAt(ins.Vr(), p).Elem()
+			if rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
+			}
 			*b = buf
-			if err := EncodeTypedPointer(b, (*(**rt.GoItab)(p)).Vt, (*unsafe.Pointer)(rt.Add(p, 8)), s, flags); err != nil {
+			if err := encodeAnyValue(b, rv.Interface(), s, flags); err != nil {
 				return err
 			}
 			buf = *b
 		case ir.OP_is_zero_map:
-			v := *(*unsafe.Pointer)(p)
-			if v == nil || rt.Maplen(v) == 0 {
+			if isEmptyMap(p, ins.Vr()) {
 				pc = ins.Vi()
 				continue
 			}
+		case ir.OP_map_string_any:
+			*b = buf
+			if kind := ins.Vi(); kind == vars.MapBuiltinStrAny {
+				if err := encodeStringAnyMap(b, *(*map[string]any)(p), s, flags); err != nil {
+					return err
+				}
+			} else {
+				if err := encodeBuiltinMap(b, p, kind, s, flags); err != nil {
+					return err
+				}
+			}
+			buf = *b
 		case ir.OP_map_iter:
-			v := *(*unsafe.Pointer)(p)
 			vt := ins.Vr()
-			it, err := alg.IteratorStart(rt.MapType(vt), v, flags)
+			it, err := alg.IteratorStart(vt, p, flags)
 			if err != nil {
 				return err
 			}
@@ -231,53 +346,67 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 			p = it.It.K
 		case ir.OP_marshal_text:
-			vt, itab := ins.Vtab()
-			var it rt.GoIface
-			switch vt.Kind() {
-			case reflect.Interface:
-				if is_nil(p) {
-					buf = append(buf, 'n', 'u', 'l', 'l')
-					continue
-				}
-				it = rt.AssertI2I(_T_encoding_TextMarshaler, *(*rt.GoIface)(p))
-			case reflect.Ptr, reflect.Map:
-				it = convT2I(p, true, itab)
-			default:
-				it = convT2I(p, !vt.Indirect(), itab)
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
 			}
-			if err := prim.EncodeTextMarshaler(&buf, *(*encoding.TextMarshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			if err := prim.EncodeTextMarshaler(&buf, rv.Interface().(encoding.TextMarshaler), flags); err != nil {
 				return err
 			}
 		case ir.OP_marshal_text_p:
-			_, itab := ins.Vtab()
-			it := convT2I(p, false, itab)
-			if err := prim.EncodeTextMarshaler(&buf, *(*encoding.TextMarshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			pt := ins.Vr()
+			v := reflect.NewAt(pt.Elem(), p).Interface().(encoding.TextMarshaler)
+			if err := prim.EncodeTextMarshaler(&buf, v, flags); err != nil {
+				return err
+			}
+		case ir.OP_marshal_text_key:
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				return &json.UnsupportedValueError{Value: rv, Str: "nil interface map key"}
+			}
+			if err := prim.EncodeTextMarshaler(&buf, rv.Interface().(encoding.TextMarshaler), flags); err != nil {
 				return err
 			}
 		case ir.OP_map_write_key:
 			if has_opts(flags, alg.BitSortMapKeys) {
 				v := *(*string)(p)
-				buf = alg.Quote(buf, v, false)
+				buf = alg.QuoteFlags(buf, v, false, sanitize)
 				pc = ins.Vi()
 				continue
 			}
-		case ir.OP_slice_len:
-			v := (*rt.GoSlice)(p)
-			x = v.Len
-			p = v.Ptr
-			//TODO: why?
-			f |= 1 << _S_init
+		case ir.OP_slice_begin:
+			isNil, n, dataPtr := sliceBegin(p, ins.Vr())
+			if isNil {
+				if has_opts(flags, alg.BitNoNullSliceOrMap) {
+					buf = append(buf, '[', ']')
+				} else {
+					buf = append(buf, 'n', 'u', 'l', 'l')
+				}
+				pc = ins.Vi()
+				continue
+			}
+			if n == 0 {
+				buf = append(buf, '[', ']')
+				pc = ins.Vi()
+				continue
+			}
+			if !s.Save(x, f, p, q) {
+				return vars.ERR_too_deep
+			}
+			buf = append(buf, '[')
+			x = n - 1
+			p = dataPtr
 		case ir.OP_slice_next:
 			if x == 0 {
 				pc = ins.Vi()
 				continue
 			}
 			x--
-			if has_opts(f, _S_init) {
-				f &= ^uint64(1 << _S_init)
-			} else {
-				p = rt.Add(p, uintptr(ins.Vlen()))
-			}
+			p = unsafe.Add(p, uintptr(ins.Vlen()))
+			buf = append(buf, ',')
 		case ir.OP_cond_set:
 			f |= 1 << _S_cond
 		case ir.OP_cond_testc:
@@ -288,7 +417,7 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 			}
 		case ir.OP_is_zero:
 			fv := ins.VField()
-			if prim.IsZero(p, fv) {
+			if prim.IsZero(p, fv, ins.CanAddr()) {
 				pc = ins.Vi()
 				continue
 			}
@@ -312,6 +441,16 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				pc = ins.Vi()
 				continue
 			}
+		case ir.OP_is_zero_f32:
+			if (*(*uint32)(p) &^ (1 << 31)) == 0 {
+				pc = ins.Vi()
+				continue
+			}
+		case ir.OP_is_zero_f64:
+			if (*(*uint64)(p) &^ (1 << 63)) == 0 {
+				pc = ins.Vi()
+				continue
+			}
 		case ir.OP_empty_arr:
 			if has_opts(flags, alg.BitNoNullSliceOrMap) {
 				buf = append(buf, '[', ']')
@@ -325,31 +464,39 @@ func Execute(b *[]byte, p unsafe.Pointer, s *vars.Stack, flags uint64, prog *ir.
 				buf = append(buf, 'n', 'u', 'l', 'l')
 			}
 		case ir.OP_marshal:
-			vt, itab := ins.Vtab()
-			var it rt.GoIface
-			switch vt.Kind() {
-			case reflect.Interface:
-				if is_nil(p) {
-					buf = append(buf, 'n', 'u', 'l', 'l')
-					continue
-				}
-				it = rt.AssertI2I(_T_json_Marshaler, *(*rt.GoIface)(p))
-			case reflect.Ptr, reflect.Map:
-				it = convT2I(p, true, itab)
-			default:
-				it = convT2I(p, !vt.Indirect(), itab)
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
 			}
-			if err := prim.EncodeJsonMarshaler(&buf, *(*json.Marshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			if err := prim.EncodeJsonMarshaler(&buf, rv.Interface().(json.Marshaler), flags); err != nil {
 				return err
 			}
 		case ir.OP_marshal_p:
-			_, itab := ins.Vtab()
-			it := convT2I(p, false, itab)
-			if err := prim.EncodeJsonMarshaler(&buf, *(*json.Marshaler)(unsafe.Pointer(&it)), (flags)); err != nil {
+			pt := ins.Vr()
+			v := reflect.NewAt(pt.Elem(), p).Interface().(json.Marshaler)
+			if err := prim.EncodeJsonMarshaler(&buf, v, flags); err != nil {
+				return err
+			}
+		case ir.OP_marshal_append:
+			vt := ins.Vr()
+			rv := reflect.NewAt(vt, p).Elem()
+			if vt.Kind() == reflect.Interface && rv.IsNil() {
+				buf = append(buf, 'n', 'u', 'l', 'l')
+				continue
+			}
+			if err := prim.EncodeJSONAppender(&buf, rv.Interface().(prim.JSONAppender), flags); err != nil {
+				return err
+			}
+		case ir.OP_marshal_append_p:
+			pt := ins.Vr()
+			v := reflect.NewAt(pt.Elem(), p).Interface().(prim.JSONAppender)
+			if err := prim.EncodeJSONAppender(&buf, v, flags); err != nil {
 				return err
 			}
 		case ir.OP_unsupported:
-			return vars.Error_unsuppoted(ins.GoType())
+			return vars.Error_unsuppoted(ins.Vt())
 		default:
 			panic(fmt.Sprintf("not implement %s at %d", ins.Op().String(), pc))
 		}
@@ -363,16 +510,189 @@ func has_opts(opts uint64, bit int) bool {
 	return opts&(1<<bit) != 0
 }
 
-func is_nil(p unsafe.Pointer) bool {
-	return *(*unsafe.Pointer)(p) == nil
+func is_nil(p unsafe.Pointer, vt reflect.Type) bool {
+	if vt == nil {
+		return *(*unsafe.Pointer)(p) == nil
+	}
+	switch vt {
+	case vars.EmptyInterfaceType:
+		return *(*any)(p) == nil
+	case vars.StringAnyMapType:
+		return *(*map[string]any)(p) == nil
+	case vars.StringStringMapType:
+		return *(*map[string]string)(p) == nil
+	case vars.StringIntMapType:
+		return *(*map[string]int)(p) == nil
+	case vars.StringInt64MapType:
+		return *(*map[string]int64)(p) == nil
+	case vars.StringUint64MapType:
+		return *(*map[string]uint64)(p) == nil
+	case vars.StringFloat64MapType:
+		return *(*map[string]float64)(p) == nil
+	case vars.StringBoolMapType:
+		return *(*map[string]bool)(p) == nil
+	case vars.IntStringMapType:
+		return *(*map[int]string)(p) == nil
+	case vars.Int64StringMapType:
+		return *(*map[int64]string)(p) == nil
+	case vars.ByteSliceType:
+		return *(*[]byte)(p) == nil
+	case vars.StringSliceType:
+		return *(*[]string)(p) == nil
+	case vars.IntSliceType:
+		return *(*[]int)(p) == nil
+	case vars.Int64SliceType:
+		return *(*[]int64)(p) == nil
+	case vars.Float64SliceType:
+		return *(*[]float64)(p) == nil
+	case vars.Float32SliceType:
+		return *(*[]float32)(p) == nil
+	case vars.AnySliceType:
+		return *(*[]any)(p) == nil
+	default:
+		return reflect.NewAt(vt, p).Elem().IsNil()
+	}
 }
 
-func convT2I(ptr unsafe.Pointer, deref bool, itab *rt.GoItab) rt.GoIface {
-	if deref {
-		ptr = *(*unsafe.Pointer)(ptr)
+func isEmptyMap(p unsafe.Pointer, vt reflect.Type) bool {
+	switch vt {
+	case vars.StringAnyMapType:
+		return len(*(*map[string]any)(p)) == 0
+	case vars.StringStringMapType:
+		return len(*(*map[string]string)(p)) == 0
+	case vars.StringIntMapType:
+		return len(*(*map[string]int)(p)) == 0
+	case vars.StringInt64MapType:
+		return len(*(*map[string]int64)(p)) == 0
+	case vars.StringUint64MapType:
+		return len(*(*map[string]uint64)(p)) == 0
+	case vars.StringFloat64MapType:
+		return len(*(*map[string]float64)(p)) == 0
+	case vars.StringBoolMapType:
+		return len(*(*map[string]bool)(p)) == 0
+	case vars.IntStringMapType:
+		return len(*(*map[int]string)(p)) == 0
+	case vars.Int64StringMapType:
+		return len(*(*map[int64]string)(p)) == 0
+	default:
+		return reflect.NewAt(vt, p).Elem().Len() == 0
 	}
-	return rt.GoIface{
-		Itab:  itab,
-		Value: ptr,
+}
+
+func isEmptySlice(p unsafe.Pointer, vt reflect.Type) bool {
+	switch vt {
+	case vars.ByteSliceType:
+		return len(*(*[]byte)(p)) == 0
+	case vars.StringSliceType:
+		return len(*(*[]string)(p)) == 0
+	case vars.IntSliceType:
+		return len(*(*[]int)(p)) == 0
+	case vars.Int64SliceType:
+		return len(*(*[]int64)(p)) == 0
+	case vars.Float64SliceType:
+		return len(*(*[]float64)(p)) == 0
+	case vars.Float32SliceType:
+		return len(*(*[]float32)(p)) == 0
+	case vars.BoolSliceType:
+		return len(*(*[]bool)(p)) == 0
+	case vars.Int32SliceType:
+		return len(*(*[]int32)(p)) == 0
+	case vars.UintSliceType:
+		return len(*(*[]uint)(p)) == 0
+	case vars.Uint64SliceType:
+		return len(*(*[]uint64)(p)) == 0
+	case vars.Uint32SliceType:
+		return len(*(*[]uint32)(p)) == 0
+	case vars.AnySliceType:
+		return len(*(*[]any)(p)) == 0
+	default:
+		return reflect.NewAt(vt, p).Elem().Len() == 0
 	}
+}
+
+func sliceBegin(p unsafe.Pointer, st reflect.Type) (isNil bool, n int, dataPtr unsafe.Pointer) {
+	switch st {
+	case vars.StringSliceType:
+		v := *(*[]string)(p)
+		if v == nil {
+			return true, 0, nil
+		}
+		if len(v) == 0 {
+			return false, 0, nil
+		}
+		return false, len(v), unsafe.Pointer(unsafe.SliceData(v))
+	case vars.IntSliceType:
+		v := *(*[]int)(p)
+		if v == nil {
+			return true, 0, nil
+		}
+		if len(v) == 0 {
+			return false, 0, nil
+		}
+		return false, len(v), unsafe.Pointer(unsafe.SliceData(v))
+	case vars.Int64SliceType:
+		v := *(*[]int64)(p)
+		if v == nil {
+			return true, 0, nil
+		}
+		if len(v) == 0 {
+			return false, 0, nil
+		}
+		return false, len(v), unsafe.Pointer(unsafe.SliceData(v))
+	case vars.AnySliceType:
+		v := *(*[]any)(p)
+		if v == nil {
+			return true, 0, nil
+		}
+		if len(v) == 0 {
+			return false, 0, nil
+		}
+		return false, len(v), unsafe.Pointer(unsafe.SliceData(v))
+	default:
+		rv := reflect.NewAt(st, p).Elem()
+		if rv.IsNil() {
+			return true, 0, nil
+		}
+		length := rv.Len()
+		if length == 0 {
+			return false, 0, nil
+		}
+		return false, length, rv.UnsafePointer()
+	}
+}
+
+func appendPaddedKey(buf []byte, keyPtr *byte, keyLen int) []byte {
+	rem := cap(buf) - len(buf)
+	if uint(keyLen) <= 32 && rem >= 32 {
+		dp := (*[4]uint64)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf)))
+		sp := (*[4]uint64)(unsafe.Pointer(keyPtr))
+		dp[0], dp[1] = sp[0], sp[1]
+		if keyLen > 16 {
+			dp[2], dp[3] = sp[2], sp[3]
+		}
+		return buf[:len(buf)+keyLen]
+	}
+	if keyLen <= 64 && keyLen > 32 && rem >= keyLen {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		*(*[4]uint64)(dp) = *(*[4]uint64)(unsafe.Pointer(keyPtr))
+		*(*[4]uint64)(unsafe.Add(dp, keyLen-32)) = *(*[4]uint64)(unsafe.Add(unsafe.Pointer(keyPtr), keyLen-32))
+		return buf[:len(buf)+keyLen]
+	}
+	return append(buf, unsafe.Slice(keyPtr, keyLen)...)
+}
+
+func appendBool(buf []byte, v bool) []byte {
+	if cap(buf)-len(buf) >= 8 {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		if v {
+			*(*[4]byte)(dp) = [4]byte{'t', 'r', 'u', 'e'}
+			return buf[:len(buf)+4]
+		}
+		*(*[5]byte)(dp) = [5]byte{'f', 'a', 'l', 's', 'e'}
+		return buf[:len(buf)+5]
+	}
+	if v {
+		return append(buf, "true"...)
+	}
+	return append(buf, "false"...)
 }

@@ -1,0 +1,2030 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package sonic
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"reflect"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"unsafe"
+
+	"github.com/bytedance/sonic/ast"
+	"github.com/bytedance/sonic/decoder"
+	decerrors "github.com/bytedance/sonic/internal/decoder/errors"
+	"github.com/bytedance/sonic/internal/encoder/ir"
+	"github.com/bytedance/sonic/internal/encoder/vars"
+	"github.com/bytedance/sonic/option"
+)
+
+type customStringIntMap map[string]int
+type customIntSlice []int
+
+type nilCheckHolder struct {
+	M    customStringIntMap `json:"m"`
+	MO   customStringIntMap `json:"mo,omitempty"`
+	S    customIntSlice     `json:"s"`
+	SO   customIntSlice     `json:"so,omitempty"`
+	I    fmt.Stringer       `json:"i"`
+	IO   fmt.Stringer       `json:"io,omitempty"`
+	U    uintptr            `json:"u,omitempty"`
+	UNon uintptr            `json:"unon,omitempty"`
+}
+
+func TestGenericMapAndNilChecks(t *testing.T) {
+	m := customStringIntMap{"a": 1, "b": 2}
+	got, err := ConfigStd.Marshal(m)
+	if err != nil {
+		t.Fatalf("Marshal custom map failed: %v", err)
+	}
+	want, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Marshal custom map = %s, want %s", got, want)
+	}
+
+	var nilMap customStringIntMap
+	got, err = Marshal(nilMap)
+	if err != nil || string(got) != "null" {
+		t.Fatalf("Marshal(nilMap) = %s, %v; want null", got, err)
+	}
+	if APIKind == UseSonicJSON {
+		got, err = Config{NoNullSliceOrMap: true}.Froze().Marshal(nilMap)
+		if err != nil || string(got) != "{}" {
+			t.Fatalf("Marshal(nilMap) with NoNullSliceOrMap = %s, %v; want {}", got, err)
+		}
+	}
+
+	h := nilCheckHolder{UNon: 42}
+	got, err = Marshal(h)
+	if err != nil {
+		t.Fatalf("Marshal(nilCheckHolder) failed: %v", err)
+	}
+	want, err = json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Marshal(nilCheckHolder) = %s, want %s", got, want)
+	}
+}
+
+var (
+	retainedBoxMu   sync.Mutex
+	retainedBoxPtrs []*boxEscapeField
+)
+
+type boxEscapeField struct {
+	V int `json:"v"`
+}
+
+func (f *boxEscapeField) IsZero() bool {
+	retainedBoxMu.Lock()
+	retainedBoxPtrs = append(retainedBoxPtrs, f)
+	retainedBoxMu.Unlock()
+	return f.V == 0
+}
+
+type boxEscapeOuter struct {
+	F boxEscapeField `json:"f,omitzero"`
+}
+
+func TestEncoderTempBoxEscapeIsZero(t *testing.T) {
+	if APIKind != UseSonicJSON {
+		t.Skip("omitzero and native encoder temporary box test only applies to UseSonicJSON")
+	}
+	retainedBoxPtrs = nil
+
+	out1, err := Marshal(boxEscapeOuter{F: boxEscapeField{V: 7}})
+	if err != nil {
+		t.Fatalf("first Marshal failed: %v", err)
+	}
+	if string(out1) != `{"f":{"v":7}}` {
+		t.Fatalf("first Marshal = %s", out1)
+	}
+	if len(retainedBoxPtrs) != 1 || retainedBoxPtrs[0] == nil || retainedBoxPtrs[0].V != 7 {
+		t.Fatalf("after first Marshal, retained pointer = %+v (want V=7)", retainedBoxPtrs)
+	}
+	firstPtr := retainedBoxPtrs[0]
+
+	out2, err := Marshal(boxEscapeOuter{F: boxEscapeField{V: 9}})
+	if err != nil {
+		t.Fatalf("second Marshal failed: %v", err)
+	}
+	if string(out2) != `{"f":{"v":9}}` {
+		t.Fatalf("second Marshal = %s", out2)
+	}
+	if len(retainedBoxPtrs) != 2 || retainedBoxPtrs[1] == nil || retainedBoxPtrs[1].V != 9 {
+		t.Fatalf("after second Marshal, retained pointer = %+v (want V=9)", retainedBoxPtrs)
+	}
+	if firstPtr == retainedBoxPtrs[1] || firstPtr.V != 7 {
+		t.Fatalf("first retained pointer was mutated or aliased: firstPtr.V=%d, same=%v", firstPtr.V, firstPtr == retainedBoxPtrs[1])
+	}
+
+	// Addressable root struct should pass the real field address.
+	retainedBoxPtrs = nil
+	addrOuter := &boxEscapeOuter{F: boxEscapeField{V: 42}}
+	if _, err := Marshal(addrOuter); err != nil {
+		t.Fatalf("Marshal(addrOuter) failed: %v", err)
+	}
+	if len(retainedBoxPtrs) != 1 || retainedBoxPtrs[0] != &addrOuter.F {
+		t.Fatalf("addressable struct did not pass real field address: got %p, want %p", retainedBoxPtrs[0], &addrOuter.F)
+	}
+
+	// Unordered and ordered map values with omitzero field retaining receiver pointer.
+	for _, cfg := range []API{ConfigDefault, ConfigStd} {
+		retainedBoxPtrs = nil
+		mp := map[string]boxEscapeOuter{
+			"a": {F: boxEscapeField{V: 11}},
+			"b": {F: boxEscapeField{V: 22}},
+			"c": {F: boxEscapeField{V: 33}},
+		}
+		if _, err := cfg.Marshal(mp); err != nil {
+			t.Fatalf("Marshal(mp) failed: %v", err)
+		}
+		if len(retainedBoxPtrs) != 3 {
+			t.Fatalf("expected 3 retained pointers from map encode, got %d", len(retainedBoxPtrs))
+		}
+		vals := []int{retainedBoxPtrs[0].V, retainedBoxPtrs[1].V, retainedBoxPtrs[2].V}
+		sort.Ints(vals)
+		if !reflect.DeepEqual(vals, []int{11, 22, 33}) {
+			t.Fatalf("map value temporary slots overwrote retained pointers: got %v, want [11 22 33]", vals)
+		}
+	}
+}
+
+type selfPtrMapKey struct {
+	self *selfPtrMapKey
+	k    string
+}
+
+func (k *selfPtrMapKey) UnmarshalText(b []byte) error {
+	k.self = k
+	k.k = string(b)
+	return nil
+}
+
+var retainedDecodeVals []*selfPtrMapVal
+
+type selfPtrMapVal struct {
+	V string
+}
+
+func (v *selfPtrMapVal) UnmarshalJSON(b []byte) error {
+	retainedDecodeVals = append(retainedDecodeVals, v)
+	return json.Unmarshal(b, &v.V)
+}
+
+type nestedSelfPtrMapVal struct {
+	Inner selfPtrMapVal `json:"inner"`
+}
+
+func TestDecoderMapSlotReuseCallbacks(t *testing.T) {
+	if APIKind != UseSonicJSON {
+		t.Skip("map callback temporary slot isolation applies to native UseSonicJSON backend")
+	}
+	// 1. Key whose UnmarshalText embeds receiver pointer into key struct itself.
+	var stdKeyMap map[selfPtrMapKey]int
+	var sonicKeyMap map[selfPtrMapKey]int
+	src := []byte(`{"a":1,"b":2,"c":3}`)
+	if err := json.Unmarshal(src, &stdKeyMap); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unmarshal(src, &sonicKeyMap); err != nil {
+		t.Fatalf("Sonic Unmarshal selfPtrMapKey failed: %v", err)
+	}
+	if len(sonicKeyMap) != len(stdKeyMap) || len(sonicKeyMap) != 3 {
+		t.Fatalf("map entry count = %d, want %d (entries collapsed due to key slot reuse)", len(sonicKeyMap), len(stdKeyMap))
+	}
+	gotKV := make(map[string]int, len(sonicKeyMap))
+	for k, v := range sonicKeyMap {
+		if k.self == nil || k.self.k != k.k {
+			t.Fatalf("corrupted self pointer in key %+v (self=%+v)", k, k.self)
+		}
+		gotKV[k.k] = v
+	}
+	if !reflect.DeepEqual(gotKV, map[string]int{"a": 1, "b": 2, "c": 3}) {
+		t.Fatalf("decoded key/values = %v", gotKV)
+	}
+
+	// 2. Direct map value with UnmarshalJSON retaining receiver pointer.
+	retainedDecodeVals = nil
+	var valMap map[string]selfPtrMapVal
+	if err := Unmarshal([]byte(`{"x":"one","y":"two","z":"three"}`), &valMap); err != nil {
+		t.Fatalf("Unmarshal valMap failed: %v", err)
+	}
+	if len(retainedDecodeVals) != 3 {
+		t.Fatalf("retainedDecodeVals len = %d, want 3", len(retainedDecodeVals))
+	}
+	gotVals := []string{retainedDecodeVals[0].V, retainedDecodeVals[1].V, retainedDecodeVals[2].V}
+	sort.Strings(gotVals)
+	if !reflect.DeepEqual(gotVals, []string{"one", "three", "two"}) {
+		t.Fatalf("retained map value receivers were overwritten: got %v", gotVals)
+	}
+
+	// 3. Nested struct field inside map value with UnmarshalJSON retaining receiver pointer.
+	retainedDecodeVals = nil
+	var nestedMap map[int]nestedSelfPtrMapVal
+	if err := Unmarshal([]byte(`{"1":{"inner":"alpha"},"2":{"inner":"beta"}}`), &nestedMap); err != nil {
+		t.Fatalf("Unmarshal nestedMap failed: %v", err)
+	}
+	if len(retainedDecodeVals) != 2 {
+		t.Fatalf("retainedDecodeVals len = %d, want 2", len(retainedDecodeVals))
+	}
+	gotNested := []string{retainedDecodeVals[0].V, retainedDecodeVals[1].V}
+	sort.Strings(gotNested)
+	if !reflect.DeepEqual(gotNested, []string{"alpha", "beta"}) {
+		t.Fatalf("retained nested map value receivers were overwritten: got %v", gotNested)
+	}
+}
+
+type emptySliceFieldsHolder struct {
+	Ints    []int     `json:"ints"`
+	Strs    []string  `json:"strs"`
+	Floats  []float64 `json:"floats"`
+	Bools   []bool    `json:"bools"`
+	Anys    []any     `json:"anys"`
+	Structs []struct {
+		X int `json:"x"`
+	} `json:"structs"`
+}
+
+func TestEmptyArrayDecodeNoSliceAliasing(t *testing.T) {
+	// 1. Root slice
+	stdBacking := []int{1, 2, 3}
+	stdSlice := stdBacking[:2]
+	if err := json.Unmarshal([]byte("[]"), &stdSlice); err != nil {
+		t.Fatal(err)
+	}
+	stdSlice = append(stdSlice, 9)
+
+	sonicBacking := []int{1, 2, 3}
+	sonicSlice := sonicBacking[:2]
+	if err := Unmarshal([]byte("[]"), &sonicSlice); err != nil {
+		t.Fatalf("Unmarshal empty slice failed: %v", err)
+	}
+	if sonicSlice == nil || len(sonicSlice) != 0 || cap(sonicSlice) != 0 {
+		t.Fatalf("after Unmarshal([]), len=%d cap=%d nil=%v; want len=0 cap=0 non-nil", len(sonicSlice), cap(sonicSlice), sonicSlice == nil)
+	}
+	sonicSlice = append(sonicSlice, 9)
+	if !reflect.DeepEqual(sonicBacking, stdBacking) {
+		t.Fatalf("sonicBacking = %v, want %v (empty array decode retained old backing)", sonicBacking, stdBacking)
+	}
+
+	// 2. Struct fields (fused primitive slices, []any, and generic struct slice)
+	intBack := []int{10, 20}
+	strBack := []string{"a", "b"}
+	fltBack := []float64{1.5, 2.5}
+	boolBack := []bool{true, true}
+	anyBack := []any{"old1", "old2"}
+	structBack := []struct {
+		X int `json:"x"`
+	}{{X: 1}, {X: 2}}
+
+	h := emptySliceFieldsHolder{
+		Ints:    intBack[:1],
+		Strs:    strBack[:1],
+		Floats:  fltBack[:1],
+		Bools:   boolBack[:1],
+		Anys:    anyBack[:1],
+		Structs: structBack[:1],
+	}
+	input := `{"ints":[],"strs":[],"floats":[],"bools":[],"anys":[],"structs":[]}`
+	if err := UnmarshalString(input, &h); err != nil {
+		t.Fatalf("UnmarshalString emptySliceFieldsHolder failed: %v", err)
+	}
+	if h.Ints == nil || cap(h.Ints) != 0 ||
+		h.Strs == nil || cap(h.Strs) != 0 ||
+		h.Floats == nil || cap(h.Floats) != 0 ||
+		h.Bools == nil || cap(h.Bools) != 0 ||
+		h.Anys == nil || cap(h.Anys) != 0 ||
+		h.Structs == nil || cap(h.Structs) != 0 {
+		t.Fatalf("expected non-nil zero-cap slices, got caps: ints=%d strs=%d floats=%d bools=%d anys=%d structs=%d",
+			cap(h.Ints), cap(h.Strs), cap(h.Floats), cap(h.Bools), cap(h.Anys), cap(h.Structs))
+	}
+	h.Ints = append(h.Ints, 99)
+	h.Strs = append(h.Strs, "z")
+	h.Floats = append(h.Floats, 9.9)
+	h.Bools = append(h.Bools, false)
+	h.Anys = append(h.Anys, "new")
+	h.Structs = append(h.Structs, struct {
+		X int `json:"x"`
+	}{X: 99})
+	if intBack[0] != 10 || strBack[0] != "a" || fltBack[0] != 1.5 || !boolBack[0] || anyBack[0] != "old1" || structBack[0].X != 1 {
+		t.Fatalf("old backing arrays were mutated after append: int=%v str=%v flt=%v bool=%v any=%v struct=%v",
+			intBack, strBack, fltBack, boolBack, anyBack, structBack)
+	}
+
+	// 3. Streaming decoder path
+	intBackStream := []int{10, 20}
+	hStream := emptySliceFieldsHolder{Ints: intBackStream[:1]}
+	if err := ConfigDefault.NewDecoder(strings.NewReader(`{"ints":[]}`)).Decode(&hStream); err != nil {
+		t.Fatalf("Stream Decode empty slice failed: %v", err)
+	}
+	if hStream.Ints == nil || cap(hStream.Ints) != 0 {
+		t.Fatalf("stream empty slice: nil=%v cap=%d", hStream.Ints == nil, cap(hStream.Ints))
+	}
+	hStream.Ints = append(hStream.Ints, 77)
+	if intBackStream[0] != 10 {
+		t.Fatalf("stream empty slice mutated old backing: %v", intBackStream)
+	}
+}
+
+func TestASTNodeUnmarshalJSONCopiesInput(t *testing.T) {
+	raw := []byte(`{"greeting":"hello"}`)
+	var n ast.Node
+	if err := json.Unmarshal(raw, &n); err != nil {
+		t.Fatalf("json.Unmarshal into ast.Node failed: %v", err)
+	}
+	copy(raw, `{"greeting":"world"}`)
+	got, err := n.Get("greeting").String()
+	if err != nil || got != "hello" {
+		t.Fatalf("n.Get(\"greeting\").String() = %q, %v; want \"hello\"", got, err)
+	}
+}
+
+type ptrMarshalerInt int
+
+func (n *ptrMarshalerInt) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"custom:%d"`, *n)), nil
+}
+
+type valMarshalerInt int
+
+func (n valMarshalerInt) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"val:%d"`, int(n))), nil
+}
+
+type ptrTextMarshalerInt int
+
+func (n *ptrTextMarshalerInt) MarshalText() ([]byte, error) {
+	return []byte(fmt.Sprintf("txt:%d", *n)), nil
+}
+
+type ptrAppenderInt int
+
+func (n *ptrAppenderInt) AppendSonicJSON(dst []byte) ([]byte, error) {
+	return append(dst, fmt.Sprintf(`"app:%d"`, *n)...), nil
+}
+
+type embeddedStringTagInner struct {
+	PtrJSON ptrMarshalerInt     `json:"ptr_json,string"`
+	ValJSON valMarshalerInt     `json:"val_json,string"`
+	PtrText ptrTextMarshalerInt `json:"ptr_text,string"`
+	Plain   int                 `json:"plain,string"`
+}
+
+type embeddedStringTagOuter struct {
+	*embeddedStringTagInner
+	DirectVal ptrMarshalerInt  `json:"direct_val,string"`
+	DirectPtr *ptrMarshalerInt `json:"direct_ptr,string"`
+}
+
+type embeddedAppenderInner struct {
+	App ptrAppenderInt `json:"app,string"`
+}
+
+type embeddedAppenderOuter struct {
+	*embeddedAppenderInner
+}
+
+func TestEmbeddedPointerStringTagMarshaler(t *testing.T) {
+	dp := ptrMarshalerInt(9)
+	cases := []struct {
+		name string
+		val  any
+	}{
+		{
+			name: "OuterValue_WithNonNilEmbeddedPtr",
+			val: embeddedStringTagOuter{
+				embeddedStringTagInner: &embeddedStringTagInner{
+					PtrJSON: 7,
+					ValJSON: 8,
+					PtrText: 6,
+					Plain:   5,
+				},
+				DirectVal: 4,
+				DirectPtr: &dp,
+			},
+		},
+		{
+			name: "OuterPointer_WithNonNilEmbeddedPtr",
+			val: &embeddedStringTagOuter{
+				embeddedStringTagInner: &embeddedStringTagInner{
+					PtrJSON: 7,
+					ValJSON: 8,
+					PtrText: 6,
+					Plain:   5,
+				},
+				DirectVal: 4,
+				DirectPtr: &dp,
+			},
+		},
+		{
+			name: "OuterValue_WithNilEmbeddedPtr",
+			val: embeddedStringTagOuter{
+				embeddedStringTagInner: nil,
+				DirectVal:              4,
+				DirectPtr:              nil,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, err := json.Marshal(tc.val)
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			for _, cfg := range []API{ConfigDefault, ConfigStd} {
+				got, err := cfg.Marshal(tc.val)
+				if err != nil {
+					t.Fatalf("sonic Marshal failed: %v", err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("sonic Marshal = %s, want %s", got, want)
+				}
+			}
+		})
+	}
+
+	if APIKind == UseSonicJSON {
+		v := embeddedAppenderOuter{
+			embeddedAppenderInner: &embeddedAppenderInner{App: 13},
+		}
+		got, err := Marshal(v)
+		if err != nil {
+			t.Fatalf("Marshal(embeddedAppenderOuter) failed: %v", err)
+		}
+		if string(got) != `{"app":"app:13"}` {
+			t.Fatalf("Marshal(embeddedAppenderOuter) = %s, want {\"app\":\"app:13\"}", got)
+		}
+	}
+}
+
+type arrayBoxEscapeHolder struct {
+	Arr [2]boxEscapeOuter `json:"arr"`
+}
+
+type failingMapVal struct {
+	V string
+}
+
+func (v *failingMapVal) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	if s == "boom" {
+		return fmt.Errorf("callback boom")
+	}
+	v.V = s
+	return nil
+}
+
+func TestBoundaryCombinationScenarios(t *testing.T) {
+	// 1. Stream Tape capacity boundary around 511 / 512 / 513 scalar elements in root array.
+	for _, n := range []int{510, 511, 512, 513, 514} {
+		var sb strings.Builder
+		sb.WriteByte('[')
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, "%d", i)
+		}
+		sb.WriteString("] {\"tail\":true}")
+		dec := ConfigDefault.NewDecoder(strings.NewReader(sb.String()))
+		var arr []int
+		if err := dec.Decode(&arr); err != nil {
+			t.Fatalf("stream Decode(%d ints) failed: %v", n, err)
+		}
+		if len(arr) != n || arr[0] != 0 || arr[n-1] != n-1 {
+			t.Fatalf("stream Decode(%d ints) len=%d, last=%d", n, len(arr), arr[len(arr)-1])
+		}
+		var tail map[string]bool
+		if err := dec.Decode(&tail); err != nil || !tail["tail"] {
+			t.Fatalf("stream Decode tail after %d ints failed: %v, %v", n, tail, err)
+		}
+	}
+
+	// 2. Parser growth (>16 nodes) combined with >64-byte whitespace runs and Unicode unescaping.
+	ws := strings.Repeat(" ", 96)
+	var uBuilder strings.Builder
+	uBuilder.WriteByte('[')
+	for i := 0; i < 40; i++ {
+		if i > 0 {
+			uBuilder.WriteByte(',')
+		}
+		uBuilder.WriteString(ws)
+		fmt.Fprintf(&uBuilder, `"item-\u0041-%d"`, i)
+	}
+	uBuilder.WriteByte(']')
+	var uOut []string
+	if err := UnmarshalString(uBuilder.String(), &uOut); err != nil {
+		t.Fatalf("UnmarshalString with parser growth + whitespace + unicode failed: %v", err)
+	}
+	if len(uOut) != 40 || uOut[0] != "item-A-0" || uOut[39] != "item-A-39" {
+		t.Fatalf("unexpected uOut: len=%d, first=%q, last=%q", len(uOut), uOut[0], uOut[len(uOut)-1])
+	}
+
+	// 3. Pre-populated map + duplicate keys + callback error preserves prior valid entries.
+	preMap := map[string]failingMapVal{
+		"keep": {V: "initial"},
+	}
+	err := Unmarshal([]byte(`{"dup":"first","dup":"second","bad":"boom"}`), &preMap)
+	if err == nil {
+		t.Fatalf("expected callback error on boom")
+	}
+	if preMap["keep"].V != "initial" || preMap["dup"].V != "second" {
+		t.Fatalf("unexpected preMap state after callback error: %+v", preMap)
+	}
+
+	if APIKind != UseSonicJSON {
+		return
+	}
+
+	// 4. Native-only: inline array elements with pointer-receiver IsZero and map value inline array callbacks.
+	retainedBoxPtrs = nil
+	arrHolder := arrayBoxEscapeHolder{
+		Arr: [2]boxEscapeOuter{
+			{F: boxEscapeField{V: 101}},
+			{F: boxEscapeField{V: 202}},
+		},
+	}
+	if _, err := Marshal(arrHolder); err != nil {
+		t.Fatalf("Marshal(arrHolder) failed: %v", err)
+	}
+	if len(retainedBoxPtrs) != 2 || retainedBoxPtrs[0].V != 101 || retainedBoxPtrs[1].V != 202 {
+		t.Fatalf("inline array temporary box overwrote retained pointers: %+v", retainedBoxPtrs)
+	}
+
+	retainedDecodeVals = nil
+	var arrValMap map[string][2]selfPtrMapVal
+	if err := Unmarshal([]byte(`{"a":["v1","v2"],"b":["v3","v4"]}`), &arrValMap); err != nil {
+		t.Fatalf("Unmarshal(arrValMap) failed: %v", err)
+	}
+	if len(retainedDecodeVals) != 4 {
+		t.Fatalf("retainedDecodeVals len = %d, want 4", len(retainedDecodeVals))
+	}
+	gotArrVals := []string{retainedDecodeVals[0].V, retainedDecodeVals[1].V, retainedDecodeVals[2].V, retainedDecodeVals[3].V}
+	sort.Strings(gotArrVals)
+	if !reflect.DeepEqual(gotArrVals, []string{"v1", "v2", "v3", "v4"}) {
+		t.Fatalf("inline array map value callbacks overwrote receivers: %v", gotArrVals)
+	}
+}
+
+func TestEfaceSmallUintStaticTableSemantics(t *testing.T) {
+	payload := `{"zero":0,"one":1,"edgeLo":4095,"edgeHi":4096,"negZero":-0,"negZeroFrac":-0.0,"negOne":-1,"exp":1e2,"e1":[],"e2":[],"arr":[0,7,4095,4096,-0.0,[],18446744073709551615]}`
+
+	// 1. Default float64 mode must match encoding/json dynamic types and values.
+	var wantAny, gotAny any
+	if err := json.Unmarshal([]byte(payload), &wantAny); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if err := ConfigDefault.Unmarshal([]byte(payload), &gotAny); err != nil {
+		t.Fatalf("ConfigDefault.Unmarshal failed: %v", err)
+	}
+	if !reflect.DeepEqual(gotAny, wantAny) {
+		t.Fatalf("ConfigDefault.Unmarshal mismatch:\ngot:  %#v\nwant: %#v", gotAny, wantAny)
+	}
+	gotMap := gotAny.(map[string]any)
+	e1 := gotMap["e1"].([]any)
+	e2 := gotMap["e2"].([]any)
+	if e1 == nil || e2 == nil || cap(e1) != 0 || cap(e2) != 0 {
+		t.Fatalf("expected empty eface slices to be non-nil with cap=0: len/cap=(%d,%d) and (%d,%d)", len(e1), cap(e1), len(e2), cap(e2))
+	}
+	e1 = append(e1, "mutated")
+	if len(gotMap["e2"].([]any)) != 0 {
+		t.Fatalf("appending to empty eface slice unexpectedly mutated sibling empty slice")
+	}
+	if !math.Signbit(gotMap["negZeroFrac"].(float64)) {
+		t.Fatalf("expected -0.0 to preserve negative signbit")
+	}
+	if math.Signbit(gotMap["zero"].(float64)) {
+		t.Fatalf("expected 0 to have positive signbit")
+	}
+
+	// Also verify direct map[string]any, []any, and scalar root entrypoints.
+	var gotDirectMap map[string]any
+	if err := ConfigDefault.Unmarshal([]byte(`{"a":0,"b":42,"c":4095,"d":4096}`), &gotDirectMap); err != nil {
+		t.Fatalf("direct map[string]any Unmarshal failed: %v", err)
+	}
+	if gotDirectMap["a"] != float64(0) || gotDirectMap["b"] != float64(42) || gotDirectMap["c"] != float64(4095) || gotDirectMap["d"] != float64(4096) {
+		t.Fatalf("unexpected direct map values: %#v", gotDirectMap)
+	}
+	var gotScalar any
+	if err := ConfigDefault.Unmarshal([]byte(`512`), &gotScalar); err != nil || gotScalar != float64(512) {
+		t.Fatalf("scalar Unmarshal(512) = %#v (%T), err=%v", gotScalar, gotScalar, err)
+	}
+
+	// 2. UseNumber mode must still return json.Number across all integer magnitudes.
+	cfgNum := Config{UseNumber: true}.Froze()
+	var gotNum any
+	if err := cfgNum.Unmarshal([]byte(payload), &gotNum); err != nil {
+		t.Fatalf("UseNumber Unmarshal failed: %v", err)
+	}
+	numMap := gotNum.(map[string]any)
+	if numMap["one"] != json.Number("1") || numMap["edgeLo"] != json.Number("4095") || numMap["edgeHi"] != json.Number("4096") {
+		t.Fatalf("UseNumber did not preserve json.Number: %#v", numMap)
+	}
+
+	// 3. UseInt64 mode (native Sonic feature) must return int64 for representable ints and float64 for >MaxInt64.
+	if APIKind == UseSonicJSON {
+		cfgI64 := Config{UseInt64: true}.Froze()
+		var gotI64 any
+		if err := cfgI64.Unmarshal([]byte(payload), &gotI64); err != nil {
+			t.Fatalf("UseInt64 Unmarshal failed: %v", err)
+		}
+		i64Map := gotI64.(map[string]any)
+		if i64Map["zero"] != int64(0) || i64Map["one"] != int64(1) || i64Map["edgeLo"] != int64(4095) || i64Map["edgeHi"] != int64(4096) || i64Map["negOne"] != int64(-1) {
+			t.Fatalf("UseInt64 integer mismatch: %#v", i64Map)
+		}
+		i64Arr := i64Map["arr"].([]any)
+		if i64Arr[0] != int64(0) || i64Arr[1] != int64(7) || i64Arr[2] != int64(4095) || i64Arr[3] != int64(4096) {
+			t.Fatalf("UseInt64 array integer mismatch: %#v", i64Arr)
+		}
+		if _, ok := i64Arr[6].(float64); !ok {
+			t.Fatalf("expected MaxUint64 under UseInt64 to fall back to float64, got %T", i64Arr[6])
+		}
+	}
+}
+
+func TestSortedStringAnyMapNestedAndErrorCleanup(t *testing.T) {
+	// Build nested map[string]any forcing KVBuf/KVOrder reallocation mid-recursion (outer 12 keys -> inner 120 keys).
+	inner := make(map[string]any, 120)
+	for i := 0; i < 120; i++ {
+		inner[fmt.Sprintf("profile_field_%03d", 119-i)] = i
+	}
+	outer := map[string]any{
+		"z_last":  "end",
+		"a_first": map[string]any{"only_one": true},
+		"m_empty": map[string]any{},
+		"b_two":   map[string]any{"b": 2, "a": 1},
+		"k_inner": inner,
+	}
+	for i := 0; i < 10; i++ {
+		outer[fmt.Sprintf("p_prefix_%02d", 9-i)] = []any{i, fmt.Sprintf("v%d", i)}
+	}
+
+	want, err := json.Marshal(outer)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	got, err := ConfigStd.Marshal(outer)
+	if err != nil {
+		t.Fatalf("ConfigStd.Marshal failed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ConfigStd.Marshal sorted map mismatch:\ngot:  %s\nwant: %s", got, want)
+	}
+
+	// Verify mid-iteration error inside nested sorted map cleanly unwinds without corrupting subsequent calls.
+	bad := map[string]any{
+		"a": map[string]any{"k1": "ok", "k2": math.NaN()},
+		"b": "after",
+	}
+	if _, err := ConfigStd.Marshal(bad); err == nil {
+		t.Fatalf("expected error for NaN inside sorted map[string]any")
+	}
+	got2, err := ConfigStd.Marshal(outer)
+	if err != nil || !bytes.Equal(got2, want) {
+		t.Fatalf("post-error ConfigStd.Marshal mismatch: err=%v", err)
+	}
+}
+
+type namedStringSlice []string
+type namedIntSlice []int
+type namedInt64Slice []int64
+type namedAnySlice []any
+type namedByteSlice []byte
+type namedFloat64Slice []float64
+type namedZeroStructSlice []struct{}
+
+type namedSliceHolder struct {
+	SS   namedStringSlice     `json:"ss"`
+	SSO  namedStringSlice     `json:"sso,omitempty"`
+	IS   namedIntSlice        `json:"is"`
+	ISO  namedIntSlice        `json:"iso,omitempty"`
+	I64S namedInt64Slice      `json:"i64s"`
+	AS   namedAnySlice        `json:"as"`
+	BS   namedByteSlice       `json:"bs"`
+	BSO  namedByteSlice       `json:"bso,omitempty"`
+	FS   namedFloat64Slice    `json:"fs"`
+	FSO  namedFloat64Slice    `json:"fso,omitempty"`
+	ZS   namedZeroStructSlice `json:"zs"`
+}
+
+type rootPtrOmitNullDemo struct {
+	S string `json:"s,omitempty"`
+	P *int   `json:"p,omitempty"`
+}
+
+func TestNamedSliceExactTypesAndRootEncCache(t *testing.T) {
+	samples := []namedSliceHolder{
+		{},
+		{
+			SS:   namedStringSlice{},
+			SSO:  namedStringSlice{},
+			IS:   namedIntSlice{},
+			ISO:  namedIntSlice{},
+			I64S: namedInt64Slice{},
+			AS:   namedAnySlice{},
+			BS:   namedByteSlice{},
+			BSO:  namedByteSlice{},
+			FS:   namedFloat64Slice{},
+			FSO:  namedFloat64Slice{},
+			ZS:   namedZeroStructSlice{},
+		},
+		{
+			SS:   namedStringSlice{"a", "b<c"},
+			SSO:  namedStringSlice{"x"},
+			IS:   namedIntSlice{1, 2, 3},
+			ISO:  namedIntSlice{9},
+			I64S: namedInt64Slice{-5, 0, 7},
+			AS:   namedAnySlice{"ok", 12, true, nil},
+			BS:   namedByteSlice("hello"),
+			BSO:  namedByteSlice("world"),
+			FS:   namedFloat64Slice{1.5, 2.5},
+			FSO:  namedFloat64Slice{3.25},
+			ZS:   make(namedZeroStructSlice, 2),
+		},
+	}
+
+	for idx, h := range samples {
+		for _, val := range []any{h, &h} {
+			want, err := json.Marshal(val)
+			if err != nil {
+				t.Fatalf("case %d json.Marshal failed: %v", idx, err)
+			}
+			got, err := ConfigStd.Marshal(val)
+			if err != nil {
+				t.Fatalf("case %d ConfigStd.Marshal failed: %v", idx, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("case %d (%T) mismatch:\ngot:  %s\nwant: %s", idx, val, got, want)
+			}
+		}
+	}
+
+	// Nil root struct pointer must encode as "null".
+	var nilPtr *namedSliceHolder
+	if got, err := Marshal(nilPtr); err != nil || string(got) != "null" {
+		t.Fatalf("Marshal(nilPtr) = %s, err=%v; want null", got, err)
+	}
+
+	if APIKind != UseSonicJSON {
+		return
+	}
+
+	// Verify NoNullSliceOrMap on nil named slices inside struct and at top-level.
+	cfgNoNull := Config{NoNullSliceOrMap: true}.Froze()
+	if got, err := cfgNoNull.Marshal(namedStringSlice(nil)); err != nil || string(got) != "[]" {
+		t.Fatalf("NoNullSliceOrMap Marshal(namedStringSlice(nil)) = %s, err=%v; want []", got, err)
+	}
+	if got, err := cfgNoNull.Marshal(namedByteSlice(nil)); err != nil || string(got) != "[]" {
+		t.Fatalf("NoNullSliceOrMap Marshal(namedByteSlice(nil)) = %s, err=%v; want []", got, err)
+	}
+	if got, err := cfgNoNull.Marshal(namedFloat64Slice(nil)); err != nil || string(got) != "[]" {
+		t.Fatalf("NoNullSliceOrMap Marshal(namedFloat64Slice(nil)) = %s, err=%v; want []", got, err)
+	}
+
+	// Pretouch(*T, WithCompileEncOnlyOmitNull(true))
+	// warms only the omitNull=true cache; default Marshal stays on standard omitempty
+	// while explicit Config{OnlyOmitNull: true} selects OnlyOmitNull.
+	vars.ResetProgramCache()
+	defer vars.ResetProgramCache()
+	if err := Pretouch(reflect.TypeOf((*rootPtrOmitNullDemo)(nil)), option.WithCompileEncOnlyOmitNull(true)); err != nil {
+		t.Fatalf("Pretouch(*rootPtrOmitNullDemo) failed: %v", err)
+	}
+	demo := &rootPtrOmitNullDemo{S: "", P: nil}
+	gotDefault, err := Marshal(demo)
+	if err != nil || string(gotDefault) != `{}` {
+		t.Fatalf("default Marshal(demo) after EncOnlyOmitNull Pretouch = (%s, %v), want {}", gotDefault, err)
+	}
+	got, err := Config{OnlyOmitNull: true}.Froze().Marshal(demo)
+	if err != nil {
+		t.Fatalf("Config{OnlyOmitNull:true}.Marshal(demo) failed: %v", err)
+	}
+	if string(got) != `{"s":""}` {
+		t.Fatalf("explicit OnlyOmitNull Marshal got %s, want {\"s\":\"\"}", got)
+	}
+}
+
+type pureLeafSpecItem struct {
+	Opt string `json:"opt,omitempty"`
+	ID  int64  `json:"id"`
+}
+
+type pureNestedMeta struct {
+	Code string `json:"code,omitempty"`
+	Flag bool   `json:"flag"`
+}
+
+type pureChildSpecItem struct {
+	Title string             `json:"title,omitempty"`
+	Meta  pureNestedMeta     `json:"meta"`
+	Leafs []pureLeafSpecItem `json:"leafs"`
+	Empty []pureLeafSpecItem `json:"empty,omitempty"`
+	Score float64            `json:"score,omitempty"`
+}
+
+type namedPureChildSlice []pureChildSpecItem
+
+type ptrMarshalerLeaf struct {
+	N int
+}
+
+func (m *ptrMarshalerLeaf) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"ptr:%d"`, m.N)), nil
+}
+
+type sliceElemWithPtrMarshaler struct {
+	Name string           `json:"name"`
+	Leaf ptrMarshalerLeaf `json:"leaf"`
+}
+
+type customMarshalerStructSlice []pureLeafSpecItem
+
+func (s *customMarshalerStructSlice) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"custom_len:%d"`, len(*s))), nil
+}
+
+type pureStructSliceRoot struct {
+	FirstOmit []pureChildSpecItem         `json:"first_omit,omitempty"`
+	Named     namedPureChildSlice         `json:"named"`
+	ZeroItems []struct{}                  `json:"zero_items"`
+	AddrItems []sliceElemWithPtrMarshaler `json:"addr_items"`
+	CustomPtr customMarshalerStructSlice  `json:"custom_ptr"`
+	I64       int64                       `json:"i64"`
+	I32       int32                       `json:"medium_int32_field_key"`
+	I16       int16                       `json:"i16"`
+	I8        int8                        `json:"i8"`
+	U64       uint64                      `json:"u64"`
+	U32       uint32                      `json:"medium_uint32_field_key"`
+	U16       uint16                      `json:"u16"`
+	U8        uint8                       `json:"u8"`
+}
+
+func TestPureStructSliceSpecAndFusedIntKeys(t *testing.T) {
+	samples := []pureStructSliceRoot{
+		{},
+		{
+			FirstOmit: []pureChildSpecItem{},
+			Named:     namedPureChildSlice{},
+			ZeroItems: make([]struct{}, 3),
+			I64:       math.MinInt64,
+			I32:       math.MinInt32,
+			I16:       -999,
+			I8:        -9,
+			U64:       math.MaxUint64,
+			U32:       math.MaxUint32,
+			U16:       9999,
+			U8:        99,
+		},
+		{
+			FirstOmit: []pureChildSpecItem{
+				{
+					Meta:  pureNestedMeta{Flag: false},
+					Leafs: []pureLeafSpecItem{{ID: 0}, {Opt: "a<b&c", ID: 42}},
+				},
+				{
+					Title: "second \"item\"",
+					Meta:  pureNestedMeta{Code: "X", Flag: true},
+					Leafs: nil,
+					Empty: []pureLeafSpecItem{{Opt: "keep", ID: -10000}},
+					Score: 1.5,
+				},
+			},
+			Named: namedPureChildSlice{
+				{Title: "named", Meta: pureNestedMeta{Code: "Y", Flag: true}, Leafs: []pureLeafSpecItem{}},
+			},
+			ZeroItems: []struct{}{},
+			AddrItems: []sliceElemWithPtrMarshaler{
+				{Name: "elem0", Leaf: ptrMarshalerLeaf{N: 7}},
+				{Name: "elem1", Leaf: ptrMarshalerLeaf{N: 8}},
+			},
+			CustomPtr: customMarshalerStructSlice{{ID: 1}, {ID: 2}},
+			I64:       math.MaxInt64,
+			I32:       123456,
+			I16:       99,
+			I8:        0,
+			U64:       10000,
+			U32:       999,
+			U16:       9,
+			U8:        0,
+		},
+	}
+
+	for idx, s := range samples {
+		// Test both value root (pv=false, yet slice elements remain addressable!) and pointer root (pv=true).
+		for _, val := range []any{s, &s} {
+			wantStd, err := json.Marshal(val)
+			if err != nil {
+				t.Fatalf("sample %d (%T) json.Marshal failed: %v", idx, val, err)
+			}
+			gotStd, err := ConfigStd.Marshal(val)
+			if err != nil {
+				t.Fatalf("sample %d (%T) ConfigStd.Marshal failed: %v", idx, val, err)
+			}
+			if !bytes.Equal(gotStd, wantStd) {
+				t.Fatalf("sample %d (%T) ConfigStd mismatch:\ngot:  %s\nwant: %s", idx, val, gotStd, wantStd)
+			}
+
+			gotDef, err := ConfigDefault.Marshal(val)
+			if err != nil {
+				t.Fatalf("sample %d (%T) ConfigDefault.Marshal failed: %v", idx, val, err)
+			}
+			var roundTrip map[string]any
+			if err := json.Unmarshal(gotDef, &roundTrip); err != nil {
+				t.Fatalf("sample %d (%T) ConfigDefault invalid JSON: %v\n%s", idx, val, err, gotDef)
+			}
+		}
+	}
+
+	if APIKind != UseSonicJSON {
+		return
+	}
+
+	// Verify NoNullSliceOrMap and EncodeNullForInfOrNan inside OP_slice_struct.
+	cfgNoNull := Config{NoNullSliceOrMap: true, EncodeNullForInfOrNan: true}.Froze()
+	nanSample := pureStructSliceRoot{
+		FirstOmit: []pureChildSpecItem{{Title: "nan", Score: math.NaN()}},
+	}
+	if _, err := ConfigDefault.Marshal(&nanSample); err == nil {
+		t.Fatalf("expected error on NaN inside OP_slice_struct under ConfigDefault")
+	}
+	gotNoNull, err := cfgNoNull.Marshal(&nanSample)
+	if err != nil {
+		t.Fatalf("cfgNoNull.Marshal(&nanSample) failed: %v", err)
+	}
+	if !bytes.Contains(gotNoNull, []byte(`"leafs":[]`)) || !bytes.Contains(gotNoNull, []byte(`"score":null`)) {
+		t.Fatalf("unexpected NoNullSliceOrMap / EncodeNullForInfOrNan output: %s", gotNoNull)
+	}
+}
+
+type customFloat64Slice []float64
+type customStructSlice []struct {
+	A int `json:"a"`
+	B int `json:"b"`
+}
+
+type stepD1SliceHolder struct {
+	F64   []float64          `json:"f64"`
+	F32   []float32          `json:"f32"`
+	Bools []bool             `json:"bools"`
+	Named customFloat64Slice `json:"named"`
+	Items customStructSlice  `json:"items"`
+}
+
+func TestStepD1SliceGrowAndInlineTypedSlices(t *testing.T) {
+	makeSeed := func() stepD1SliceHolder {
+		items := make(customStructSlice, 2, 3)
+		items[0] = struct {
+			A int `json:"a"`
+			B int `json:"b"`
+		}{A: 10, B: 100}
+		items[1] = struct {
+			A int `json:"a"`
+			B int `json:"b"`
+		}{A: 20, B: 200}
+		return stepD1SliceHolder{
+			F64:   []float64{9.1, 9.2, 9.3},
+			F32:   []float32{8.1, 8.2, 8.3},
+			Bools: []bool{true, true, true},
+			Named: customFloat64Slice{7.1, 7.2},
+			Items: items,
+		}
+	}
+
+	inputs := []string{
+		`{"f64":null,"f32":null,"bools":null,"named":null,"items":null}`,
+		`{"f64":[],"f32":[],"bools":[],"named":[],"items":[]}`,
+		`{"f64":[1.25,null,3.5],"f32":[-2.5,null,4.0],"bools":[false,null,false],"named":[1.0,null,2.0,3.0],"items":[{"a":1},{"b":2},{"a":3,"b":30},{"a":4,"b":40}]}`,
+		`{"f64":[42.5],"f32":[12.5],"bools":[false],"named":[5.5],"items":[{"a":99}]}`,
+	}
+
+	for idx, raw := range inputs {
+		stdVal := makeSeed()
+		sonicVal := makeSeed()
+		errStd := json.Unmarshal([]byte(raw), &stdVal)
+		errSonic := ConfigStd.UnmarshalFromString(raw, &sonicVal)
+		if (errStd == nil) != (errSonic == nil) {
+			t.Fatalf("case %d error mismatch: std=%v sonic=%v", idx, errStd, errSonic)
+		}
+		if !reflect.DeepEqual(sonicVal, stdVal) {
+			t.Fatalf("case %d value mismatch:\ngot:  %+v\nwant: %+v", idx, sonicVal, stdVal)
+		}
+		if idx == 1 {
+			if sonicVal.F64 == nil || cap(sonicVal.F64) != 0 ||
+				sonicVal.F32 == nil || cap(sonicVal.F32) != 0 ||
+				sonicVal.Bools == nil || cap(sonicVal.Bools) != 0 ||
+				sonicVal.Named == nil || cap(sonicVal.Named) != 0 ||
+				sonicVal.Items == nil || cap(sonicVal.Items) != 0 {
+				t.Fatalf("case 1 empty slice cap/nil violation: %+v", sonicVal)
+			}
+		}
+	}
+
+	// Trailing non-whitespace must fail cleanly in UnmarshalFromString.
+	var dst stepD1SliceHolder
+	if err := ConfigDefault.UnmarshalFromString(`{"f64":[1.0]} trailing`, &dst); err == nil {
+		t.Fatalf("expected error on trailing non-whitespace tokens")
+	}
+}
+
+type stepD2ArenaDoc struct {
+	Empty   string            `json:"empty"`
+	Short   string            `json:"short"`
+	Escaped string            `json:"escaped"`
+	Large   string            `json:"large"`
+	Many    []string          `json:"many"`
+	Meta    map[string]string `json:"meta"`
+	Raw     NoCopyRawMessage  `json:"raw"`
+	Any     any               `json:"any"`
+}
+
+func TestStepD2StringArenaAndUnmarshalBytesSafety(t *testing.T) {
+	largeVal := strings.Repeat("abcdefghij", 150) // 1500 bytes > maxArenaStrLen (1024)
+	manyVals := make([]string, 80)
+	for i := range manyVals {
+		manyVals[i] = fmt.Sprintf("item-%03d-payload-string", i)
+	}
+	want := stepD2ArenaDoc{
+		Empty:   "",
+		Short:   "alpha",
+		Escaped: "line1\n\"quote\"\t\u4e2d\u6587",
+		Large:   largeVal,
+		Many:    manyVals,
+		Meta:    map[string]string{"k1": "v1", "k2": "escaped\\val"},
+		Raw:     NoCopyRawMessage(`{"nested":"raw"}`),
+		Any:     "boxed-string-value",
+	}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cfg := range []API{ConfigDefault, ConfigStd, ConfigFastest} {
+		// Typed struct binding from mutable []byte: wiping buf must never corrupt decoded fields.
+		buf := append([]byte(nil), encoded...)
+		var got stepD2ArenaDoc
+		if err := cfg.Unmarshal(buf, &got); err != nil {
+			t.Fatalf("Unmarshal struct failed: %v", err)
+		}
+		for i := range buf {
+			buf[i] = 'X'
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("decoded struct mutated after caller []byte wipe:\ngot:  %+v\nwant: %+v", got, want)
+		}
+
+		// Untyped DOM (*any) from mutable []byte: wiping buf must never corrupt DOM strings.
+		bufAny := append([]byte(nil), encoded...)
+		var gotAny any
+		if err := cfg.Unmarshal(bufAny, &gotAny); err != nil {
+			t.Fatalf("Unmarshal any failed: %v", err)
+		}
+		for i := range bufAny {
+			bufAny[i] = 'Y'
+		}
+		m := gotAny.(map[string]any)
+		if m["short"] != want.Short || m["escaped"] != want.Escaped || m["large"] != want.Large || m["empty"] != "" {
+			t.Fatalf("decoded any DOM corrupted after caller []byte wipe: %#v", m)
+		}
+
+		// Error source detachment on invalid []byte.
+		badBuf := []byte(`{"short": 123}`)
+		var badTarget stepD2ArenaDoc
+		errBad := cfg.Unmarshal(badBuf, &badTarget)
+		if errBad == nil {
+			t.Fatalf("expected mismatch error")
+		}
+		wantErrMsg := errBad.Error()
+		for i := range badBuf {
+			badBuf[i] = 'Z'
+		}
+		if errBad.Error() != wantErrMsg {
+			t.Fatalf("error message aliased caller []byte: got %q want %q", errBad.Error(), wantErrMsg)
+		}
+	}
+
+	// StreamDecoder sequential decodes must never overwrite slabs from prior documents.
+	var streamBuf bytes.Buffer
+	for i := 0; i < 5; i++ {
+		doc := stepD2ArenaDoc{
+			Short:   fmt.Sprintf("stream-doc-%d", i),
+			Escaped: fmt.Sprintf("esc-\"-%d", i),
+			Many:    []string{fmt.Sprintf("s0-%d", i), fmt.Sprintf("s1-%d", i)},
+		}
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		streamBuf.Write(b)
+		streamBuf.WriteByte('\n')
+	}
+	dec := ConfigStd.NewDecoder(&streamBuf)
+	var docs []stepD2ArenaDoc
+	for i := 0; i < 5; i++ {
+		var d stepD2ArenaDoc
+		if err := dec.Decode(&d); err != nil {
+			t.Fatalf("stream decode %d failed: %v", i, err)
+		}
+		docs = append(docs, d)
+	}
+	for i, d := range docs {
+		if d.Short != fmt.Sprintf("stream-doc-%d", i) || d.Escaped != fmt.Sprintf("esc-\"-%d", i) {
+			t.Fatalf("stream doc %d slab overwritten by later decode: %+v", i, d)
+		}
+	}
+}
+
+type customStructMap map[string]pureLeafSpecItem
+
+type stepD4MapHolder struct {
+	SS      map[string]string           `json:"ss"`
+	SI      map[string]int              `json:"si"`
+	SI64    map[string]int64            `json:"si64"`
+	SU64    map[string]uint64           `json:"su64"`
+	SF64    map[string]float64          `json:"sf64"`
+	SB      map[string]bool             `json:"sb"`
+	IS      map[int]string              `json:"is"`
+	I64S    map[int64]string            `json:"i64s"`
+	NamedSI customStringIntMap          `json:"named_si"`
+	NamedSt customStructMap             `json:"named_st"`
+	U64St   map[uint64]pureLeafSpecItem `json:"u64_st"`
+}
+
+func TestStepD4BuiltinAndPooledMaps(t *testing.T) {
+	sample := stepD4MapHolder{
+		SS:      map[string]string{"z": "last", "a<b": "x&y", "m": "mid"},
+		SI:      map[string]int{"k2": -42, "k1": 0, "k3": 999},
+		SI64:    map[string]int64{"min": math.MinInt64, "max": math.MaxInt64, "zero": 0},
+		SU64:    map[string]uint64{"max": math.MaxUint64, "one": 1, "zero": 0},
+		SF64:    map[string]float64{"pi": 3.1415926535, "neg": -0.5, "z": 0},
+		SB:      map[string]bool{"t": true, "f": false},
+		IS:      map[int]string{-10: "neg10", -2: "neg2", 1: "one", 10: "ten", 2: "two"},
+		I64S:    map[int64]string{-100: "a", -20: "b", 3: "c", 30: "d", 4: "e"},
+		NamedSI: customStringIntMap{"b": 2, "a": 1},
+		NamedSt: customStructMap{"s2": {Opt: "two", ID: 2}, "s1": {ID: 1}},
+		U64St:   map[uint64]pureLeafSpecItem{10: {Opt: "ten", ID: 10}, 2: {ID: 2}},
+	}
+
+	// 1. Exact byte-for-byte parity with encoding/json under ConfigStd (sorted keys + HTML escape).
+	wantStd, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotStd, err := ConfigStd.Marshal(sample)
+	if err != nil {
+		t.Fatalf("ConfigStd.Marshal failed: %v", err)
+	}
+	if !bytes.Equal(gotStd, wantStd) {
+		t.Fatalf("ConfigStd.Marshal map mismatch:\ngot:  %s\nwant: %s", gotStd, wantStd)
+	}
+
+	// 2. Round-trip under ConfigDefault and ConfigStd.
+	for _, cfg := range []API{ConfigDefault, ConfigStd} {
+		raw, err := cfg.Marshal(&sample)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		var decoded stepD4MapHolder
+		if err := cfg.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if !reflect.DeepEqual(decoded, sample) {
+			t.Fatalf("round-trip mismatch:\ngot:  %+v\nwant: %+v", decoded, sample)
+		}
+	}
+
+	// 3. Pre-populated map + JSON null values: replaces existing map entry with zero value matching encoding/json.
+	rawNulls := `{"si":{"keep":null,"new":null},"si64":{"keep":null,"new":null},"su64":{"keep":null,"new":null},"sf64":{"keep":null,"new":null},"sb":{"keep":null,"new":null},"is":{"1":null,"2":null},"i64s":{"1":null,"2":null},"named_si":{"keep":null,"new":null}}`
+	seed := func() stepD4MapHolder {
+		return stepD4MapHolder{
+			SI:      map[string]int{"keep": 7},
+			SI64:    map[string]int64{"keep": -7},
+			SU64:    map[string]uint64{"keep": 7},
+			SF64:    map[string]float64{"keep": 7.5},
+			SB:      map[string]bool{"keep": true},
+			IS:      map[int]string{1: "kept"},
+			I64S:    map[int64]string{1: "kept64"},
+			NamedSI: customStringIntMap{"keep": 9},
+		}
+	}
+	gotNulls := seed()
+	if err := ConfigStd.UnmarshalFromString(rawNulls, &gotNulls); err != nil {
+		t.Fatalf("ConfigStd.UnmarshalFromString nulls failed: %v", err)
+	}
+	wantStdNulls := seed()
+	if err := json.Unmarshal([]byte(rawNulls), &wantStdNulls); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotNulls, wantStdNulls) {
+		t.Fatalf("pre-populated null map stdlib mismatch:\ngot:  %+v\nwant: %+v", gotNulls, wantStdNulls)
+	}
+
+	// 4. NaN/Inf handling on map[string]float64.
+	nanHolder := stepD4MapHolder{SF64: map[string]float64{"a": 1.0, "bad": math.NaN()}}
+	if _, err := ConfigDefault.Marshal(nanHolder); err == nil {
+		t.Fatalf("expected error on NaN in map[string]float64")
+	}
+	if _, err := ConfigStd.Marshal(nanHolder); err == nil {
+		t.Fatalf("expected error on NaN in sorted map[string]float64")
+	}
+	if APIKind == UseSonicJSON {
+		cfgNullNan := Config{EncodeNullForInfOrNan: true, SortMapKeys: true}.Froze()
+		b, err := cfgNullNan.Marshal(map[string]float64{"b": math.Inf(1), "a": 1.5})
+		if err != nil || string(b) != `{"a":1.5,"b":null}` {
+			t.Fatalf("EncodeNullForInfOrNan map[string]float64 = %s, err=%v", b, err)
+		}
+	}
+
+	// 5. Concurrent -race stress test for pooled reflection map slots (encoder + decoder).
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for iter := 0; iter < 40; iter++ {
+				local := stepD4MapHolder{
+					NamedSI: customStringIntMap{"a": id*100 + iter, "b": iter},
+					NamedSt: customStructMap{
+						"x": {Opt: fmt.Sprintf("g%d-%d", id, iter), ID: int64(iter)},
+						"y": {Opt: "const", ID: int64(id)},
+					},
+					U64St: map[uint64]pureLeafSpecItem{
+						1: {Opt: "one", ID: int64(id)},
+						2: {Opt: "two", ID: int64(iter)},
+					},
+				}
+				bDef, err := ConfigDefault.Marshal(&local)
+				if err != nil {
+					t.Errorf("Marshal default failed: %v", err)
+					return
+				}
+				bStd, err := ConfigStd.Marshal(&local)
+				if err != nil {
+					t.Errorf("Marshal std failed: %v", err)
+					return
+				}
+				var outDef, outStd stepD4MapHolder
+				if err := ConfigDefault.Unmarshal(bDef, &outDef); err != nil {
+					t.Errorf("Unmarshal default failed: %v", err)
+					return
+				}
+				if err := ConfigStd.Unmarshal(bStd, &outStd); err != nil {
+					t.Errorf("Unmarshal std failed: %v", err)
+					return
+				}
+				if !reflect.DeepEqual(outDef, local) || !reflect.DeepEqual(outStd, local) {
+					t.Errorf("concurrent map round-trip mismatch")
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+}
+
+func TestCodecBoundaryReviewRegressions(t *testing.T) {
+	// 1. StructFieldSpec layout must remain strictly 24 bytes.
+	if sz := unsafe.Sizeof(ir.StructFieldSpec{}); sz != 24 {
+		t.Fatalf("StructFieldSpec size = %d, want 24", sz)
+	}
+
+	// 2. End-to-end Unmarshal & StreamDecoder error detachment when caller overwrites input []byte.
+	type ageStruct struct {
+		Age int `json:"age"`
+	}
+	bMismatch := []byte(`{"age":"wrong_type"}`)
+	var as ageStruct
+	errMismatch := ConfigStd.Unmarshal(bMismatch, &as)
+	if errMismatch == nil {
+		t.Fatal("expected mismatch error")
+	}
+	for i := range bMismatch {
+		bMismatch[i] = 'X'
+	}
+	if msg := errMismatch.Error(); strings.Contains(msg, "XXXX") {
+		t.Fatalf("Unmarshal mismatch error aliased caller buffer: %s", msg)
+	}
+
+	bU8Key := []byte(`{"999":1}`)
+	var u8Map map[uint8]int
+	errU8Key := ConfigStd.Unmarshal(bU8Key, &u8Map)
+	if errU8Key == nil {
+		t.Fatal("expected map[uint8]int overflow key error")
+	}
+	for i := range bU8Key {
+		bU8Key[i] = 'X'
+	}
+	if msg := errU8Key.Error(); strings.Contains(msg, "XXX") {
+		t.Fatalf("Unmarshal map[uint8]int error aliased caller buffer: %s", msg)
+	}
+
+	if APIKind == UseSonicJSON {
+		bNumKey := []byte(`{"bad_json_num":1}`)
+		var numMap map[json.Number]int
+		errNumKey := ConfigStd.Unmarshal(bNumKey, &numMap)
+		if errNumKey == nil {
+			t.Fatal("expected map[json.Number]int key error")
+		}
+		for i := range bNumKey {
+			bNumKey[i] = 'X'
+		}
+		if msg := errNumKey.Error(); strings.Contains(msg, "XXXX") {
+			t.Fatalf("Unmarshal map[json.Number]int error aliased caller buffer: %s", msg)
+		}
+
+		bStreamKey := []byte(`{"bad_stream_num":1}`)
+		var streamNumMap map[json.Number]int
+		errStream := ConfigStd.NewDecoder(bytes.NewReader(bStreamKey)).Decode(&streamNumMap)
+		if errStream == nil {
+			t.Fatal("expected stream map[json.Number]int key error")
+		}
+		for i := range bStreamKey {
+			bStreamKey[i] = 'X'
+		}
+		if msg := errStream.Error(); strings.Contains(msg, "XXXX") {
+			t.Fatalf("StreamDecoder map[json.Number]int error aliased input buffer: %s", msg)
+		}
+	}
+
+	// 3. FreeStack must evict oversized KVBuf / KVOrder (> 4096) on normal Marshal success path.
+	bigMap := make(map[string]int, 5000)
+	for i := 0; i < 5000; i++ {
+		bigMap["key_"+strconv.Itoa(i)] = i
+	}
+	runtime.LockOSThread()
+	_, errBig := ConfigStd.Marshal(bigMap)
+	stk := vars.NewStack()
+	kvCap, ordCap := cap(stk.KVBuf), cap(stk.KVOrder)
+	vars.FreeStack(stk)
+	runtime.UnlockOSThread()
+	if errBig != nil {
+		t.Fatalf("ConfigStd.Marshal(bigMap) failed: %v", errBig)
+	}
+	if kvCap > 4096 || ordCap > 4096 {
+		t.Fatalf("FreeStack retained oversized map sort buffers: cap(KVBuf)=%d cap(KVOrder)=%d", kvCap, ordCap)
+	}
+
+	// 4. Dynamic reflect.StructOf with OP_slice_struct + custom map across ResetProgramCache().
+	dynType := reflect.StructOf([]reflect.StructField{
+		{
+			Name: "Items",
+			Type: reflect.TypeOf([]pureLeafSpecItem{}),
+			Tag:  `json:"items"`,
+		},
+		{
+			Name: "Meta",
+			Type: reflect.TypeOf(customStringIntMap{}),
+			Tag:  `json:"meta"`,
+		},
+	})
+	val := reflect.New(dynType).Elem()
+	val.Field(0).Set(reflect.ValueOf([]pureLeafSpecItem{{Opt: "a<b", ID: 1}, {ID: 2}}))
+	val.Field(1).Set(reflect.ValueOf(customStringIntMap{"y": 2, "x": 1}))
+
+	wantDyn, err := json.Marshal(val.Interface())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 2; round++ {
+		gotVal, err := ConfigStd.Marshal(val.Interface())
+		if err != nil || !bytes.Equal(gotVal, wantDyn) {
+			t.Fatalf("round %d dynamic value Marshal = %s, err=%v, want %s", round, gotVal, err, wantDyn)
+		}
+		gotPtr, err := ConfigStd.Marshal(val.Addr().Interface())
+		if err != nil || !bytes.Equal(gotPtr, wantDyn) {
+			t.Fatalf("round %d dynamic ptr Marshal = %s, err=%v, want %s", round, gotPtr, err, wantDyn)
+		}
+		vars.ResetProgramCache()
+	}
+}
+
+type schemaSubtreeFallbackItem struct {
+	Data any     `json:"data"`
+	B    int     `json:"b"`
+	C    int     `json:"c"`
+	D    int     `json:"d"`
+	Note string  `json:"note,omitempty"`
+	Big  float64 `json:"big,omitempty"`
+}
+
+func TestSchemaFullSubtreeMutatedPaddedFallback(t *testing.T) {
+	// 1. Slice of structs with any subtree unescaping a string in place across 12 elements.
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := 0; i < 12; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `{"data":{"msg":"x\"y\nz-%d"},"b":%d,"c":%d,"d":%d}`, i, i+1, i+2, i+3)
+	}
+	sb.WriteByte(']')
+	denseSliceJSON := sb.String()
+
+	var gotSlice []schemaSubtreeFallbackItem
+	if err := UnmarshalString(denseSliceJSON, &gotSlice); err != nil {
+		t.Fatalf("UnmarshalString dense slice after scanFullSubtree escape failed: %v", err)
+	}
+	if len(gotSlice) != 12 {
+		t.Fatalf("len(gotSlice) = %d, want 12", len(gotSlice))
+	}
+	for i, item := range gotSlice {
+		m, ok := item.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("item %d Data type = %T, want map[string]any", i, item.Data)
+		}
+		wantMsg := fmt.Sprintf("x\"y\nz-%d", i)
+		if m["msg"] != wantMsg || item.B != i+1 || item.C != i+2 || item.D != i+3 {
+			t.Fatalf("item %d = %+v, want msg=%q b=%d c=%d d=%d", i, item, wantMsg, i+1, i+2, i+3)
+		}
+	}
+
+	// 2. Fallback to resetAndRunFullParse when a later field triggers skipNumberAt(checkFloatInf)
+	// bailout (1e300 has 3 exponent digits -> bailout, yet is a valid finite float64!).
+	validExpJSON := `{"note":"pre\"ok","data":{"msg":"a\"b\nc"},"b":7,"big":1e300}`
+	var gotSingle schemaSubtreeFallbackItem
+	if err := UnmarshalString(validExpJSON, &gotSingle); err != nil {
+		t.Fatalf("UnmarshalString fallback on 1e300 after scanFullSubtree failed: %v", err)
+	}
+	if gotSingle.Note != "pre\"ok" || gotSingle.B != 7 || gotSingle.Big != 1e300 {
+		t.Fatalf("gotSingle = %+v", gotSingle)
+	}
+	if m, _ := gotSingle.Data.(map[string]any); m["msg"] != "a\"b\nc" {
+		t.Fatalf("gotSingle.Data = %#v, want msg=%q", gotSingle.Data, "a\"b\nc")
+	}
+
+	// 3. Multi-document Decoder (InputSession): document 1 primes sessionPadded, document 2
+	// mutates via scanFullSubtree then falls back on 1e300, document 3 decodes cleanly after it.
+	multiDoc := validExpJSON + "\n" + validExpJSON + "\n" + `{"note":"tail\"ok","data":{"k":"v\"w"},"b":9,"big":2.5}`
+	dec := decoder.NewDecoder(multiDoc)
+	for idx := 0; idx < 3; idx++ {
+		var item schemaSubtreeFallbackItem
+		if err := dec.Decode(&item); err != nil {
+			t.Fatalf("multiDoc Decode #%d failed: %v", idx, err)
+		}
+		if idx < 2 {
+			if m, _ := item.Data.(map[string]any); m["msg"] != "a\"b\nc" || item.Big != 1e300 {
+				t.Fatalf("multiDoc #%d = %+v", idx, item)
+			}
+		} else {
+			if m, _ := item.Data.(map[string]any); m["k"] != "v\"w" || item.Note != "tail\"ok" || item.B != 9 {
+				t.Fatalf("multiDoc #2 = %+v", item)
+			}
+		}
+	}
+
+	// 4. Partial unescape before invalid escape in slowKey and scanStringScalar must report the
+	// exact same escape error position as a non-schema-projected full parse (proving padded was
+	// restored before resetAndRunFullParse).
+	if APIKind != UseStdJSON {
+		for _, bad := range []string{
+			`{"n\"ame\q":1,"b":2}`,
+			`{"note":"a\"b\q","b":2}`,
+		} {
+			var ref map[string]any
+			refErr := UnmarshalString(bad, &ref)
+			refSE, ok := refErr.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("expected reference SyntaxError on %s, got %T (%v)", bad, refErr, refErr)
+			}
+
+			var tmp schemaSubtreeFallbackItem
+			err := UnmarshalString(bad, &tmp)
+			if err == nil {
+				t.Fatalf("expected error on %s, got nil", bad)
+			}
+			se, ok := err.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("expected decerrors.SyntaxError on %s, got %T (%v)", bad, err, err)
+			}
+			if se.Pos != refSE.Pos || se.Src != bad {
+				t.Fatalf("%s: SyntaxError = (Pos=%d, Src=%q), want (Pos=%d, Src=%q)", bad, se.Pos, se.Src, refSE.Pos, bad)
+			}
+		}
+	}
+}
+
+type unicodeErrUnmarshaler struct {
+	Raw string
+}
+
+func (u *unicodeErrUnmarshaler) UnmarshalJSON(b []byte) error {
+	u.Raw = string(b)
+	return nil
+}
+
+type unicodeErrEnvelope struct {
+	Direct string                `json:"direct,omitempty"`
+	Keep   int                   `json:"keep,omitempty"`
+	Any    any                   `json:"any,omitempty"`
+	Raw    json.RawMessage       `json:"raw,omitempty"`
+	NoCopy NoCopyRawMessage      `json:"nocopy,omitempty"`
+	Custom unicodeErrUnmarshaler `json:"custom,omitempty"`
+	Pad    string                `json:"pad,omitempty"`
+}
+
+type tinyChunkReader struct {
+	s    string
+	pos  int
+	step int
+}
+
+func (r *tinyChunkReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.s) {
+		return 0, io.EOF
+	}
+	n := r.step
+	if n > len(p) {
+		n = len(p)
+	}
+	if r.pos+n > len(r.s) {
+		n = len(r.s) - r.pos
+	}
+	copy(p[:n], r.s[r.pos:r.pos+n])
+	r.pos += n
+	return n, nil
+}
+
+func TestUseUnicodeErrorsAcrossAllPaths(t *testing.T) {
+	if APIKind == UseStdJSON {
+		t.Skip("UseUnicodeErrors is not supported by encoding/json fallback")
+	}
+	strictValidate := Config{UseUnicodeErrors: true, ValidateString: true}.Froze()
+	strictFast := Config{UseUnicodeErrors: true, ValidateString: false}.Froze()
+
+	badCases := []string{
+		`"\ud800"`,
+		`"\udfff"`,
+		`"\ud800x"`,
+		`"\ud800\u0041"`,
+		`"\ud800\ud800\udc00"`,
+		`{"direct":"\ud800","keep":1}`,
+		`{"ignored":"\ud800","keep":1}`,
+		`{"ignored":{"nested":["\udc00"]},"keep":1}`,
+		`{"any":["\ud800"],"keep":1}`,
+		`{"raw":"\ud800","keep":1}`,
+		`{"nocopy":"\ud800","keep":1}`,
+		`{"custom":"\ud800","keep":1}`,
+		`{"di\ud800rect":"ok","keep":1}`,
+	}
+
+	for _, cfg := range []API{strictValidate, strictFast} {
+		for _, tc := range badCases {
+			if tc[0] == '"' {
+				var s string
+				if err := cfg.UnmarshalFromString(tc, &s); err == nil {
+					t.Fatalf("expected UseUnicodeErrors failure on root string %s, got %q", tc, s)
+				}
+			} else {
+				var env unicodeErrEnvelope
+				if err := cfg.UnmarshalFromString(tc, &env); err == nil {
+					t.Fatalf("expected UseUnicodeErrors failure on %s, got %+v", tc, env)
+				}
+			}
+			// StreamDecoder with tiny 3-byte chunks splitting \uXXXX across reads.
+			var dst any
+			if tc[0] == '{' {
+				dst = &unicodeErrEnvelope{}
+			} else {
+				var s string
+				dst = &s
+			}
+			sdec := cfg.NewDecoder(&tinyChunkReader{s: tc, step: 3})
+			if err := sdec.Decode(dst); err == nil {
+				t.Fatalf("expected StreamDecoder UseUnicodeErrors failure on %s", tc)
+			}
+		}
+
+		// > 4 MiB giant read-only scan path with lone surrogate.
+		giantBad := `{"pad":"` + strings.Repeat("p", (4<<20)+4096) + `","direct":"\ud800","keep":1}`
+		var giantEnv unicodeErrEnvelope
+		if err := cfg.UnmarshalFromString(giantBad, &giantEnv); err == nil {
+			t.Fatalf("expected >4MiB UseUnicodeErrors failure, got %+v", giantEnv.Direct)
+		}
+
+		// Valid astral surrogate pair (\uD83D\uDE00 == "😀") must succeed across all paths.
+		validCases := []string{
+			`{"direct":"\ud83d\ude00","ignored":"\ud83d\ude00","any":"\ud83d\ude00","raw":"\ud83d\ude00","nocopy":"\ud83d\ude00","keep":42}`,
+			`{"pad":"` + strings.Repeat("p", (4<<20)+4096) + `","direct":"\ud83d\ude00","keep":42}`,
+		}
+		for _, vtc := range validCases {
+			var env unicodeErrEnvelope
+			if err := cfg.UnmarshalFromString(vtc, &env); err != nil {
+				t.Fatalf("valid surrogate pair failed on len=%d: %v", len(vtc), err)
+			}
+			if env.Direct != "😀" || env.Keep != 42 {
+				t.Fatalf("got Direct=%q Keep=%d, want 😀 / 42", env.Direct, env.Keep)
+			}
+		}
+	}
+
+	// Default config (UseUnicodeErrors: false) must continue replacing lone surrogates with U+FFFD.
+	var defEnv unicodeErrEnvelope
+	if err := ConfigDefault.UnmarshalFromString(`{"direct":"\ud800","ignored":"\ud800","keep":7}`, &defEnv); err != nil {
+		t.Fatalf("ConfigDefault should replace lone surrogate, got error: %v", err)
+	}
+	if defEnv.Direct != "\ufffd" || defEnv.Keep != 7 {
+		t.Fatalf("ConfigDefault Direct=%q Keep=%d, want U+FFFD / 7", defEnv.Direct, defEnv.Keep)
+	}
+}
+
+func TestContainerCountOver24Bits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping >16M-element container test in -short mode")
+	}
+	const wantLen = (1 << 24) + 5 // 16,777,221 > 2^24
+	buf := make([]byte, 2*wantLen+1)
+	buf[0] = '['
+	for i := 0; i < wantLen; i++ {
+		buf[1+2*i] = '1'
+		buf[2+2*i] = ','
+	}
+	buf[len(buf)-1] = ']'
+	bigJSON := unsafe.String(unsafe.SliceData(buf), len(buf))
+
+	// 1. > 4 MiB UnmarshalString (scanComplete).
+	var got []uint8
+	if err := UnmarshalString(bigJSON, &got); err != nil {
+		t.Fatalf("UnmarshalString 16.77M-element array failed: %v", err)
+	}
+	if len(got) != wantLen || got[0] != 1 || got[wantLen-1] != 1 {
+		t.Fatalf("UnmarshalString len=%d, want %d", len(got), wantLen)
+	}
+	got = nil
+
+	// 2. StreamDecoder (StreamSession.Step).
+	var gotStream []uint8
+	if err := ConfigDefault.NewDecoder(strings.NewReader(bigJSON)).Decode(&gotStream); err != nil {
+		t.Fatalf("StreamDecoder 16.77M-element array failed: %v", err)
+	}
+	if len(gotStream) != wantLen || gotStream[0] != 1 || gotStream[wantLen-1] != 1 {
+		t.Fatalf("StreamDecoder len=%d, want %d", len(gotStream), wantLen)
+	}
+}
+
+type useNumberNestedHolder struct {
+	V   any            `json:"v"`
+	N   json.Number    `json:"n"`
+	B   []byte         `json:"b"`
+	M   map[string]any `json:"m"`
+	Pad string         `json:"pad,omitempty"`
+}
+
+func TestUseNumberNestedTypedContainersAcrossThresholds(t *testing.T) {
+	smallJSON := `{"v":1e500,"n":9007199254740993,"b":[1,2,255],"m":{"huge":1e500,"int":9007199254740993}}`
+	giantJSON := `{"pad":"` + strings.Repeat("x", (4<<20)+4096) + `","v":1e500,"n":9007199254740993,"b":[1,2,255],"m":{"huge":1e500,"int":9007199254740993}}`
+
+	check := func(name string, got useNumberNestedHolder) {
+		t.Helper()
+		if got.V != json.Number("1e500") {
+			t.Fatalf("%s: V = %#v (%T), want json.Number(\"1e500\")", name, got.V, got.V)
+		}
+		if got.N != json.Number("9007199254740993") {
+			t.Fatalf("%s: N = %q, want 9007199254740993", name, got.N)
+		}
+		if !bytes.Equal(got.B, []byte{1, 2, 255}) {
+			t.Fatalf("%s: B = %v, want [1 2 255]", name, got.B)
+		}
+		if got.M["huge"] != json.Number("1e500") || got.M["int"] != json.Number("9007199254740993") {
+			t.Fatalf("%s: M = %#v", name, got.M)
+		}
+	}
+
+	useNumCfg := Config{UseNumber: true, ValidateString: true}.Froze()
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"small", smallJSON},
+		{"giant", giantJSON},
+	} {
+		var h1 useNumberNestedHolder
+		if err := useNumCfg.UnmarshalFromString(tc.src, &h1); err != nil {
+			t.Fatalf("%s useNumCfg.UnmarshalFromString failed: %v", tc.name, err)
+		}
+		check(tc.name+"/UnmarshalFromString", h1)
+
+		var h2 useNumberNestedHolder
+		d := decoder.NewDecoder(tc.src)
+		d.UseNumber()
+		if err := d.Decode(&h2); err != nil {
+			t.Fatalf("%s decoder.NewDecoder.UseNumber failed: %v", tc.name, err)
+		}
+		check(tc.name+"/StringDecoder", h2)
+
+		var h3 useNumberNestedHolder
+		if err := useNumCfg.NewDecoder(strings.NewReader(tc.src)).Decode(&h3); err != nil {
+			t.Fatalf("%s StreamDecoder failed: %v", tc.name, err)
+		}
+		check(tc.name+"/StreamDecoder", h3)
+	}
+}
+
+func TestDecoderRepeatedDecodeAfterEOFAndPos(t *testing.T) {
+	giantSpaces := strings.Repeat(" ", (4<<20)+1024)
+	giantUnclosedStr := `"` + strings.Repeat("a", (4<<20)+1024)
+	giantValidStr := `"` + strings.Repeat("b", (4<<20)+1024) + `"`
+
+	eofInputs := []struct {
+		name    string
+		src     string
+		wantOK1 bool
+	}{
+		{"empty", "", false},
+		{"spaces", "   ", false},
+		{"unclosed_str", `"abc`, false},
+		{"unclosed_arr", `[1, 2`, false},
+		{"valid_then_eof", `123`, true},
+		{"valid_spaces_then_eof", `123   `, true},
+		{"giant_spaces", giantSpaces, false},
+		{"giant_unclosed_str", giantUnclosedStr, false},
+		{"giant_valid_then_eof", giantValidStr, true},
+	}
+
+	for _, tc := range eofInputs {
+		dec := decoder.NewDecoder(tc.src)
+		for call := 0; call < 3; call++ {
+			var v any
+			err := dec.Decode(&v)
+			if call == 0 && tc.wantOK1 {
+				if err != nil {
+					t.Fatalf("%s call 0 unexpected error: %v", tc.name, err)
+				}
+			} else if err == nil {
+				t.Fatalf("%s call %d expected EOF error, got nil (v=%#v)", tc.name, call, v)
+			}
+			if dec.Pos() < 0 || dec.Pos() > len(tc.src) {
+				t.Fatalf("%s call %d left out-of-bounds Pos=%d for len=%d", tc.name, call, dec.Pos(), len(tc.src))
+			}
+		}
+	}
+
+	// Verify consistent SyntaxError.Pos == len(src) on truncated/unclosed inputs across
+	// < 4 MiB, > 4 MiB, and StreamDecoder.
+	if APIKind != UseStdJSON {
+		for _, trunc := range []string{`"abc`, `[2, 3`, `{"a"`, `tru`, giantUnclosedStr} {
+			var v1 any
+			err1 := UnmarshalString(trunc, &v1)
+			se1, ok := err1.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("len=%d UnmarshalString expected SyntaxError, got %T (%v)", len(trunc), err1, err1)
+			}
+			if se1.Pos != len(trunc) {
+				t.Fatalf("len=%d UnmarshalString SyntaxError.Pos = %d, want %d", len(trunc), se1.Pos, len(trunc))
+			}
+
+			var v2 any
+			err2 := ConfigDefault.NewDecoder(&tinyChunkReader{s: trunc, step: 7}).Decode(&v2)
+			se2, ok := err2.(decerrors.SyntaxError)
+			if !ok {
+				t.Fatalf("len=%d StreamDecoder expected SyntaxError, got %T (%v)", len(trunc), err2, err2)
+			}
+			if se2.Pos != len(trunc) {
+				t.Fatalf("len=%d StreamDecoder SyntaxError.Pos = %d, want %d", len(trunc), se2.Pos, len(trunc))
+			}
+		}
+	}
+}
+
+type denseNestedLeaf struct {
+	Name  string  `json:"name"`
+	Score float64 `json:"score"`
+	OK    bool    `json:"ok"`
+}
+
+type denseAllSlicesStruct struct {
+	ID      int               `json:"id"`
+	Title   string            `json:"title"`
+	Nested  denseNestedLeaf   `json:"nested"`
+	Raw     []byte            `json:"raw"`
+	Bools   []bool            `json:"bools"`
+	F64s    []float64         `json:"f64s"`
+	F32s    []float32         `json:"f32s"`
+	I32s    []int32           `json:"i32s"`
+	Uints   []uint            `json:"uints"`
+	U64s    []uint64          `json:"u64s"`
+	U32s    []uint32          `json:"u32s"`
+	Items   []denseNestedLeaf `json:"items"`
+	Summary string            `json:"summary"`
+}
+
+type omitemptyAllSlicesStruct struct {
+	Raw   []byte            `json:"raw,omitempty"`
+	Bools []bool            `json:"bools,omitempty"`
+	F64s  []float64         `json:"f64s,omitempty"`
+	F32s  []float32         `json:"f32s,omitempty"`
+	I32s  []int32           `json:"i32s,omitempty"`
+	Uints []uint            `json:"uints,omitempty"`
+	U64s  []uint64          `json:"u64s,omitempty"`
+	U32s  []uint32          `json:"u32s,omitempty"`
+	Items []denseNestedLeaf `json:"items,omitempty"`
+	Tail  int               `json:"tail"`
+}
+
+func TestScalarSliceSpecsAndDensePureStructs(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+	}{
+		{
+			name: "dense_populated",
+			val: denseAllSlicesStruct{
+				ID:     42,
+				Title:  "hello <world> & friends\u2028line",
+				Nested: denseNestedLeaf{Name: "leaf<&>", Score: 3.5, OK: true},
+				Raw:    []byte{0xff, 0x00, 0x3e, 0xfb, 0xef, '<', '&', '>'},
+				Bools:  []bool{true, false, true},
+				F64s:   []float64{0, -1.25, 1e10, 3.141592653589793},
+				F32s:   []float32{0, -2.5, 42.125},
+				I32s:   []int32{math.MinInt32, -1, 0, 7, math.MaxInt32},
+				Uints:  []uint{0, 1, 999999},
+				U64s:   []uint64{0, 1, math.MaxUint64},
+				U32s:   []uint32{0, 1, math.MaxUint32},
+				Items: []denseNestedLeaf{
+					{Name: "a<b>", Score: 1.25, OK: false},
+					{Name: "c&d", Score: 2.5, OK: true},
+				},
+				Summary: "done",
+			},
+		},
+		{
+			name: "dense_all_nil_slices",
+			val:  denseAllSlicesStruct{ID: 1, Title: "nil"},
+		},
+		{
+			name: "dense_all_empty_slices",
+			val: denseAllSlicesStruct{
+				ID:    2,
+				Title: "empty",
+				Raw:   []byte{},
+				Bools: []bool{},
+				F64s:  []float64{},
+				F32s:  []float32{},
+				I32s:  []int32{},
+				Uints: []uint{},
+				U64s:  []uint64{},
+				U32s:  []uint32{},
+				Items: []denseNestedLeaf{},
+			},
+		},
+		{
+			name: "dense_root_slice",
+			val: []denseAllSlicesStruct{
+				{ID: 1, Title: "first <1>", Bools: []bool{true}, F64s: []float64{1.5}, Raw: []byte("abc")},
+				{ID: 2, Title: "second & 2", I32s: []int32{-5, 8}, U32s: []uint32{9}, Items: []denseNestedLeaf{{Name: "x", Score: 4, OK: true}}},
+			},
+		},
+		{
+			name: "omitempty_nil_and_empty",
+			val:  omitemptyAllSlicesStruct{Raw: []byte{}, F64s: []float64{}, Tail: 7},
+		},
+		{
+			name: "omitempty_populated",
+			val: omitemptyAllSlicesStruct{
+				Raw:   []byte("xyz"),
+				Bools: []bool{false},
+				F64s:  []float64{2.5},
+				F32s:  []float32{1.5},
+				I32s:  []int32{-9},
+				Uints: []uint{8},
+				U64s:  []uint64{10},
+				U32s:  []uint32{11},
+				Items: []denseNestedLeaf{{Name: "item", Score: 9, OK: true}},
+				Tail:  99,
+			},
+		},
+	}
+
+	noNullCfg := Config{NoNullSliceOrMap: true, EscapeHTML: true, ValidateString: true}.Froze()
+	noNullFastCfg := Config{NoNullSliceOrMap: true}.Froze()
+
+	for _, tc := range cases {
+		wantStd, err := json.Marshal(tc.val)
+		if err != nil {
+			t.Fatalf("%s json.Marshal failed: %v", tc.name, err)
+		}
+		gotStd, err := ConfigStd.Marshal(tc.val)
+		if err != nil {
+			t.Fatalf("%s ConfigStd.Marshal failed: %v", tc.name, err)
+		}
+		if !bytes.Equal(gotStd, wantStd) {
+			t.Fatalf("%s ConfigStd mismatch:\ngot:  %s\nwant: %s", tc.name, gotStd, wantStd)
+		}
+
+		for _, cfgItem := range []struct {
+			label string
+			api   API
+		}{
+			{"ConfigDefault", ConfigDefault},
+			{"ConfigFastest", ConfigFastest},
+			{"NoNullStd", noNullCfg},
+			{"NoNullFast", noNullFastCfg},
+		} {
+			got, err := cfgItem.api.Marshal(tc.val)
+			if err != nil {
+				t.Fatalf("%s %s.Marshal failed: %v", tc.name, cfgItem.label, err)
+			}
+			if !json.Valid(got) {
+				t.Fatalf("%s %s produced invalid JSON: %s", tc.name, cfgItem.label, got)
+			}
+			if (cfgItem.label == "NoNullStd" || cfgItem.label == "NoNullFast") && bytes.Contains(got, []byte(":null")) {
+				t.Fatalf("%s %s unexpectedly emitted null slice: %s", tc.name, cfgItem.label, got)
+			}
+		}
+	}
+
+	// NaN / Inf error checks on dense and omitempty float slices.
+	for _, bad := range []any{
+		denseAllSlicesStruct{F64s: []float64{1.0, math.NaN()}},
+		denseAllSlicesStruct{F32s: []float32{float32(math.Inf(1))}},
+		omitemptyAllSlicesStruct{F64s: []float64{math.Inf(-1)}},
+		omitemptyAllSlicesStruct{F32s: []float32{float32(math.NaN())}},
+	} {
+		if _, err := ConfigStd.Marshal(bad); err == nil {
+			t.Fatalf("expected error on NaN/Inf slice in ConfigStd for %#v", bad)
+		}
+		if _, err := ConfigFastest.Marshal(bad); err == nil {
+			t.Fatalf("expected error on NaN/Inf slice in ConfigFastest for %#v", bad)
+		}
+	}
+}
+
+// TestConfigStdMarshalRawMessageEscapeHTMLAlignment verifies that compact JSON
+// strings with ordinary UTF-8 characters and valid backslash escapes never miss
+// HTML escaping across 8-byte SWAR / tail-loop boundaries (R1 regression).
+func TestConfigStdMarshalRawMessageEscapeHTMLAlignment(t *testing.T) {
+	utf8Prefixes := []string{"é", "中", "😀"}
+	escapeSeqs := []string{`\\`, `\\\\`, `\"\\`, `\\u`, `\\u1234\\`}
+	htmlTriggers := []string{"<", ">", "&", "\u2028", "\u2029"}
+	validateCfg := Config{EscapeHTML: true, ValidateString: true}.Froze()
+
+	for _, u := range utf8Prefixes {
+		for _, esc := range escapeSeqs {
+			for _, trig := range htmlTriggers {
+				for lead := 0; lead < 10; lead++ {
+					for mid := 0; mid < 12; mid++ {
+						for tail := 0; tail < 6; tail++ {
+							body := strings.Repeat("a", lead) + u + strings.Repeat("b", mid) + esc + trig + strings.Repeat("c", tail)
+							for _, raw := range []string{
+								`"` + body + `"`,
+								`{"k":"` + body + `"}`,
+								`{"` + body + `":1}`,
+							} {
+								rm := json.RawMessage(raw)
+								want, err := json.Marshal(rm)
+								if err != nil {
+									t.Fatalf("stdlib json.Marshal(%q) failed: %v", raw, err)
+								}
+								got, err := ConfigStd.Marshal(rm)
+								if err != nil {
+									t.Fatalf("ConfigStd.Marshal(%q) failed: %v", raw, err)
+								}
+								if !bytes.Equal(got, want) {
+									t.Fatalf("ConfigStd.Marshal(%q) mismatch:\ngot:  %s\nwant: %s", raw, got, want)
+								}
+								gotVal, err := validateCfg.Marshal(rm)
+								if err != nil {
+									t.Fatalf("validateCfg.Marshal(%q) failed: %v", raw, err)
+								}
+								if !bytes.Equal(gotVal, want) {
+									t.Fatalf("validateCfg.Marshal(%q) mismatch:\ngot:  %s\nwant: %s", raw, gotVal, want)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

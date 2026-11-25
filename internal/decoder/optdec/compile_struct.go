@@ -1,12 +1,31 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
+/*
+ * Copyright 2026 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package optdec
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 
 	caching "github.com/bytedance/sonic/internal/optcaching"
 	"github.com/bytedance/sonic/internal/resolver"
-	"github.com/bytedance/sonic/internal/rt"
+	"github.com/bytedance/sonic/option"
 )
 
 const (
@@ -115,7 +134,7 @@ func (c *compiler) compileFieldStringOption(vt reflect.Type) decFunc {
 		return c.compileIntStringOption(vt)
 	case reflect.Ptr:
 		return &ptrStrDecoder{
-			typ:   rt.UnpackType(vt.Elem()),
+			typ:   vt.Elem(),
 			deref: c.compileFieldStringOption(vt.Elem()),
 		}
 	default:
@@ -131,21 +150,35 @@ func (c *compiler) compileStruct(vt reflect.Type) decFunc {
 		c.namedPtr = false
 		return c.compileStructBody(vt)
 	}
-
-	if c.depth >= c.opts.MaxInlineDepth+1 || (c.counts > 0 && vt.NumField() >= _MAX_FIELDS) {
-		return &recuriveDecoder{
-			typ: rt.UnpackType(vt),
-		}
-	} else {
-		return c.compileStructBody(vt)
+	if dec, ok := c.compiled[vt]; ok {
+		return dec
 	}
+	if c.depth > 1 && c.opts.MaxInlineDepth == option.DefaultMaxInlineDepth {
+		if val, ok := programCache.Get(vt); ok {
+			if sd, ok := val.(*structDecoder); ok {
+				c.compiled[vt] = sd
+				return sd
+			}
+		}
+	}
+
+	if c.depth >= c.opts.MaxInlineDepth+1 {
+		return c.newRecursiveDecoder(vt)
+	}
+	dec := c.compileStructBody(vt)
+	c.compiled[vt] = dec
+	return dec
 }
 
 func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 	fv := resolver.ResolveStruct(vt)
-	entries := make([]fieldEntry, 0, len(fv))
+	entries := make([]fieldEntry, len(fv))
+	decs := make([]decFunc, len(fv))
+	var wideOffsets []uintptr
+	var ptrScalarCount int
+	var ptrStrCount int
 
-	for _, f := range fv {
+	for i, f := range fv {
 		var dec decFunc
 		/* dealt with field tag options */
 		if f.Opts&resolver.F_stringize != 0 {
@@ -163,15 +196,82 @@ func (c *compiler) compileStructBody(vt reflect.Type) decFunc {
 			}
 		}
 
-		entries = append(entries, fieldEntry{
-			FieldMeta: f,
-			fieldDec:  dec,
-		})
+		if f.Path[0].Size > math.MaxUint32 {
+			entries[i] = fieldEntry{
+				name:   f.Name,
+				offset: uint32(len(wideOffsets)),
+				kind:   fieldKindWideOffset,
+			}
+			wideOffsets = append(wideOffsets, f.Path[0].Size)
+		} else {
+			fe := newFieldEntry(f.Name, f.Path[0].Size, f.Type, dec)
+			entries[i] = fe
+			switch fe.kind {
+			case fieldKindPtrString:
+				ptrStrCount++
+			case fieldKindPtrI64, fieldKindPtrInt, fieldKindPtrI32, fieldKindPtrI16, fieldKindPtrI8,
+				fieldKindPtrU64, fieldKindPtrUint, fieldKindPtrU32, fieldKindPtrU16, fieldKindPtrU8,
+				fieldKindPtrBool, fieldKindPtrF64, fieldKindPtrF32:
+				ptrScalarCount++
+			case fieldKindStruct, fieldKindPtrStruct:
+				sd := (*structDecoder)(fe.subDec)
+				ptrScalarCount += int(sd.ptrScalarHint)
+				ptrStrCount += int(sd.ptrStrHint)
+			}
+		}
+		decs[i] = dec
 	}
-	return &structDecoder{
-		fieldMap:   caching.NewFieldCache(fv),
-		fields:     entries,
-		structName: vt.Name(),
-		typ:        vt,
+	if ptrScalarCount > 16 {
+		ptrScalarCount = 16
 	}
+	if ptrStrCount > 16 {
+		ptrStrCount = 16
+	}
+	sd := &structDecoder{
+		fieldMap:      caching.NewFieldCache(fv),
+		fields:        entries,
+		fieldKeySigs:  buildFieldKeySigs(entries),
+		fieldDecs:     decs,
+		wideOffsets:   wideOffsets,
+		structName:    vt.Name(),
+		typ:           vt,
+		goType:        vt,
+		fast:          len(wideOffsets) == 0,
+		noInterface:   !typeHasInterface(vt),
+		ptrScalarHint: uint8(ptrScalarCount),
+		ptrStrHint:    uint8(ptrStrCount),
+	}
+	return sd
+}
+
+func typeHasInterface(vt reflect.Type) bool {
+	return typeHasInterfaceSeen(vt, nil)
+}
+
+func typeHasInterfaceSeen(vt reflect.Type, seen map[reflect.Type]bool) bool {
+	for vt.Kind() == reflect.Ptr {
+		vt = vt.Elem()
+	}
+	switch vt.Kind() {
+	case reflect.Interface:
+		return true
+	case reflect.Slice, reflect.Array:
+		return typeHasInterfaceSeen(vt.Elem(), seen)
+	case reflect.Map:
+		return typeHasInterfaceSeen(vt.Key(), seen) || typeHasInterfaceSeen(vt.Elem(), seen)
+	case reflect.Struct:
+		if seen == nil {
+			seen = make(map[reflect.Type]bool)
+		}
+		if seen[vt] {
+			return false
+		}
+		seen[vt] = true
+		for i := 0; i < vt.NumField(); i++ {
+			if typeHasInterfaceSeen(vt.Field(i).Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }

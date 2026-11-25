@@ -1,5 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28)
-// +build amd64,go1.17,!go1.28 arm64,go1.20,!go1.28
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
  * Copyright 2021 ByteDance Inc.
@@ -57,16 +56,14 @@ func _String(s string, replace bool) (ret string, err error) {
 
 func intoBytesUnsafe(s string, m *[]byte, replace bool) types.ParsingError {
 	pos := -1
-	slv := (*rt.GoSlice)(unsafe.Pointer(m))
-	str := (*rt.GoString)(unsafe.Pointer(&s))
-
 	flags := uint64(0)
 	if replace {
 		/* unquote as the default configuration, replace invalid unicode with \ufffd */
 		flags |= types.F_UNICODE_REPLACE
 	}
 
-	ret := native.Unquote(str.Ptr, str.Len, slv.Ptr, &pos, flags)
+	dst := (*m)[:cap(*m)]
+	ret := native.Unquote(unsafe.Pointer(unsafe.StringData(s)), len(s), unsafe.Pointer(unsafe.SliceData(dst)), &pos, flags)
 
 	/* check for errors */
 	if ret < 0 {
@@ -74,7 +71,7 @@ func intoBytesUnsafe(s string, m *[]byte, replace bool) types.ParsingError {
 	}
 
 	/* update the length */
-	slv.Len = ret
+	*m = dst[:ret]
 	runtime.KeepAlive(s)
 	return 0
 }

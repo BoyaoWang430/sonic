@@ -1,5 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28)
-// +build amd64,go1.17,!go1.28 arm64,go1.20,!go1.28
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
  * Copyright 2023 ByteDance Inc.
@@ -46,8 +45,8 @@ const (
 	// WARNING: This hurts performance A LOT, USE WITH CARE.
 	EscapeHTML Options = encoder.EscapeHTML
 
-	// CompactMarshaler indicates that the output JSON from json.Marshaler
-	// is always compact and needs no validation
+	// CompactMarshaler indicates that the encoder should validate and compact
+	// the JSON output returned by json.Marshaler / JSONAppender values.
 	CompactMarshaler Options = encoder.CompactMarshaler
 
 	// NoQuoteTextMarshaler indicates that the output text from encoding.TextMarshaler
@@ -75,6 +74,10 @@ const (
 	// EncodeNullForInfOrNan encodes Infinity or NaN float values as 'null'
 	// instead of returning an error.
 	EncodeNullForInfOrNan Options = encoder.EncodeNullForInfOrNan
+
+	// OnlyOmitNull causes `omitempty` struct fields to omit only nil pointers/containers
+	// rather than all zero values.
+	OnlyOmitNull Options = encoder.OnlyOmitNull
 )
 
 var (
@@ -97,15 +100,15 @@ var (
 	// be used.
 	HTMLEscape = encoder.HTMLEscape
 
-	// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-	// order to reduce the first-hit latency.
+	// Pretouch compiles vt's encoder type plan ahead-of-time to warm schema
+	// caches and reduce first-request latency.
 	//
 	// Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 	// a compile option to set the depth of recursive compile for the nested struct type.
 	Pretouch = encoder.Pretouch
 
-	// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-	// in order to reduce the first-hit latency.
+	// PretouchMany compiles encoder type plans for all vts ahead-of-time to warm
+	// schema caches and reduce first-request latency.
 	PretouchMany = encoder.PretouchMany
 
 	// Quote returns the JSON-quoted version of s.

@@ -1,5 +1,4 @@
-//go:build (!amd64 && !arm64) || go1.28 || !go1.17 || (arm64 && !go1.20)
-// +build !amd64,!arm64 go1.28 !go1.17 arm64,!go1.20
+//go:build sonic_compat || (!(amd64 && go1.20) && !(arm64 && go1.20) && !(riscv64 && go1.26 && riscv64.rva22u64) && !(sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -20,15 +19,13 @@
 package decoder
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"reflect"
-	"unsafe"
+	"strings"
 
 	"github.com/bytedance/sonic/internal/compat"
 	"github.com/bytedance/sonic/internal/decoder/consts"
-	"github.com/bytedance/sonic/internal/native/types"
 	"github.com/bytedance/sonic/option"
 )
 
@@ -37,11 +34,10 @@ func init() {
 }
 
 const (
-	_F_use_int64       = consts.F_use_int64
-	_F_disable_urc     = consts.F_disable_unknown
-	_F_disable_unknown = consts.F_disable_unknown
-	_F_copy_string     = consts.F_copy_string
-
+	_F_use_int64        = consts.F_use_int64
+	_F_disable_urc      = consts.F_disable_urc
+	_F_disable_unknown  = consts.F_disable_unknown
+	_F_copy_string      = consts.F_copy_string
 	_F_use_number       = consts.F_use_number
 	_F_validate_string  = consts.F_validate_string
 	_F_allow_control    = consts.F_allow_control
@@ -49,17 +45,21 @@ const (
 	_F_case_sensitive   = consts.F_case_sensitive
 )
 
-type Options uint64
+// Options shares the canonical option bitmask definitions from internal/decoder/consts.
+// Under sonic_compat (encoding/json adapter), OptionUseNumber and OptionDisableUnknown
+// map directly to json.Decoder; Sonic-specific parser flags remain distinct bits and fall
+// back to standard encoding/json behavior rather than aliasing unrelated options.
+type Options = consts.Options
 
 const (
-	OptionUseInt64         Options = 1 << _F_use_int64
-	OptionUseNumber        Options = 1 << _F_use_number
-	OptionUseUnicodeErrors Options = 1 << _F_disable_urc
-	OptionDisableUnknown   Options = 1 << _F_disable_unknown
-	OptionCopyString       Options = 1 << _F_copy_string
-	OptionValidateString   Options = 1 << _F_validate_string
-	OptionNoValidateJSON   Options = 1 << _F_no_validate_json
-	OptionCaseSensitive    Options = 1 << _F_case_sensitive
+	OptionUseInt64         Options = consts.OptionUseInt64
+	OptionUseNumber        Options = consts.OptionUseNumber
+	OptionUseUnicodeErrors Options = consts.OptionUseUnicodeErrors
+	OptionDisableUnknown   Options = consts.OptionDisableUnknown
+	OptionCopyString       Options = consts.OptionCopyString
+	OptionValidateString   Options = consts.OptionValidateString
+	OptionNoValidateJSON   Options = consts.OptionNoValidateJSON
+	OptionCaseSensitive    Options = consts.OptionCaseSensitive
 )
 
 func (self *Decoder) SetOptions(opts Options) {
@@ -92,30 +92,25 @@ func (self *Decoder) Reset(s string) {
 	// self.f = 0
 }
 
-// NOTE: api fallback do nothing
+// CheckTrailings reports an error if non-whitespace bytes remain after the
+// last decoded JSON value.
 func (self *Decoder) CheckTrailings() error {
-	pos := self.i
-	buf := self.s
-	/* skip all the trailing spaces */
-	if pos != len(buf) {
-		for pos < len(buf) && (types.SPACE_MASK&(1<<buf[pos])) != 0 {
-			pos++
-		}
-	}
-
-	/* then it must be at EOF */
-	if pos == len(buf) {
+	pos, hasTrailing := compat.FindTrailingNonSpace(self.s, self.i)
+	if !hasTrailing {
 		return nil
 	}
-
-	/* junk after JSON value */
-	return nil
+	return SyntaxError(*compat.NewTrailingSyntaxError(self.s[pos], pos))
 }
 
 // Decode parses the JSON-encoded data from current position and stores the result
 // in the value pointed to by val.
 func (self *Decoder) Decode(val interface{}) error {
-	r := bytes.NewBufferString(self.s)
+	if self.i < 0 {
+		self.i = 0
+	} else if self.i > len(self.s) {
+		self.i = len(self.s)
+	}
+	r := strings.NewReader(self.s[self.i:])
 	dec := json.NewDecoder(r)
 	if (self.f & uint64(OptionUseNumber)) != 0 {
 		dec.UseNumber()
@@ -123,7 +118,9 @@ func (self *Decoder) Decode(val interface{}) error {
 	if (self.f & uint64(OptionDisableUnknown)) != 0 {
 		dec.DisallowUnknownFields()
 	}
-	return dec.Decode(val)
+	err := dec.Decode(val)
+	self.i += int(dec.InputOffset())
+	return err
 }
 
 // UseInt64 indicates the Decoder to unmarshal an integer into an interface{} as an
@@ -165,8 +162,7 @@ func (self *Decoder) ValidateString() {
 	self.f |= 1 << _F_validate_string
 }
 
-// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-// order to reduce the first-hit latency.
+// Pretouch is a no-op on the encoding/json compatibility adapter backend.
 //
 // Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 // a compile option to set the depth of recursive compile for the nested struct type.
@@ -174,8 +170,7 @@ func Pretouch(vt reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }
 
-// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-// in order to reduce the first-hit latency.
+// PretouchMany is a no-op on the encoding/json compatibility adapter backend.
 func PretouchMany(vts []reflect.Type, opts ...option.CompileOption) error {
 	return nil
 }
@@ -194,13 +189,23 @@ type SyntaxError json.SyntaxError
 
 // Description
 func (s SyntaxError) Description() string {
-	return (*json.SyntaxError)(unsafe.Pointer(&s)).Error()
+	return (*json.SyntaxError)(&s).Error()
 }
 
 // Error
 func (s SyntaxError) Error() string {
-	return (*json.SyntaxError)(unsafe.Pointer(&s)).Error()
+	return (*json.SyntaxError)(&s).Error()
 }
 
 // MismatchTypeError represents mismatching between json and object
 type MismatchTypeError json.UnmarshalTypeError
+
+// Description returns the error description.
+func (m MismatchTypeError) Description() string {
+	return (*json.UnmarshalTypeError)(&m).Error()
+}
+
+// Error implements the error interface.
+func (m MismatchTypeError) Error() string {
+	return (*json.UnmarshalTypeError)(&m).Error()
+}

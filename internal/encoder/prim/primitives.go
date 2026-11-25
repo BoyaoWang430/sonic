@@ -29,20 +29,11 @@ import (
 )
 
 func Compact(p *[]byte, v []byte) error {
-	buf := vars.NewBuffer()
-	err := json.Compact(buf, v)
-
-	/* check for errors */
+	out, err := alg.AppendCompactedJSON(*p, v, 0)
 	if err != nil {
 		return err
 	}
-
-	/* add to result */
-	v = buf.Bytes()
-	*p = append(*p, v...)
-
-	/* return the buffer into pool */
-	vars.FreeBuffer(buf)
+	*p = out
 	return nil
 }
 
@@ -51,55 +42,121 @@ func EncodeNil(rb *[]byte) error {
 	return nil
 }
 
-// func Make_EncodeTypedPointer(computor func(*rt.GoType, ...interface{}) (interface{}, error)) func(*[]byte, *rt.GoType, *unsafe.Pointer, *vars.Stack, uint64) error {
-// 	return func(buf *[]byte, vt *rt.GoType, vp *unsafe.Pointer, sb *vars.Stack, fv uint64) error {
-// 		if vt == nil {
-// 			return EncodeNil(buf)
-// 		} else if fn, err := vars.FindOrCompile(vt, (fv&(1<<BitPointerValue)) != 0, computor); err != nil {
-// 			return err
-// 		} else if vt.Indirect() {
-// 			err := fn(buf, *vp, sb, fv)
-// 			return err
-// 		} else {
-// 			err := fn(buf, unsafe.Pointer(vp), sb, fv)
-// 			return err
-// 		}
-// 	}
-// }
+// JSONAppender is an opt-in interface for custom types that can append their
+// JSON representation directly into the destination buffer's spare capacity.
+//
+// The method is deliberately named AppendSonicJSON rather than a generic
+// AppendJSON: it takes priority over MarshalJSON, so a type from another
+// library that merely happens to have an AppendJSON method must not have its
+// output silently switched away from MarshalJSON (encoding/json semantics).
+//
+// Dispatch & allocation contract:
+//   - Priority: JSONAppender (AppendSonicJSON) > json.Marshaler (MarshalJSON) >
+//     encoding.TextMarshaler (MarshalText) across concrete fields, pointer fields,
+//     slice elements, any / non-marshaler interfaces, and static json.Marshaler
+//     interface fields (while static encoding.TextMarshaler interface fields still
+//     call MarshalText to match encoding/json).
+//     Types implementing both AppendSonicJSON and MarshalJSON should produce semantically
+//     equivalent JSON so callers and fallback paths observe identical payloads.
+//   - AppendSonicJSON is called with a zero-length slice `dst[origLen:origLen:cap(dst)]`
+//     sharing the parent encoding session's spare capacity, and must return the
+//     appended JSON value slice (`ret`) or a non-nil error.
+//   - If `ret` stays within `dst`'s spare suffix, has container nesting depth <= 64,
+//     and requires neither whitespace compaction nor HTML/UTF-8 character expansion
+//     (<, >, &, U+2028, U+2029, or invalid UTF-8), validation and post-processing
+//     complete in place with zero extra allocations (including under ConfigStd).
+//   - If whitespace compaction or character escaping/replacement must rewrite an
+//     overlapping slice, DetachIfOverlappingSpare allocates a detached copy so
+//     source bytes are never overwritten before reading.
+//   - If AppendSonicJSON returns an error or invalid JSON, the parent buffer is
+//     restored to `buf[:origLen]`.
+type JSONAppender = alg.JSONAppender
 
-func EncodeJsonMarshaler(buf *[]byte, val json.Marshaler, opt uint64) error {
-	if ret, err := val.MarshalJSON(); err != nil {
+var JSONAppenderType = reflect.TypeOf((*JSONAppender)(nil)).Elem()
+
+func EncodeJSONAppender(buf *[]byte, val JSONAppender, opt uint64) error {
+	b := *buf
+	origLen := len(b)
+	spare := b[origLen:origLen:cap(b)]
+	ret, err := val.AppendSonicJSON(spare)
+	if err != nil {
+		*buf = b[:origLen]
 		return err
-	} else {
-		if opt&(1<<alg.BitCompactMarshaler) != 0 {
-			return Compact(buf, ret)
+	}
+	if len(ret) == 0 {
+		*buf = b[:origLen]
+		return vars.Error_marshaler(ret, 0)
+	}
+	sanitize := opt & alg.SanitizeMask
+	if opt&(1<<alg.BitCompactMarshaler) != 0 {
+		out, err := alg.AppendCompactedJSON(b[:origLen], ret, sanitize)
+		if err != nil {
+			*buf = b[:origLen]
+			return err
 		}
-		if opt&(1<<alg.BitNoValidateJSONMarshaler) == 0 {
-			if ok, s := alg.Valid(ret); !ok {
-				return vars.Error_marshaler(ret, s)
-			}
-		}
-		*buf = append(*buf, ret...)
+		*buf = out
 		return nil
 	}
+	if opt&(1<<alg.BitNoValidateJSONMarshaler) == 0 {
+		if ok, s := alg.Valid(ret); !ok {
+			*buf = b[:origLen]
+			return vars.Error_marshaler(ret, s)
+		}
+	}
+	*buf = alg.AppendSanitizedBytes(b[:origLen], ret, sanitize)
+	return nil
+}
+
+func EncodeJsonMarshaler(buf *[]byte, val json.Marshaler, opt uint64) error {
+	if app, ok := val.(JSONAppender); ok {
+		return EncodeJSONAppender(buf, app, opt)
+	}
+	ret, err := val.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	sanitize := opt & alg.SanitizeMask
+	if opt&(1<<alg.BitCompactMarshaler) != 0 {
+		out, err := alg.AppendCompactedJSON(*buf, ret, sanitize)
+		if err != nil {
+			return err
+		}
+		*buf = out
+		return nil
+	}
+	if opt&(1<<alg.BitNoValidateJSONMarshaler) == 0 {
+		if ok, s := alg.Valid(ret); !ok {
+			return vars.Error_marshaler(ret, s)
+		}
+	}
+	*buf = alg.AppendSanitizedBytes(*buf, ret, sanitize)
+	return nil
 }
 
 func EncodeTextMarshaler(buf *[]byte, val encoding.TextMarshaler, opt uint64) error {
-	if ret, err := val.MarshalText(); err != nil {
+	ret, err := val.MarshalText()
+	if err != nil {
 		return err
-	} else {
-		if opt&(1<<alg.BitNoQuoteTextMarshaler) != 0 {
-			*buf = append(*buf, ret...)
-			return nil
-		}
-		*buf = alg.Quote(*buf, rt.Mem2Str(ret), false)
+	}
+	sanitize := opt & alg.SanitizeMask
+	if opt&(1<<alg.BitNoQuoteTextMarshaler) != 0 {
+		*buf = alg.AppendSanitizedBytes(*buf, ret, sanitize)
 		return nil
 	}
+	ret = alg.DetachIfOverlappingSpare(*buf, ret)
+	*buf = alg.QuoteFlags(*buf, rt.Mem2Str(ret), false, sanitize)
+	return nil
 }
 
-func IsZero(val unsafe.Pointer, fv *resolver.FieldMeta) bool {
+func IsZero(val unsafe.Pointer, fv *resolver.FieldMeta, canAddr bool) bool {
 	rv := reflect.NewAt(fv.Type, val).Elem()
-	b1 := fv.IsZero == nil && rv.IsZero()
-	b2 := fv.IsZero != nil && fv.IsZero(rv)
-	return b1 || b2
+	if fv.IsZero == nil {
+		return rv.IsZero()
+	}
+	if !canAddr && fv.PointerIsZero {
+		v2 := reflect.New(fv.Type).Elem()
+		v2.Set(rv)
+		rv = v2
+	}
+	return fv.IsZero(rv)
 }

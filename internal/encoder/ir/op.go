@@ -28,10 +28,16 @@ import (
 	"github.com/bytedance/sonic/internal/rt"
 )
 
+const (
+	_InsFlagNeedsSanitize uint64 = 1 << 48
+	_InsFlagCanAddr       uint64 = 1 << 48
+	OpSize                       = unsafe.Sizeof(Instr{})
+)
+
 type Op uint8
 
 const (
-	OP_null Op = iota + 1
+	OP_null Op = iota
 	OP_empty_arr
 	OP_empty_obj
 	OP_bool
@@ -45,6 +51,8 @@ const (
 	OP_u64
 	OP_f32
 	OP_f64
+	OP_f32_slice
+	OP_f64_slice
 	OP_str
 	OP_bin
 	OP_quote
@@ -60,95 +68,130 @@ const (
 	OP_drop
 	OP_drop_2
 	OP_recurse
+	OP_map_iter
+	OP_map_stop
+	OP_map_value_next
+	OP_map_string_any
+	OP_marshal
+	OP_marshal_p
+	OP_marshal_text
+	OP_marshal_text_p
+	OP_marshal_text_key
+	OP_marshal_append
+	OP_marshal_append_p
+	OP_cond_set
+	OP_struct_fields
+	OP_struct_begin
+	OP_struct_end
+	OP_slice_eface
+	OP_slice_i64
+	OP_slice_i32
+	OP_slice_u64
+	OP_slice_u32
+	OP_slice_bool
+	OP_slice_str
+	OP_slice_struct
+	OP_slice_ptr_struct
+	OP_ptr_struct
+	OP_unsupported
+
+	// TheFollowing belongs to Branch Op Basic Block
+	OP_goto
+	OP_map_check_key
+	OP_map_write_key
+	OP_slice_begin
+	OP_slice_next
+	OP_cond_testc
 	OP_is_nil
 	OP_is_nil_p1
 	OP_is_zero_1
 	OP_is_zero_2
 	OP_is_zero_4
 	OP_is_zero_8
+	OP_is_zero_f32
+	OP_is_zero_f64
 	OP_is_zero_map
-	OP_goto
-	OP_map_iter
-	OP_map_stop
-	OP_map_check_key
-	OP_map_write_key
-	OP_map_value_next
-	OP_slice_len
-	OP_slice_next
-	OP_marshal
-	OP_marshal_p
-	OP_marshal_text
-	OP_marshal_text_p
-	OP_cond_set
-	OP_cond_testc
-	OP_unsupported
 	OP_is_zero
 )
 
-const (
-	_INT_SIZE = 32 << (^uint(0) >> 63)
-	_PTR_SIZE = 32 << (^uintptr(0) >> 63)
-	_PTR_BYTE = unsafe.Sizeof(uintptr(0))
-)
-
-const OpSize = unsafe.Sizeof(NewInsOp(0))
-
-var OpNames = [256]string{
-	OP_null:           "null",
-	OP_empty_arr:      "empty_arr",
-	OP_empty_obj:      "empty_obj",
-	OP_bool:           "bool",
-	OP_i8:             "i8",
-	OP_i16:            "i16",
-	OP_i32:            "i32",
-	OP_i64:            "i64",
-	OP_u8:             "u8",
-	OP_u16:            "u16",
-	OP_u32:            "u32",
-	OP_u64:            "u64",
-	OP_f32:            "f32",
-	OP_f64:            "f64",
-	OP_str:            "str",
-	OP_bin:            "bin",
-	OP_quote:          "quote",
-	OP_number:         "number",
-	OP_eface:          "eface",
-	OP_iface:          "iface",
-	OP_byte:           "byte",
-	OP_text:           "text",
-	OP_deref:          "deref",
-	OP_index:          "index",
-	OP_load:           "load",
-	OP_save:           "save",
-	OP_drop:           "drop",
-	OP_drop_2:         "drop_2",
-	OP_recurse:        "recurse",
-	OP_is_nil:         "is_nil",
-	OP_is_nil_p1:      "is_nil_p1",
-	OP_is_zero_1:      "is_zero_1",
-	OP_is_zero_2:      "is_zero_2",
-	OP_is_zero_4:      "is_zero_4",
-	OP_is_zero_8:      "is_zero_8",
-	OP_is_zero_map:    "is_zero_map",
-	OP_goto:           "goto",
-	OP_map_iter:       "map_iter",
-	OP_map_stop:       "map_stop",
-	OP_map_check_key:  "map_check_key",
-	OP_map_write_key:  "map_write_key",
-	OP_map_value_next: "map_value_next",
-	OP_slice_len:      "slice_len",
-	OP_slice_next:     "slice_next",
-	OP_marshal:        "marshal",
-	OP_marshal_p:      "marshal_p",
-	OP_marshal_text:   "marshal_text",
-	OP_marshal_text_p: "marshal_text_p",
-	OP_cond_set:       "cond_set",
-	OP_cond_testc:     "cond_testc",
-	OP_unsupported:    "unsupported type",
+var _OpNames = [256]string{
+	OP_null:             "null",
+	OP_empty_arr:        "empty_arr",
+	OP_empty_obj:        "empty_obj",
+	OP_bool:             "bool",
+	OP_i8:               "i8",
+	OP_i16:              "i16",
+	OP_i32:              "i32",
+	OP_i64:              "i64",
+	OP_u8:               "u8",
+	OP_u16:              "u16",
+	OP_u32:              "u32",
+	OP_u64:              "u64",
+	OP_f32:              "f32",
+	OP_f64:              "f64",
+	OP_f32_slice:        "f32_slice",
+	OP_f64_slice:        "f64_slice",
+	OP_str:              "str",
+	OP_bin:              "bin",
+	OP_quote:            "quote",
+	OP_number:           "number",
+	OP_eface:            "eface",
+	OP_iface:            "iface",
+	OP_byte:             "byte",
+	OP_text:             "text",
+	OP_deref:            "deref",
+	OP_index:            "index",
+	OP_load:             "load",
+	OP_save:             "save",
+	OP_drop:             "drop",
+	OP_drop_2:           "drop_2",
+	OP_recurse:          "recurse",
+	OP_is_nil:           "is_nil",
+	OP_is_nil_p1:        "is_nil_p1",
+	OP_is_zero_1:        "is_zero_1",
+	OP_is_zero_2:        "is_zero_2",
+	OP_is_zero_4:        "is_zero_4",
+	OP_is_zero_8:        "is_zero_8",
+	OP_is_zero_f32:      "is_zero_f32",
+	OP_is_zero_f64:      "is_zero_f64",
+	OP_is_zero_map:      "is_zero_map",
+	OP_is_zero:          "is_zero",
+	OP_goto:             "goto",
+	OP_map_iter:         "map_iter",
+	OP_map_stop:         "map_stop",
+	OP_map_check_key:    "map_check_key",
+	OP_map_write_key:    "map_write_key",
+	OP_map_value_next:   "map_value_next",
+	OP_map_string_any:   "map_string_any",
+	OP_slice_begin:      "slice_begin",
+	OP_slice_next:       "slice_next",
+	OP_marshal:          "marshal",
+	OP_marshal_p:        "marshal_p",
+	OP_marshal_text:     "marshal_text",
+	OP_marshal_text_p:   "marshal_text_p",
+	OP_marshal_text_key: "marshal_text_key",
+	OP_marshal_append:   "marshal_append",
+	OP_marshal_append_p: "marshal_append_p",
+	OP_cond_set:         "cond_set",
+	OP_cond_testc:       "cond_testc",
+	OP_struct_fields:    "struct_fields",
+	OP_struct_begin:     "struct_begin",
+	OP_struct_end:       "struct_end",
+	OP_slice_eface:      "slice_eface",
+	OP_slice_i64:        "slice_i64",
+	OP_slice_i32:        "slice_i32",
+	OP_slice_u64:        "slice_u64",
+	OP_slice_u32:        "slice_u32",
+	OP_slice_bool:       "slice_bool",
+	OP_slice_str:        "slice_str",
+	OP_slice_struct:     "slice_struct",
+	OP_slice_ptr_struct: "slice_ptr_struct",
+	OP_ptr_struct:       "ptr_struct",
+	OP_unsupported:      "unsupported",
 }
 
 func (self Op) String() string {
-	if ret := OpNames[self]; ret != "" {
+	if ret := _OpNames[self]; ret != "" {
 		return ret
 	} else {
 		return "<invalid>"
@@ -156,10 +199,10 @@ func (self Op) String() string {
 }
 
 func OP_int() Op {
-	switch _INT_SIZE {
-	case 32:
+	switch unsafe.Sizeof(int(0)) {
+	case 4:
 		return OP_i32
-	case 64:
+	case 8:
 		return OP_i64
 	default:
 		panic("unsupported int size")
@@ -167,10 +210,10 @@ func OP_int() Op {
 }
 
 func OP_uint() Op {
-	switch _INT_SIZE {
-	case 32:
+	switch unsafe.Sizeof(uint(0)) {
+	case 4:
 		return OP_u32
-	case 64:
+	case 8:
 		return OP_u64
 	default:
 		panic("unsupported uint size")
@@ -178,296 +221,508 @@ func OP_uint() Op {
 }
 
 func OP_uintptr() Op {
-	switch _PTR_SIZE {
-	case 32:
+	switch unsafe.Sizeof(uintptr(0)) {
+	case 4:
 		return OP_u32
-	case 64:
+	case 8:
 		return OP_u64
 	default:
-		panic("unsupported pointer size")
+		panic("unsupported uintptr size")
 	}
 }
 
 func OP_is_zero_ints() Op {
-	switch _INT_SIZE {
-	case 32:
+	switch unsafe.Sizeof(int(0)) {
+	case 4:
 		return OP_is_zero_4
-	case 64:
+	case 8:
 		return OP_is_zero_8
 	default:
-		panic("unsupported integer size")
+		panic("unsupported int size")
 	}
 }
 
 type Instr struct {
-	o Op
-	u int            // union {op: 8, _: 8, vi: 48}, vi maybe int or len(str)
-	p unsafe.Pointer // maybe GoString.Ptr, or *GoType
-}
-
-func NewInsOp(op Op) Instr {
-	return Instr{o: op}
-}
-
-func NewInsVi(op Op, vi int) Instr {
-	return Instr{o: op, u: vi}
-}
-
-func NewInsVs(op Op, vs string) Instr {
-	return Instr{
-		o: op,
-		u: len(vs),
-		p: (*rt.GoString)(unsafe.Pointer(&vs)).Ptr,
-	}
-}
-
-func NewInsVt(op Op, vt reflect.Type) Instr {
-	return Instr{
-		o: op,
-		p: unsafe.Pointer(rt.UnpackType(vt)),
-	}
-}
-
-type typAndTab struct {
-	vt   *rt.GoType
-	itab *rt.GoItab
-}
-
-type typAndField struct {
+	u  uint64         // union {op: 8, _: 7, pv: 1, vi: 48}
+	p  unsafe.Pointer // string data *byte, *resolver.FieldMeta, or *StructFieldSpec
 	vt reflect.Type
-	fv *resolver.FieldMeta
 }
 
-func NewInsVtab(op Op, vt reflect.Type, itab *rt.GoItab) Instr {
+func packOp(op Op) uint64 {
+	return uint64(op) << 56
+}
+
+func newInsOp(op Op) Instr {
+	return Instr{u: packOp(op)}
+}
+
+func newInsVi(op Op, vi int) Instr {
+	return Instr{u: packOp(op) | rt.PackInt(vi)}
+}
+
+func literalNeedsSanitize(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == '<' || c == '>' || c == '&' || c >= 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
+func newInsVs(op Op, vs string) Instr {
+	var ptr unsafe.Pointer
+	if len(vs) > 0 {
+		ptr = unsafe.Pointer(unsafe.StringData(vs))
+	}
+	u := packOp(op) | rt.PackInt(len(vs))
+	if literalNeedsSanitize(vs) {
+		u |= _InsFlagNeedsSanitize
+	}
 	return Instr{
-		o: op,
-		p: unsafe.Pointer(&typAndTab{
-			vt:   rt.UnpackType(vt),
-			itab: itab,
-		}),
+		u: u,
+		p: ptr,
 	}
 }
 
-func NewInsField(op Op, fv *resolver.FieldMeta) Instr {
+func newInsVt(op Op, vt reflect.Type) Instr {
+	u := packOp(op)
+	if op == OP_slice_next && vt != nil {
+		if sz := vt.Size(); sz > 0 && sz < 256 {
+			u |= uint64(sz) << 48
+		}
+	}
 	return Instr{
-		o: op,
+		u:  u,
+		vt: vt,
+	}
+}
+
+const (
+	SpecFlagOmitEmpty uint8 = 1 << iota
+	SpecFlagIsPtr
+	SpecFlagOmitNil
+)
+
+type StructFieldSpec struct {
+	Ptr         unsafe.Pointer // *byte key data, or *StructSliceSpec when Kind == OP_slice_struct
+	Offset      uintptr
+	KeyLen      uint8
+	NoCommaSkip uint8
+	Kind        Op
+	Flags       uint8
+	_           [4]byte
+}
+
+// Keep StructFieldSpec compact (24 bytes on 64-bit, 16 bytes on 32-bit) with a single pointer word for L1 & GC scan density.
+const expectedStructFieldSpecSize = 2*unsafe.Sizeof(uintptr(0)) + 8
+
+var (
+	_ [expectedStructFieldSpecSize - unsafe.Sizeof(StructFieldSpec{})]byte
+	_ [unsafe.Sizeof(StructFieldSpec{}) - expectedStructFieldSpecSize]byte
+)
+
+type StructSliceSpec struct {
+	KeyPtr       *byte
+	SliceType    reflect.Type
+	ElemSize     uintptr
+	MinElemBytes int
+	Specs        []StructFieldSpec
+	DenseSpecs   []StructFieldSpec
+	IsDense      bool
+}
+
+const MinPtrSliceElemBytes = 3
+
+// MinValueSliceElemBytes returns a compile-time provable lower bound on the
+// JSON bytes emitted per element of a value struct slice ([]T), including its
+// object braces and element separator (or closing bracket on the final element).
+// For non-dense structs, only unconditional fields (without omitempty/omitzero/omitnil)
+// outside optional subtrees contribute to the bound, subtracting 1 byte once in
+// case an unconditional field becomes the first emitted field and omits its
+// leading comma. It never inspects runtime values or executes user methods.
+func MinValueSliceElemBytes(specs, denseSpecs []StructFieldSpec, isDense bool) int {
+	if isDense {
+		n := 3 // "{", "}" and "," (or "]" on last element)
+		for i := range denseSpecs {
+			s := &denseSpecs[i]
+			switch s.Kind {
+			case OP_struct_end:
+				n += 1
+			case OP_struct_begin:
+				n += int(s.KeyLen)
+			case OP_quote:
+				n += int(s.KeyLen) + 3 // quoted number/bool is at least `"0"`
+			case OP_str, OP_slice_i64, OP_slice_i32, OP_slice_u64, OP_slice_u32, OP_slice_bool, OP_slice_str, OP_slice_struct, OP_slice_ptr_struct, OP_ptr_struct, OP_bin:
+				n += int(s.KeyLen) + 2
+			case OP_bool:
+				n += int(s.KeyLen) + 4
+			default:
+				n += int(s.KeyLen) + 1
+			}
+		}
+		return n
+	}
+
+	n := 3 // "{", "}" and "," (or "]")
+	skipDepth := 0
+	for i := range specs {
+		s := &specs[i]
+		if skipDepth > 0 {
+			if s.Kind == OP_struct_begin {
+				skipDepth++
+			} else if s.Kind == OP_struct_end {
+				skipDepth--
+			}
+			continue
+		}
+		if s.Flags&(SpecFlagOmitEmpty|SpecFlagOmitNil) != 0 {
+			if s.Kind == OP_struct_begin {
+				skipDepth = 1
+			}
+			continue
+		}
+		kl := int(s.KeyLen) - int(s.NoCommaSkip)
+		if kl < 0 {
+			kl = 0
+		}
+		switch s.Kind {
+		case OP_struct_end:
+			n += 1
+		case OP_struct_begin:
+			n += kl
+		case OP_quote:
+			n += kl + 3 // min(`null`=4, `"0"`=3)
+		case OP_str, OP_slice_i64, OP_slice_i32, OP_slice_u64, OP_slice_u32, OP_slice_bool, OP_slice_str, OP_slice_struct, OP_slice_ptr_struct, OP_ptr_struct, OP_bin:
+			n += kl + 2 // min(`null`=4, `""`/`[]`/`{}`=2)
+		case OP_bool:
+			n += kl + 4 // min(`null`=4, `true`=4, `false`=5)
+		default:
+			n += kl + 1 // min(`null`=4, `0`=1)
+		}
+	}
+	return n
+}
+
+type StructPtrSpec struct {
+	KeyPtr     *byte
+	Specs      []StructFieldSpec
+	DenseSpecs []StructFieldSpec
+	IsDense    bool
+}
+
+// BuildDenseSpecs returns a copy of specs with leading-comma skips statically resolved
+// when every spec in specs is unconditional and non-pointer (Flags == 0).
+func BuildDenseSpecs(specs []StructFieldSpec) ([]StructFieldSpec, bool) {
+	if len(specs) == 0 {
+		return nil, true
+	}
+	for i := range specs {
+		if specs[i].Flags != 0 {
+			return nil, false
+		}
+	}
+	out := make([]StructFieldSpec, len(specs))
+	copy(out, specs)
+	for i := range out {
+		s := &out[i]
+		if s.Kind == OP_struct_end {
+			continue
+		}
+		if s.Kind == OP_slice_struct || s.Kind == OP_slice_ptr_struct {
+			orig := (*StructSliceSpec)(s.Ptr)
+			if s.NoCommaSkip != 0 {
+				cp := *orig
+				cp.KeyPtr = (*byte)(unsafe.Add(unsafe.Pointer(orig.KeyPtr), s.NoCommaSkip))
+				s.Ptr = unsafe.Pointer(&cp)
+				s.KeyLen -= s.NoCommaSkip
+				s.NoCommaSkip = 0
+			}
+			continue
+		}
+		if s.Kind == OP_ptr_struct {
+			orig := (*StructPtrSpec)(s.Ptr)
+			if s.NoCommaSkip != 0 {
+				cp := *orig
+				cp.KeyPtr = (*byte)(unsafe.Add(unsafe.Pointer(orig.KeyPtr), s.NoCommaSkip))
+				s.Ptr = unsafe.Pointer(&cp)
+				s.KeyLen -= s.NoCommaSkip
+				s.NoCommaSkip = 0
+			}
+			continue
+		}
+		if s.NoCommaSkip != 0 {
+			s.Ptr = unsafe.Add(s.Ptr, s.NoCommaSkip)
+			s.KeyLen -= s.NoCommaSkip
+			s.NoCommaSkip = 0
+		}
+	}
+	return out, true
+}
+
+// FirstKey returns the key pointer and length without its leading comma when NoCommaSkip == 1.
+func (s *StructFieldSpec) FirstKey() (*byte, int) {
+	skip := s.NoCommaSkip
+	return (*byte)(unsafe.Add(s.Ptr, skip)), int(s.KeyLen - skip)
+}
+
+// FirstSliceKey returns keyPtr and length without its leading comma when NoCommaSkip == 1.
+func (s *StructFieldSpec) FirstSliceKey(keyPtr *byte) (*byte, int) {
+	skip := s.NoCommaSkip
+	return (*byte)(unsafe.Add(unsafe.Pointer(keyPtr), skip)), int(s.KeyLen - skip)
+}
+
+func newInsFields(specs []StructFieldSpec) Instr {
+	cp := make([]StructFieldSpec, len(specs))
+	copy(cp, specs)
+	var ptr unsafe.Pointer
+	if len(cp) > 0 {
+		ptr = unsafe.Pointer(unsafe.SliceData(cp))
+	}
+	return Instr{
+		u: packOp(OP_struct_fields) | rt.PackInt(len(cp)),
+		p: ptr,
+	}
+}
+
+func newInsVp(op Op, vt reflect.Type, pv bool) Instr {
+	ins := newInsVt(op, vt)
+	if pv {
+		ins.u |= 1
+	}
+	return ins
+}
+
+func newInsVField(op Op, fv *resolver.FieldMeta) Instr {
+	return Instr{
+		u: packOp(op),
 		p: unsafe.Pointer(fv),
 	}
 }
 
-func NewInsVp(op Op, vt reflect.Type, pv bool) Instr {
-	i := 0
-	if pv {
-		i = 1
+func newInsVFieldAddr(op Op, fv *resolver.FieldMeta, canAddr bool) Instr {
+	u := packOp(op)
+	if canAddr {
+		u |= _InsFlagCanAddr
 	}
 	return Instr{
-		o: op,
-		u: i,
-		p: unsafe.Pointer(rt.UnpackType(vt)),
+		u: u,
+		p: unsafe.Pointer(fv),
 	}
 }
 
 func (self Instr) Op() Op {
-	return Op(self.o)
+	return Op(self.u >> 56)
 }
 
 func (self Instr) Vi() int {
-	return self.u
-}
-
-func (self Instr) Vf() uint8 {
-	return (*rt.GoType)(self.p).KindFlags
+	return rt.UnpackInt(self.u)
 }
 
 func (self Instr) VField() *resolver.FieldMeta {
 	return (*resolver.FieldMeta)(self.p)
 }
 
-func (self Instr) Vs() (v string) {
-	(*rt.GoString)(unsafe.Pointer(&v)).Ptr = self.p
-	(*rt.GoString)(unsafe.Pointer(&v)).Len = self.Vi()
-	return
+func (self Instr) CanAddr() bool {
+	return self.u&_InsFlagCanAddr != 0
+}
+
+func (self Instr) VFields() []StructFieldSpec {
+	n := self.Vi()
+	if n == 0 {
+		return nil
+	}
+	return unsafe.Slice((*StructFieldSpec)(self.p), n)
+}
+
+func (self Instr) Vs() string {
+	n := self.Vi()
+	if n == 0 {
+		return ""
+	}
+	return unsafe.String((*byte)(self.p), n)
 }
 
 func (self Instr) Vk() reflect.Kind {
-	return (*rt.GoType)(self.p).Kind()
-}
-
-func (self Instr) GoType() *rt.GoType {
-	return (*rt.GoType)(self.p)
+	return self.vt.Kind()
 }
 
 func (self Instr) Vt() reflect.Type {
-	return (*rt.GoType)(self.p).Pack()
+	return self.vt
 }
 
-func (self Instr) Vr() *rt.GoType {
-	return (*rt.GoType)(self.p)
+func (self Instr) Vr() reflect.Type {
+	return self.vt
 }
 
 func (self Instr) Vp() (vt reflect.Type, pv bool) {
-	return (*rt.GoType)(self.p).Pack(), self.u == 1
+	return self.vt, (self.u & 1) == 1
 }
 
-func (self Instr) Vtab() (vt *rt.GoType, itab *rt.GoItab) {
-	tt := (*typAndTab)(self.p)
-	return tt.vt, tt.itab
-}
-
-func (self Instr) Vp2() (vt *rt.GoType, pv bool) {
-	return (*rt.GoType)(self.p), self.u == 1
-}
-
-func (self Instr) I64() int64 {
-	return int64(self.Vi())
+func (self Instr) Vp2() (vt reflect.Type, pv bool) {
+	return self.vt, (self.u & 1) == 1
 }
 
 func (self Instr) Byte() byte {
 	return byte(self.Vi())
 }
 
-func (self Instr) Vlen() int {
-	return int((*rt.GoType)(self.p).Size)
+func (self Instr) I64() int64 {
+	return int64(self.Vi())
 }
 
-func (self Instr) isBranch() bool {
-	switch self.Op() {
-	case OP_goto:
-		fallthrough
-	case OP_is_nil:
-		fallthrough
-	case OP_is_nil_p1:
-		fallthrough
-	case OP_is_zero_1:
-		fallthrough
-	case OP_is_zero_2:
-		fallthrough
-	case OP_is_zero_4:
-		fallthrough
-	case OP_is_zero_8:
-		fallthrough
-	case OP_map_check_key:
-		fallthrough
-	case OP_map_write_key:
-		fallthrough
-	case OP_slice_next:
-		fallthrough
-	case OP_cond_testc:
-		return true
-	default:
-		return false
+func (self Instr) NeedsSanitize() bool {
+	return self.u&_InsFlagNeedsSanitize != 0
+}
+
+func (self Instr) Vlen() int {
+	if sz := int(uint8(self.u >> 48)); sz != 0 {
+		return sz
 	}
+	return int(self.vt.Size())
+}
+
+func (self Instr) IsBranch() bool {
+	op := self.Op()
+	return op >= OP_goto && op <= OP_is_zero
 }
 
 func (self Instr) Disassemble() string {
 	switch self.Op() {
 	case OP_byte:
-		return fmt.Sprintf("%-18s%s", self.Op().String(), strconv.QuoteRune(rune(self.Vi())))
+		return fmt.Sprintf("%-18s%s", self.Op(), strconv.QuoteRune(rune(self.Vi())))
 	case OP_text:
-		return fmt.Sprintf("%-18s%s", self.Op().String(), strconv.Quote(self.Vs()))
+		return fmt.Sprintf("%-18s%q", self.Op(), self.Vs())
 	case OP_index:
-		return fmt.Sprintf("%-18s%d", self.Op().String(), self.Vi())
+		return fmt.Sprintf("%-18s%d bytes", self.Op(), self.Vi())
+	case OP_is_nil,
+		OP_is_nil_p1,
+		OP_is_zero_1,
+		OP_is_zero_2,
+		OP_is_zero_4,
+		OP_is_zero_8,
+		OP_is_zero_f32,
+		OP_is_zero_f64,
+		OP_is_zero_map,
+		OP_goto,
+		OP_map_check_key,
+		OP_map_write_key,
+		OP_cond_testc:
+		return fmt.Sprintf("%-18sL_%d", self.Op(), self.Vi())
+	case OP_is_zero:
+		return fmt.Sprintf("%-18s%s, L_%d", self.Op(), self.VField().Type.String(), self.Vi())
+	case OP_slice_begin, OP_slice_next:
+		return fmt.Sprintf("%-18sL_%d, %s", self.Op(), self.Vi(), self.Vt())
+	case OP_marshal,
+		OP_marshal_p,
+		OP_marshal_text,
+		OP_marshal_text_p,
+		OP_marshal_text_key,
+		OP_marshal_append,
+		OP_marshal_append_p,
+		OP_map_iter,
+		OP_iface,
+		OP_unsupported:
+		return fmt.Sprintf("%-18s%s", self.Op(), self.Vt())
 	case OP_recurse:
-		fallthrough
-	case OP_map_iter:
-		return fmt.Sprintf("%-18s%s", self.Op().String(), self.Vt())
-	case OP_marshal:
-		fallthrough
-	case OP_marshal_p:
-		fallthrough
-	case OP_marshal_text:
-		fallthrough
-	case OP_marshal_text_p:
-		vt, _ := self.Vtab()
-		return fmt.Sprintf("%-18s%s", self.Op().String(), vt.Pack())
-	case OP_goto:
-		fallthrough
-	case OP_is_nil:
-		fallthrough
-	case OP_is_nil_p1:
-		fallthrough
-	case OP_is_zero_1:
-		fallthrough
-	case OP_is_zero_2:
-		fallthrough
-	case OP_is_zero_4:
-		fallthrough
-	case OP_is_zero_8:
-		fallthrough
-	case OP_is_zero_map:
-		fallthrough
-	case OP_cond_testc:
-		fallthrough
-	case OP_map_check_key:
-		fallthrough
-	case OP_map_write_key:
-		return fmt.Sprintf("%-18sL_%d", self.Op().String(), self.Vi())
-	case OP_slice_next:
-		return fmt.Sprintf("%-18sL_%d, %s", self.Op().String(), self.Vi(), self.Vt())
+		vt, pv := self.Vp()
+		return fmt.Sprintf("%-18s%s, pv=%v", self.Op(), vt, pv)
 	default:
-		return fmt.Sprintf("%#v", self)
+		return self.Op().String()
 	}
 }
 
-type (
-	Program []Instr
+type Program []Instr
+
+type RootKind uint8
+
+const (
+	RootGeneric RootKind = iota
+	RootPureStruct
+	RootDirectPtr
+	RootPureSlice
+	RootPurePtrSlice
+	RootBuiltinMap
 )
+
+// RootSpec carries explicit compile-time execution metadata for top-level values
+// so the VM never reverse-engineers compiled instruction sequences.
+type RootSpec struct {
+	Kind           RootKind
+	Addressable    bool
+	HasPureSpecs   bool
+	HasDenseSpecs  bool
+	BodyStartPC    int
+	BodyEndPC      int
+	ElemSize       uintptr
+	MinElemBytes   int
+	BuiltinMapKind int
+	PureSpecs      []StructFieldSpec
+	DenseSpecs     []StructFieldSpec
+}
+
+// CompiledEncoder pairs a compiled VM Program with its explicit RootSpec.
+type CompiledEncoder struct {
+	Program Program
+	Root    RootSpec
+}
 
 func (self Program) PC() int {
 	return len(self)
 }
 
-func (self Program) Tag(n int) {
-	if n >= vars.MaxStack {
-		panic("type nesting too deep")
-	}
+func (self *Program) Add(op Op) {
+	*self = append(*self, newInsOp(op))
 }
 
-func (self Program) Pin(i int) {
-	v := &self[i]
-	v.u = self.PC()
+func (self *Program) Key(op Op) {
+	*self = append(*self, newInsVi(OP_byte, '"'), newInsOp(op), newInsVi(OP_byte, '"'))
 }
 
-func (self Program) Rel(v []int) {
+func (self *Program) Int(op Op, vi int) {
+	*self = append(*self, newInsVi(op, vi))
+}
+
+func (self *Program) Str(op Op, vs string) {
+	*self = append(*self, newInsVs(op, vs))
+}
+
+func (self *Program) Rtt(op Op, vt reflect.Type) {
+	*self = append(*self, newInsVt(op, vt))
+}
+
+func (self *Program) Fields(specs []StructFieldSpec) {
+	*self = append(*self, newInsFields(specs))
+}
+
+func (self *Program) VField(op Op, fv *resolver.FieldMeta) {
+	*self = append(*self, newInsVField(op, fv))
+}
+
+func (self *Program) VFieldAddr(op Op, fv *resolver.FieldMeta, canAddr bool) {
+	*self = append(*self, newInsVFieldAddr(op, fv, canAddr))
+}
+
+func (self *Program) Vp(op Op, vt reflect.Type, pv bool) {
+	*self = append(*self, newInsVp(op, vt, pv))
+}
+
+func (self *Program) Pin(i int) {
+	v := &(*self)[i]
+	v.u &= 0xffff000000000000
+	v.u |= rt.PackInt(self.PC())
+}
+
+func (self *Program) Rel(v []int) {
 	for _, i := range v {
 		self.Pin(i)
 	}
 }
 
-func (self *Program) Add(op Op) {
-	*self = append(*self, NewInsOp(op))
-}
-
-func (self *Program) Key(op Op) {
-	*self = append(*self,
-		NewInsVi(OP_byte, '"'),
-		NewInsOp(op),
-		NewInsVi(OP_byte, '"'),
-	)
-}
-
-func (self *Program) Int(op Op, vi int) {
-	*self = append(*self, NewInsVi(op, vi))
-}
-
-func (self *Program) Str(op Op, vs string) {
-	*self = append(*self, NewInsVs(op, vs))
-}
-
-func (self *Program) Rtt(op Op, vt reflect.Type) {
-	*self = append(*self, NewInsVt(op, vt))
-}
-
-func (self *Program) Vp(op Op, vt reflect.Type, pv bool) {
-	*self = append(*self, NewInsVp(op, vt, pv))
-}
-
-func (self *Program) Vtab(op Op, vt reflect.Type, itab *rt.GoItab) {
-	*self = append(*self, NewInsVtab(op, vt, itab))
-}
-
-func (self *Program) VField(op Op, fv *resolver.FieldMeta) {
-	*self = append(*self, NewInsField(op, fv))
+func (self *Program) Tag(n int) {
+	if n >= vars.MaxStack {
+		panic(vars.ERR_too_deep)
+	}
 }
 
 func (self Program) Disassemble() string {
@@ -475,27 +730,26 @@ func (self Program) Disassemble() string {
 	tab := make([]bool, nb+1)
 	ret := make([]string, 0, nb+1)
 
-	/* prescan to get all the labels */
+	/*Mark the jump targets */
 	for _, ins := range self {
-		if ins.isBranch() {
+		if ins.IsBranch() {
 			tab[ins.Vi()] = true
 		}
 	}
 
-	/* disassemble each instruction */
+	/* Disassemble each instruction */
 	for i, ins := range self {
-		if !tab[i] {
-			ret = append(ret, "\t"+ins.Disassemble())
-		} else {
-			ret = append(ret, fmt.Sprintf("L_%d:\n\t%s", i, ins.Disassemble()))
+		if tab[i] {
+			ret = append(ret, fmt.Sprintf("L_%d:", i))
 		}
+		ret = append(ret, "\t"+ins.Disassemble())
 	}
 
-	/* add the last label, if needed */
+	/* Add an end label if needed */
 	if tab[nb] {
 		ret = append(ret, fmt.Sprintf("L_%d:", nb))
 	}
 
-	/* add an "end" indicator, and join all the strings */
-	return strings.Join(append(ret, "\tend"), "\n")
+	/* Join all lines with LF */
+	return strings.Join(ret, "\n")
 }

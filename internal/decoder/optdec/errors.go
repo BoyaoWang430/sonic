@@ -1,3 +1,5 @@
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
+
 /*
  * Copyright 2021 ByteDance Inc.
  *
@@ -21,34 +23,32 @@ import (
 	"errors"
 	"reflect"
 	"strconv"
-
-	"github.com/bytedance/sonic/internal/rt"
 )
 
-/** JIT Error Helpers **/
+/** Decoder Error Helpers **/
 
 var stackOverflow = &json.UnsupportedValueError{
 	Str:   "Value nesting too deep",
 	Value: reflect.ValueOf("..."),
 }
 
-func error_type(vt *rt.GoType) error {
-	return &json.UnmarshalTypeError{Type: vt.Pack()}
+func error_type(vt reflect.Type) error {
+	return &json.UnmarshalTypeError{Type: vt}
 }
 
 func error_mismatch(node Node, ctx *context, typ reflect.Type) error {
 	return MismatchTypeError{
 		Pos:  node.Position(),
-		Src:  ctx.Parser.Json,
+		Src:  ctx.Doc.Json,
 		Type: typ,
 	}
 }
 
-func newUnmatched(pos int, vt *rt.GoType) error {
+func newUnmatched(pos int, vt reflect.Type) error {
 	return MismatchTypeError{
 		Pos:  pos,
 		Src:  "",
-		Type: vt.Pack(),
+		Type: vt,
 	}
 }
 
@@ -71,8 +71,8 @@ func error_syntax(pos int, src string, msg string) error {
 	}
 }
 
-func error_unsuppoted(typ *rt.GoType) error {
+func error_unsuppoted(typ reflect.Type) error {
 	return &json.UnsupportedTypeError{
-		Type: typ.Pack(),
+		Type: typ,
 	}
 }

@@ -1,5 +1,4 @@
-//go:build (amd64 && go1.17 && !go1.28) || (arm64 && go1.20 && !go1.28)
-// +build amd64,go1.17,!go1.28 arm64,go1.20,!go1.28
+//go:build !sonic_compat && ((amd64 && go1.20) || (arm64 && go1.20) || (riscv64 && go1.26 && riscv64.rva22u64) || (sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /*
 * Copyright 2023 ByteDance Inc.
@@ -58,15 +57,15 @@ var (
 	// NewStreamDecoder returns a new decoder that reads from r.
 	NewStreamDecoder = api.NewStreamDecoder
 
-	// Pretouch compiles vt ahead-of-time to avoid JIT compilation on-the-fly, in
-	// order to reduce the first-hit latency.
+	// Pretouch compiles vt's decoder type plan ahead-of-time to warm schema
+	// caches and reduce first-request latency.
 	//
 	// Opts are the compile options, for example, "option.WithCompileRecursiveDepth" is
 	// a compile option to set the depth of recursive compile for the nested struct type.
 	Pretouch = api.Pretouch
 
-	// PretouchMany compiles all vts ahead-of-time to avoid JIT compilation on-the-fly,
-	// in order to reduce the first-hit latency.
+	// PretouchMany compiles decoder type plans for all vts ahead-of-time to warm
+	// schema caches and reduce first-request latency.
 	PretouchMany = api.PretouchMany
 
 	// Skip skips only one json value, and returns first non-blank character position and its ending position if it is valid.

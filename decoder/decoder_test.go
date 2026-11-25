@@ -247,6 +247,49 @@ func TestDecodeOption(t *testing.T) {
 	d = NewDecoder(s)
 	err = d.Decode(&out2)
 	assert.NoError(t, err)
+
+	// Verify all public decoder Options bits are non-zero and pairwise distinct.
+	allOpts := []struct {
+		name string
+		opt  Options
+	}{
+		{"OptionUseInt64", OptionUseInt64},
+		{"OptionUseNumber", OptionUseNumber},
+		{"OptionUseUnicodeErrors", OptionUseUnicodeErrors},
+		{"OptionDisableUnknown", OptionDisableUnknown},
+		{"OptionCopyString", OptionCopyString},
+		{"OptionValidateString", OptionValidateString},
+		{"OptionNoValidateJSON", OptionNoValidateJSON},
+		{"OptionCaseSensitive", OptionCaseSensitive},
+	}
+	var seen Options
+	for _, entry := range allOpts {
+		assert.NotZero(t, entry.opt, "option %s must be non-zero", entry.name)
+		assert.Zero(t, seen&entry.opt, "option %s (%#x) collides with previous options (%#x)", entry.name, entry.opt, seen)
+		seen |= entry.opt
+	}
+
+	// Regression for G1: UseUnicodeErrors / OptionUseUnicodeErrors must never enable DisallowUnknownFields.
+	type knownStruct struct {
+		Known int `json:"known"`
+	}
+	unknownPayload := `{"known":42,"unknown_extra":{"nested":true}}`
+	dMethod := NewDecoder(unknownPayload)
+	dMethod.UseUnicodeErrors()
+	var gotMethod knownStruct
+	assert.NoError(t, dMethod.Decode(&gotMethod))
+	assert.Equal(t, 42, gotMethod.Known)
+
+	dBit := NewDecoder(unknownPayload)
+	dBit.SetOptions(OptionUseUnicodeErrors)
+	var gotBit knownStruct
+	assert.NoError(t, dBit.Decode(&gotBit))
+	assert.Equal(t, 42, gotBit.Known)
+
+	dStrict := NewDecoder(unknownPayload)
+	dStrict.DisallowUnknownFields()
+	var gotStrict knownStruct
+	assert.Error(t, dStrict.Decode(&gotStrict))
 }
 
 func decode(s string, v interface{}, copy bool) (int, error) {

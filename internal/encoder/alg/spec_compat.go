@@ -1,5 +1,4 @@
-//go:build (!amd64 && !arm64) || go1.28 || !go1.16 || (arm64 && !go1.20)
-// +build !amd64,!arm64 go1.28 !go1.16 arm64,!go1.20
+//go:build sonic_compat || (!(amd64 && go1.20) && !(arm64 && go1.20) && !(riscv64 && go1.26 && riscv64.rva22u64) && !(sonic_scalar && go1.20 && (amd64 || arm64 || riscv64)))
 
 /**
  * Copyright 2024 ByteDance Inc.
@@ -24,7 +23,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"unicode/utf8"
-	_ "unsafe"
+	"unsafe"
 
 	"github.com/bytedance/sonic/internal/rt"
 )
@@ -38,8 +37,6 @@ func Valid(data []byte) (ok bool, start int) {
 	ok = json.Valid(data)
 	return ok, 0
 }
-
-var typeByte = rt.UnpackEface(byte(0)).Type
 
 func Quote(e []byte, s string, double bool) []byte {
 	if len(s) == 0 {
@@ -87,27 +84,7 @@ func Quote(e []byte, s string, double bool) []byte {
 			start = i
 			continue
 		}
-		c, size := utf8.DecodeRuneInString(s[i:])
-		// if correct && c == utf8.RuneError && size == 1 {
-		// 	if start < i {
-		// 		e = append(e, s[start:i]...)
-		// 	}
-		// 	e = append(e, `\ufffd`...)
-		// 	i += size
-		// 	start = i
-		// 	continue
-		// }
-		if c == '\u2028' || c == '\u2029' {
-			if start < i {
-				e = append(e, s[start:i]...)
-			}
-			e = append(e, `\u202`...)
-			e = append(e, rt.Hex[c&0xF])
-			i += size
-			start = i
-			continue
-		}
-		i += size
+		i++
 	}
 
 	if start < len(s) {
@@ -128,22 +105,125 @@ func HtmlEscape(dst []byte, src []byte) []byte {
 	return buf.Bytes()
 }
 
-func F64toa(buf []byte, v float64) []byte {
-	bs := bytes.NewBuffer(buf)
-	_ = json.NewEncoder(bs).Encode(v)
-	return bs.Bytes()
-}
-
-func F32toa(buf []byte, v float32) []byte {
-	bs := bytes.NewBuffer(buf)
-	_ = json.NewEncoder(bs).Encode(v)
-	return bs.Bytes()
-}
-
 func I64toa(buf []byte, v int64) []byte {
 	return strconv.AppendInt(buf, int64(v), 10)
 }
 
 func U64toa(buf []byte, v uint64) []byte {
 	return strconv.AppendUint(buf, v, 10)
+}
+
+func QuoteKey(e []byte, s string) []byte {
+	e = Quote(e, s, false)
+	return append(e, ':')
+}
+
+func QuoteWithPaddedKey(e []byte, keyPtr *byte, keyLen int, val string) []byte {
+	e = append(e, unsafe.Slice(keyPtr, keyLen)...)
+	return Quote(e, val, false)
+}
+
+func AppendPaddedKeyI64(e []byte, keyPtr *byte, keyLen int, v int64) []byte {
+	if keyLen > 0 {
+		e = append(e, unsafe.Slice(keyPtr, keyLen)...)
+	}
+	return I64toa(e, v)
+}
+
+func AppendPaddedKeyU64(e []byte, keyPtr *byte, keyLen int, v uint64) []byte {
+	if keyLen > 0 {
+		e = append(e, unsafe.Slice(keyPtr, keyLen)...)
+	}
+	return U64toa(e, v)
+}
+
+func QuoteWithPaddedKeyFlags(buf []byte, keyPtr *byte, keyLen int, val string, sanitize uint64) []byte {
+	if sanitize == 0 {
+		return QuoteWithPaddedKey(buf, keyPtr, keyLen, val)
+	}
+	nb := len(val)
+	if cap(buf)-len(buf) >= 34+nb && keyLen <= 32 {
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		sk := (*[4]uint64)(unsafe.Pointer(keyPtr))
+		dk := (*[4]uint64)(dp)
+		dk[0], dk[1] = sk[0], sk[1]
+		if keyLen > 16 {
+			dk[2], dk[3] = sk[2], sk[3]
+		}
+		dp = unsafe.Add(dp, keyLen)
+		*(*byte)(dp) = '"'
+		if nb == 0 {
+			*(*byte)(unsafe.Add(dp, 1)) = '"'
+			return buf[:len(buf)+keyLen+2]
+		}
+		sp := unsafe.Pointer(unsafe.StringData(val))
+		copied := copySafeHTMLPrefix(sp, nb, unsafe.Add(dp, 1), sanitize)
+		if copied == nb {
+			*(*byte)(unsafe.Add(dp, nb+1)) = '"'
+			return buf[:len(buf)+keyLen+nb+2]
+		}
+		buf = buf[:len(buf)+keyLen+1+copied]
+		return appendQuoteSanitizedTail(buf, val[copied:], sanitize, 0)
+	}
+	buf = append(buf, unsafe.Slice(keyPtr, keyLen)...)
+	buf = append(buf, '"')
+	if nb == 0 {
+		return append(buf, '"')
+	}
+	return appendQuoteSanitizedTail(buf, val, sanitize, 0)
+}
+
+func QuoteFlags(buf []byte, val string, double bool, sanitize uint64) []byte {
+	if sanitize == 0 {
+		return Quote(buf, val, double)
+	}
+	if !double {
+		nb := len(val)
+		if cap(buf)-len(buf) < nb+2 {
+			buf = rt.GuardSlice2(buf, nb+2)
+		}
+		dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+		*(*byte)(dp) = '"'
+		if nb == 0 {
+			*(*byte)(unsafe.Add(dp, 1)) = '"'
+			return buf[:len(buf)+2]
+		}
+		sp := unsafe.Pointer(unsafe.StringData(val))
+		copied := copySafeHTMLPrefix(sp, nb, unsafe.Add(dp, 1), sanitize)
+		if copied == nb {
+			*(*byte)(unsafe.Add(dp, nb+1)) = '"'
+			return buf[:len(buf)+nb+2]
+		}
+		buf = buf[:len(buf)+1+copied]
+		return appendQuoteSanitizedTail(buf, val[copied:], sanitize, 0)
+	}
+	mark := len(buf)
+	buf = Quote(buf, val, true)
+	return SanitizeAppended(buf, mark, sanitize)
+}
+
+func QuoteKeyFlags(buf []byte, val string, sanitize uint64) []byte {
+	if sanitize == 0 {
+		return QuoteKey(buf, val)
+	}
+	nb := len(val)
+	if cap(buf)-len(buf) < nb+3 {
+		buf = rt.GuardSlice2(buf, nb+3)
+	}
+	dp := unsafe.Add(unsafe.Pointer(unsafe.SliceData(buf)), len(buf))
+	*(*byte)(dp) = '"'
+	if nb == 0 {
+		*(*byte)(unsafe.Add(dp, 1)) = '"'
+		*(*byte)(unsafe.Add(dp, 2)) = ':'
+		return buf[:len(buf)+3]
+	}
+	sp := unsafe.Pointer(unsafe.StringData(val))
+	copied := copySafeHTMLPrefix(sp, nb, unsafe.Add(dp, 1), sanitize)
+	if copied == nb {
+		*(*byte)(unsafe.Add(dp, nb+1)) = '"'
+		*(*byte)(unsafe.Add(dp, nb+2)) = ':'
+		return buf[:len(buf)+nb+3]
+	}
+	buf = buf[:len(buf)+1+copied]
+	return appendQuoteSanitizedTail(buf, val[copied:], sanitize, ':')
 }
