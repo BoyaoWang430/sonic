@@ -21,3 +21,4 @@ package compatibility_test
 
 // Go < 1.27 and GOEXPERIMENT=nojsonv2 use the legacy encoding/json backend.
 const stdUsesJSONV2 = false
+const stdJSONV2Pre1273 = false

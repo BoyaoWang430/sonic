@@ -52,6 +52,12 @@ func TestIssue144_StringOption(t *testing.T) {
 
 	var v2 Issue144_StringOption
 	e2 := sonic.Unmarshal(data, &v2)
+	if stdUsesJSONV2 && sonic.APIKind == sonic.UseStdJSON {
+		var v1 Issue144_StringOption
+		e1 := json.Unmarshal(data, &v1)
+		require.Equal(t, e1 != nil, e2 != nil)
+		return
+	}
 	require.NoError(t, e2)
 	require.Nil(t, v2.S2)
 	require.Nil(t, v2.J2)

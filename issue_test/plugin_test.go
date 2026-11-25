@@ -26,12 +26,14 @@ import (
     `plugin`
     `reflect`
     `runtime`
+    `runtime/debug`
+    `strings`
     `testing`
 
     _ `github.com/bytedance/sonic`
 )
 
-func buildPlugin() {
+func buildPlugin(t *testing.T) {
     out := bytes.NewBuffer(nil)
     bin0, err := exec.LookPath("rm")
     if err != nil {
@@ -51,19 +53,36 @@ func buildPlugin() {
     if err != nil {
         panic(err)
     }
+    args := []string{"go", "build", "-buildmode", "plugin"}
+    if bi, ok := debug.ReadBuildInfo(); ok {
+        for _, s := range bi.Settings {
+            if s.Key == "-tags" && s.Value != "" {
+                args = append(args, "-tags="+s.Value)
+                break
+            }
+        }
+    }
+    args = append(args, "-o", "plugin/plugin."+runtime.Version()+".so", "plugin/main.go")
     cmd := exec.Cmd{
         Path:   bin,
-        Args:   []string{"go", "build", "-buildmode", "plugin", "-o", "plugin/plugin." + runtime.Version() + ".so", "plugin/main.go"},
+        Args:   args,
         Stdout: out,
         Stderr: out,
     }
     if err := cmd.Run(); err != nil {
-        panic(out.String())
+        msg := out.String()
+        if strings.Contains(msg, "-buildmode=plugin requires external (cgo) linking") ||
+            strings.Contains(msg, "buildmode=plugin not supported") ||
+            strings.Contains(msg, "C compiler") ||
+            strings.Contains(msg, "executable file not found") {
+            t.Skipf("go plugin build unsupported in this environment: %s", strings.TrimSpace(msg))
+        }
+        panic(msg)
     }
 }
 
 func TestPlugin(t *testing.T) {
-    buildPlugin()
+    buildPlugin(t)
     p, err := plugin.Open("plugin/plugin." + runtime.Version() + ".so")
     if err != nil {
         t.Fatal(err)

@@ -158,7 +158,7 @@ func TestIssue827_AllTextMarshalerTypes(t *testing.T) {
 			require.NoError(t, json.Unmarshal(sonicStdData, &sonicStdMap))
 			require.Equal(t, sonicStdMap, sonicMap)
 
-			if stdUsesJSONV2 {
+			if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 				return
 			}
 

@@ -11,9 +11,6 @@ CORPUS_DIR="${FUZZ_DIR}/go-fuzz-corpus"
 FUZZ_CORPUS_REPO="https://github.com/dvyukov/go-fuzz-corpus.git"
 FILE2FUZZ_VERSION="v0.10.0"
 
-source "$(dirname "$0")/../scripts/go_flags.sh"
-compile_flag=$(get_go_linkname_flag || echo "")
-
 log_info() {
     echo -e "\033[34m[INFO]\033[0m $1"
 }
@@ -63,26 +60,22 @@ init_corpus() {
 }
 
 run_fuzz() {
-    log_info "Running basic fuzz test..."
+    log_info "Running fuzz test..."
     export SONIC_FUZZ_MEM_LIMIT=2
     export GOMAXPROCS=2
-    cd "${FUZZ_DIR}" && go test "$compile_flag" -fuzz="${TEST_NAME}" -v -fuzztime 15m 
+    cd "${FUZZ_DIR}" && go test -fuzz="${TEST_NAME}" -v -fuzztime 15m 
 }
 
-run_optimized_fuzz() {
-    log_info "Running optimized fuzz test..."
-    export SONIC_FUZZ_MEM_LIMIT=2
-    export SONIC_USE_OPTDEC=1
-    export SONIC_USE_FASTMAP=1 
-    export SONIC_ENCODER_USE_VM=1
+run_diff_fuzz() {
+    log_info "Running 6-way forced-path differential fuzz test..."
     export GOMAXPROCS=2
-    cd "${FUZZ_DIR}" && go test "$compile_flag" -fuzz="${TEST_NAME}" -v -fuzztime 15m 
+    go test -fuzz="^FuzzSixWayDifferential$" -v -fuzztime "${FUZZ_TIME:-5m}" ./internal/decoder/optdec
 }
 
 cleanup() {
     log_info "Cleaning up..."
     rm -vrf "${CORPUS_DIR:?}"/
-    rm -vrf "{FUZZ_DIR}/testdata/"
+    rm -vrf "${FUZZ_DIR}/testdata/"
 }
 
 main() {
@@ -93,14 +86,17 @@ main() {
         run)
             run_fuzz
             ;;
-        runopt)
-            run_optimized_fuzz
+        runopt|diff)
+            run_diff_fuzz
+            ;;
+        runopt_scalar|diff_scalar)
+            SONIC_MODE=scalar run_diff_fuzz
             ;;
         clean)
             cleanup
             ;;
         *)
-            echo "Usage: $0 {fuzz|run|runopt|clean}"
+            echo "Usage: $0 {fuzz|run|runopt|diff|clean}"
             exit 1
             ;;
     esac

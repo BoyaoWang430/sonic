@@ -51,16 +51,13 @@ func fuzzHtmlEscape(t *testing.T, data []byte){
 func fuzzStream(t *testing.T, data []byte) {
 	r := bytes.NewBuffer(data)
 	dc := decoder.NewStreamDecoder(r)
-	dc.ValidateString()
 	r1 := bytes.NewBuffer(data)
 	dc1 := decoder.NewStreamDecoder(r1)
 
 	w := bytes.NewBuffer(nil)
 	ec := encoder.NewStreamEncoder(w)
-	ec.SetCompactMarshaler(true)
-	ec.SetValidateString(true)
 	ec.SetEscapeHTML(true)
-	ec.SortKeys()
+	configureFuzzStreamExtensions(dc, ec)
 	w1 := bytes.NewBuffer(nil)
 	ec1 := encoder.NewStreamEncoder(w1)
 

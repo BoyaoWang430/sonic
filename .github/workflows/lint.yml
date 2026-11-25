@@ -10,4 +10,90 @@ jobs:
       - name: spell check
         uses: codespell-project/actions-codespell@v2
         with:
-          skip: ./loader/internal/iasm/obj/macho.go,./loader/internal/iasm/x86_64/encodings.go,./loader/internal/iasm/x86_64/program.go,./loader/internal/iasm/expr/ast.go,./loader/internal/iasm/expr/errors.go
+          ignore_words_file: .github/workflows/.ignore_words
+          skip: "./.git,./testdata"
+
+  static-and-fallback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: Check gofmt on core and non-legacy packages
+        run: |
+          unformatted=$(find . -name '*.go' \
+            -not -path './testdata/*' -not -path './issue_test/*' \
+            -not -path './examples/*' -not -path './fuzz/*' \
+            -not -path './generic_test/*' -not -path './external_jsonlib_test/*' \
+            -exec gofmt -l {} +)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted Go files:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Check go:generate outputs are up to date
+        run: |
+          go generate ./...
+          git diff --exit-code
+      - name: Check architectural and dependency gates
+        run: |
+          ./scripts/check_arch_gates.sh
+          ./scripts/test-riscv-build.sh
+      - name: Run go vet across native and pure-Go scalar configurations
+        run: |
+          GOOS=linux GOARCH=amd64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GOOS=linux GOARCH=arm64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GORISCV64=rva22u64 GOOS=linux GOARCH=riscv64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GORISCV64=rva23u64 GOOS=linux GOARCH=riscv64 go vet -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GOOS=linux GOARCH=amd64 go vet -tags=sonic_scalar -unreachable=false -structtag=false -testinggoroutine=false ./...
+          GORISCV64=rva20u64 GOOS=linux GOARCH=riscv64 go vet -tags=sonic_scalar -unreachable=false -structtag=false -testinggoroutine=false ./...
+      - name: Cross-build uncertified / stdlib-adapter fallback targets (compile-only)
+        run: |
+          GOOS=linux GOARCH=386 go build ./...
+          GOOS=linux GOARCH=arm go build ./...
+          GOOS=linux GOARCH=ppc64le go build ./...
+          GOOS=linux GOARCH=s390x go build ./...
+          GOOS=js GOARCH=wasm go build ./...
+          GORISCV64=rva20u64 GOOS=linux GOARCH=riscv64 go build ./...
+      - name: Test sonic_compat fallback backend
+        run: |
+          go test -tags=sonic_compat -count=1 . ./ast ./decoder ./encoder ./utf8 ./generic_test ./issue_test ./compatibility
+
+  riscv64-smoke:
+    strategy:
+      matrix:
+        include:
+          - goriscv64: rva22u64
+            qemu_cpu: rv64,zba=true,zbb=true,zbs=true
+          - goriscv64: rva23u64
+            qemu_cpu: rv64,v=true,vlen=128,zba=true,zbb=true,zbs=true,zicond=true,zfa=true,zfhmin=true,zcb=true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU user-mode for riscv64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: Cross-compile and QEMU smoke test (${{ matrix.goriscv64 }})
+        env:
+          GOOS: linux
+          GOARCH: riscv64
+          GORISCV64: ${{ matrix.goriscv64 }}
+          QEMU_CPU: ${{ matrix.qemu_cpu }}
+          CGO_ENABLED: "0"
+        run: |
+          EXEC_WRAPPER="$(mktemp)"
+          cat > "${EXEC_WRAPPER}" <<'EOF'
+          #!/usr/bin/env bash
+          exec qemu-riscv64 -cpu "${QEMU_CPU}" "$@"
+          EOF
+          chmod +x "${EXEC_WRAPPER}"
+          GOMAXPROCS=2 go test -exec="${EXEC_WRAPPER}" -count=1 . ./decoder ./encoder ./ast ./internal/jsonscan ./internal/native/... ./internal/decoder/optdec

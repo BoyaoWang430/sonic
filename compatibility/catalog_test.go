@@ -31,7 +31,6 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/decoder"
-	"github.com/bytedance/sonic/internal/envs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,11 +47,16 @@ func TestCase_F32_OVF(t *testing.T) {
 
 	require.Error(t, se)
 	require.Error(t, je)
-	require.Equal(t, float32(0), s, "sonic leaves dest at 0")
 
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.True(t, math.IsInf(float64(j), 1), "std jsonv2 saturates to +Inf")
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.True(t, math.IsInf(float64(s), 1), "compat delegates to std jsonv2")
+		} else {
+			require.Equal(t, float32(0), s, "sonic leaves dest at 0")
+		}
 	} else {
+		require.Equal(t, float32(0), s, "sonic leaves dest at 0")
 		require.Equal(t, float32(0), j, "legacy std leaves dest at 0")
 	}
 }
@@ -66,11 +70,16 @@ func TestCase_F64_OVF(t *testing.T) {
 
 	require.Error(t, se)
 	require.Error(t, je)
-	require.Equal(t, float64(0), s, "sonic leaves dest at 0")
 
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.True(t, math.IsInf(j, 1), "std jsonv2 saturates to +Inf")
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.True(t, math.IsInf(s, 1), "compat delegates to std jsonv2")
+		} else {
+			require.Equal(t, float64(0), s, "sonic leaves dest at 0")
+		}
 	} else {
+		require.Equal(t, float64(0), s, "sonic leaves dest at 0")
 		require.Equal(t, float64(0), j, "legacy std leaves dest at 0")
 	}
 }
@@ -84,15 +93,19 @@ func TestCase_MAP_F64_ENC(t *testing.T) {
 	sout, serr := sonic.ConfigStd.Marshal(in)
 	jout, jerr := json.Marshal(in)
 
-	require.Error(t, serr)
-	require.Nil(t, sout)
-
 	if stdUsesJSONV2 {
 		require.NoError(t, jerr)
 		require.JSONEq(t, `{"1":""}`, string(jout))
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.NoError(t, serr)
+			require.JSONEq(t, `{"1":""}`, string(sout))
+			return
+		}
 	} else {
 		require.Error(t, jerr)
 	}
+	require.Error(t, serr)
+	require.Nil(t, sout)
 }
 
 // Case MAP-PTR-ENC: pointer-keyed maps become marshalable under jsonv2 backend.
@@ -103,15 +116,19 @@ func TestCase_MAP_PTR_ENC(t *testing.T) {
 	sout, serr := sonic.ConfigStd.Marshal(in)
 	jout, jerr := json.Marshal(in)
 
-	require.Error(t, serr)
-	require.Nil(t, sout)
-
 	if stdUsesJSONV2 {
 		require.NoError(t, jerr)
 		require.JSONEq(t, `{"1":2}`, string(jout))
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.NoError(t, serr)
+			require.JSONEq(t, `{"1":2}`, string(sout))
+			return
+		}
 	} else {
 		require.Error(t, jerr)
 	}
+	require.Error(t, serr)
+	require.Nil(t, sout)
 }
 
 // Case MAP-F64-DEC: sonic accepts float map keys. Legacy std rejects them;
@@ -123,15 +140,18 @@ func TestCase_MAP_F64_DEC(t *testing.T) {
 	se := sonic.ConfigStd.Unmarshal([]byte(data), &s)
 	je := json.Unmarshal([]byte(data), &j)
 
-	require.NoError(t, se)
-	require.Equal(t, map[float64]float64{1.2: 1.8}, s)
-
 	if stdUsesJSONV2 {
 		require.NoError(t, je)
 		require.Equal(t, map[float64]float64{1.2: 1.8}, j)
 	} else {
 		require.Error(t, je, "legacy std cannot unmarshal into map[float64]float64")
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.Error(t, se, "compat delegates to legacy std")
+			return
+		}
 	}
+	require.NoError(t, se)
+	require.Equal(t, map[float64]float64{1.2: 1.8}, s)
 }
 
 // ---- from case_string_option_test.go ----
@@ -150,21 +170,27 @@ func TestCase_STR_NULL(t *testing.T) {
 	se := sonic.ConfigStd.Unmarshal(data, &s)
 	je := json.Unmarshal(data, &j)
 
-	require.NoError(t, se)
-	require.Nil(t, s.S)
-	require.Nil(t, s.I)
-
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		var typeErr *json.UnmarshalTypeError
 		require.ErrorAs(t, je, &typeErr)
 		require.NotNil(t, j.S)
 		require.Empty(t, *j.S)
 		require.Nil(t, j.I)
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.ErrorAs(t, se, &typeErr)
+			require.NotNil(t, s.S)
+			require.Empty(t, *s.S)
+			require.Nil(t, s.I)
+			return
+		}
 	} else {
 		require.NoError(t, je)
 		require.Nil(t, j.S)
 		require.Nil(t, j.I)
 	}
+	require.NoError(t, se)
+	require.Nil(t, s.S)
+	require.Nil(t, s.I)
 }
 
 // ---- from case_utf8_test.go ----
@@ -179,13 +205,17 @@ func TestCase_UTF8_ENC(t *testing.T) {
 
 	require.NoError(t, serr)
 	require.NoError(t, jerr)
-	require.Equal(t, `"a\ufffdb"`, string(sout))
 
 	if stdUsesJSONV2 {
 		require.Equal(t, "\"a\ufffdb\"", string(jout))
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.Equal(t, string(jout), string(sout))
+			return
+		}
 	} else {
-		require.Equal(t, string(sout), string(jout))
+		require.Equal(t, `"a\ufffdb"`, string(jout))
 	}
+	require.Equal(t, `"a\ufffdb"`, string(sout))
 }
 
 // Case UTF8-DEC: both replace invalid UTF-8 on unmarshal (aligned under DefaultOptionsV1).
@@ -230,13 +260,16 @@ func TestCase_TMPTR_UNJ(t *testing.T) {
 	require.NotNil(t, s)
 	require.NotNil(t, j)
 
-	require.Equal(t, "MyPtr", s.Name, "sonic uses default decode into named pointer")
-
 	if stdUsesJSONV2 {
 		require.Equal(t, "Unmarshaler", j.Name, "std jsonv2 invokes UnmarshalJSON")
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.Equal(t, "Unmarshaler", s.Name, "compat delegates to std jsonv2")
+			return
+		}
 	} else {
 		require.Equal(t, "MyPtr", j.Name, "legacy std matches sonic")
 	}
+	require.Equal(t, "MyPtr", s.Name, "sonic uses default decode into named pointer")
 }
 
 type unjDate int64
@@ -271,16 +304,15 @@ func TestCase_UNJ_PARTIAL(t *testing.T) {
 
 	require.Error(t, se)
 	require.Error(t, je)
-	if envs.UseOptDec {
-		require.Equal(t, 1, s.E, "Sonic OptDec applies later fields after UnmarshalJSON error")
-	} else {
-		require.Equal(t, 0, s.E, "Sonic JIT does not apply later fields after UnmarshalJSON error")
-	}
-
 	if stdUsesJSONV2 {
 		require.Equal(t, 1, j.E, "std jsonv2 still applies later fields")
 	} else {
-		require.Equal(t, 0, j.E, "legacy std matches sonic")
+		require.Equal(t, 0, j.E, "legacy std leaves later fields at 0")
+	}
+	if sonic.APIKind == sonic.UseStdJSON {
+		require.Equal(t, j.E, s.E, "compat delegates to active stdlib backend")
+	} else {
+		require.Equal(t, 1, s.E, "Sonic OptDec applies later fields after UnmarshalJSON error")
 	}
 }
 
@@ -309,13 +341,16 @@ func TestCase_TM_KEY_QUOTE(t *testing.T) {
 	require.NoError(t, serr)
 	require.NoError(t, jerr)
 
-	require.JSONEq(t, `{"one":1,"two":2}`, string(sout))
-
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.JSONEq(t, `{"\"one\"":1,"\"two\"":2}`, string(jout))
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.JSONEq(t, string(jout), string(sout))
+			return
+		}
 	} else {
-		require.JSONEq(t, string(sout), string(jout))
+		require.JSONEq(t, `{"one":1,"two":2}`, string(jout))
 	}
+	require.JSONEq(t, `{"one":1,"two":2}`, string(sout))
 }
 
 func TestCase_TM_KEY_PLAIN(t *testing.T) {
@@ -362,7 +397,7 @@ func TestCase_IFACE_SKIP_nonPtr(t *testing.T) {
 	se := sonic.ConfigStd.Unmarshal(data, &objS)
 	je := json.Unmarshal(data, &objJ)
 
-	if stdUsesJSONV2 {
+	if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 		require.Error(t, se)
 		var typeErr *json.UnmarshalTypeError
 		require.ErrorAs(t, je, &typeErr)
@@ -386,7 +421,7 @@ func TestCase_IFACE_SKIP_nilPtr(t *testing.T) {
 	se := sonic.ConfigStd.Unmarshal(data, &objS)
 	je := json.Unmarshal(data, &objJ)
 
-	if stdUsesJSONV2 {
+	if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 		require.Error(t, se)
 		var typeErr *json.UnmarshalTypeError
 		require.ErrorAs(t, je, &typeErr)
@@ -410,6 +445,10 @@ func TestCase_IFACE_SKIP_nilPtr(t *testing.T) {
 // so this test must NOT call encoding/json under stdUsesJSONV2.
 
 func TestCase_SELF_REF(t *testing.T) {
+	if stdUsesJSONV2 && sonic.APIKind == sonic.UseStdJSON {
+		t.Log("compat delegates to std encoding/json jsonv2 backend which stack-overflows on self-referential interface{}; not invoked")
+		return
+	}
 	var v interface{}
 	v = &v
 	err := sonic.ConfigStd.Unmarshal([]byte(`{"a":"b"}`), v)
@@ -473,7 +512,11 @@ func TestCase_CASE_FOLD(t *testing.T) {
 	api := sonic.Config{CaseSensitive: true}.Froze()
 	var strict S
 	require.NoError(t, api.Unmarshal(data, &strict))
-	require.Equal(t, 0, strict.Foo, "CaseSensitive skips folded name")
+	if sonic.APIKind == sonic.UseStdJSON {
+		require.Equal(t, 1, strict.Foo, "compat delegates to case-insensitive encoding/json")
+	} else {
+		require.Equal(t, 0, strict.Foo, "CaseSensitive skips folded name")
+	}
 }
 
 // ---- from case_aligned_test.go ----
@@ -550,16 +593,13 @@ func TestCase_SYN_PREMUT(t *testing.T) {
 
 	require.Error(t, se)
 	require.Error(t, je)
-	if envs.UseOptDec {
-		require.Equal(t, S{A: 9, B: 9}, s, "Sonic OptDec validates syntax before mutation")
-	} else {
-		require.Equal(t, S{A: 1, B: 9}, s, "Sonic JIT applies fields before the syntax error")
-	}
+	require.Equal(t, S{A: 9, B: 9}, s, "validates syntax before mutation")
 	require.Equal(t, S{A: 9, B: 9}, j, "std validates syntax before mutation")
 }
 
 // Case MAP-VALUE-REPLACE: v1 replaces an existing map value before decoding
-// an object into it. Sonic merges the object into the old map value instead.
+// an object into it. Sonic OptDec now aligns with encoding/json and replaces
+// the old map value rather than merging into stale state.
 func TestCase_MAP_VALUE_REPLACE(t *testing.T) {
 	type V struct {
 		Old bool
@@ -571,8 +611,8 @@ func TestCase_MAP_VALUE_REPLACE(t *testing.T) {
 
 	require.NoError(t, sonic.ConfigStd.Unmarshal(data, &s))
 	require.NoError(t, json.Unmarshal(data, &j))
-	require.Equal(t, V{Old: true, New: true}, s["k"], "sonic merges into the old map value")
 	require.Equal(t, V{New: true}, j["k"], "std replaces the old map value")
+	require.Equal(t, j["k"], s["k"], "sonic replaces the old map value matching std")
 }
 
 // Case STRING-GONUM: v1's ,string mode delegates numeric parsing to strconv.
@@ -599,13 +639,8 @@ func TestCase_STRING_GONUM(t *testing.T) {
 
 			require.NoError(t, je)
 			require.Equal(t, tt.want, j)
-			if envs.UseOptDec {
-				require.NoError(t, se)
-				require.Equal(t, j, s)
-			} else {
-				require.Error(t, se)
-				require.Equal(t, S{}, s)
-			}
+			require.NoError(t, se)
+			require.Equal(t, j, s)
 		})
 	}
 }
@@ -625,7 +660,12 @@ func TestCase_MARSHAL_ERR_WRAP(t *testing.T) {
 	_, je := json.Marshal(marshalErrorValue{})
 
 	require.ErrorIs(t, se, errMarshalSentinel)
-	require.Same(t, errMarshalSentinel, se)
+	if sonic.APIKind == sonic.UseStdJSON {
+		var sonicMarshalerErr *json.MarshalerError
+		require.ErrorAs(t, se, &sonicMarshalerErr)
+	} else {
+		require.Same(t, errMarshalSentinel, se)
+	}
 	require.ErrorIs(t, je, errMarshalSentinel)
 	var marshalerErr *json.MarshalerError
 	require.ErrorAs(t, je, &marshalerErr)
@@ -658,19 +698,19 @@ func TestCase_STRING_GONUM_PLUS(t *testing.T) {
 			se := sonic.ConfigStd.Unmarshal([]byte(tt.data), &s)
 			je := json.Unmarshal([]byte(tt.data), &j)
 
-			if envs.UseOptDec {
-				require.NoError(t, se)
-				require.Equal(t, tt.want, s)
-			} else {
-				require.Error(t, se)
-				require.Equal(t, S{}, s)
-			}
 			if stdUsesJSONV2 {
 				require.NoError(t, je)
 				require.Equal(t, tt.want, j)
 			} else {
 				require.Error(t, je)
 				require.Equal(t, S{}, j)
+			}
+			if sonic.APIKind == sonic.UseStdJSON {
+				require.Equal(t, je == nil, se == nil)
+				require.Equal(t, j, s)
+			} else {
+				require.NoError(t, se)
+				require.Equal(t, tt.want, s)
 			}
 		})
 	}
@@ -691,12 +731,16 @@ func TestCase_MAP_STRING_TEXT(t *testing.T) {
 
 	require.NoError(t, serr)
 	require.NoError(t, jerr)
-	require.JSONEq(t, `{"raw":1}`, string(sout))
-	if stdUsesJSONV2 {
+	if stdJSONV2Pre1273 {
 		require.JSONEq(t, `{"TEXTKEY":1}`, string(jout))
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.JSONEq(t, string(jout), string(sout))
+			return
+		}
 	} else {
-		require.JSONEq(t, string(sout), string(jout))
+		require.JSONEq(t, `{"raw":1}`, string(jout))
 	}
+	require.JSONEq(t, `{"raw":1}`, string(sout))
 }
 
 // Case BASE64-ERROR: all implementations reject malformed Base64, but
@@ -711,13 +755,19 @@ func TestCase_BASE64_ERROR(t *testing.T) {
 
 	require.Error(t, se)
 	require.Error(t, je)
-	require.Empty(t, s)
 	require.Equal(t, []byte("old"), j)
 	var corrupt base64.CorruptInputError
-	require.Equal(t, !envs.UseOptDec, errors.As(se, &corrupt))
 	require.ErrorAs(t, je, &corrupt)
 	var typeErr *json.UnmarshalTypeError
 	require.Equal(t, stdUsesJSONV2, errors.As(je, &typeErr))
+	if sonic.APIKind == sonic.UseStdJSON {
+		require.Equal(t, []byte("old"), s)
+		require.ErrorAs(t, se, &corrupt)
+		require.Equal(t, stdUsesJSONV2, errors.As(se, &typeErr))
+	} else {
+		require.Empty(t, s)
+		require.False(t, errors.As(se, &corrupt))
+	}
 }
 
 // Case UNSUPPORTED-VALUE-PAYLOAD: GoStd127 no longer populates the Value field
@@ -729,8 +779,12 @@ func TestCase_UNSUPPORTED_VALUE_PAYLOAD(t *testing.T) {
 	var sonicErr, jsonErr *json.UnsupportedValueError
 	require.ErrorAs(t, se, &sonicErr)
 	require.ErrorAs(t, je, &jsonErr)
-	require.True(t, sonicErr.Value.IsValid())
-	require.Equal(t, !stdUsesJSONV2, jsonErr.Value.IsValid())
+	require.Equal(t, !stdJSONV2Pre1273, jsonErr.Value.IsValid())
+	if sonic.APIKind == sonic.UseStdJSON {
+		require.Equal(t, jsonErr.Value.IsValid(), sonicErr.Value.IsValid())
+	} else {
+		require.True(t, sonicErr.Value.IsValid())
+	}
 }
 
 type nestedMiddle struct {
@@ -750,7 +804,6 @@ func TestCase_UNMARSHAL_TYPE_ROOT(t *testing.T) {
 	je := json.Unmarshal(data, &j)
 
 	var sonicErr *decoder.MismatchTypeError
-	require.ErrorAs(t, se, &sonicErr)
 	var typeErr *json.UnmarshalTypeError
 	require.ErrorAs(t, je, &typeErr)
 	require.Equal(t, "M.N", typeErr.Field)
@@ -758,6 +811,16 @@ func TestCase_UNMARSHAL_TYPE_ROOT(t *testing.T) {
 		require.Equal(t, "nestedOuter", typeErr.Struct)
 	} else {
 		require.Equal(t, "nestedMiddle", typeErr.Struct)
+	}
+	if sonic.APIKind == sonic.UseStdJSON {
+		// Verify MismatchTypeError implements error (no panic in errors.As) and compat returns UnmarshalTypeError.
+		require.False(t, errors.As(se, &sonicErr))
+		var compatTypeErr *json.UnmarshalTypeError
+		require.ErrorAs(t, se, &compatTypeErr)
+		require.Equal(t, typeErr.Field, compatTypeErr.Field)
+		require.Equal(t, typeErr.Struct, compatTypeErr.Struct)
+	} else {
+		require.ErrorAs(t, se, &sonicErr)
 	}
 }
 
@@ -779,17 +842,23 @@ func TestCase_TEXT_APPEND(t *testing.T) {
 
 	require.NoError(t, serr)
 	require.NoError(t, jerr)
-	require.Equal(t, `"MARSHAL"`, string(sout))
 	if stdUsesJSONV2 {
 		require.Equal(t, `"APPEND"`, string(jout))
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.Equal(t, string(jout), string(sout))
+			return
+		}
 	} else {
-		require.Equal(t, string(sout), string(jout))
+		require.Equal(t, `"MARSHAL"`, string(jout))
 	}
+	require.Equal(t, `"MARSHAL"`, string(sout))
 }
 
 // Case F64-LONG-OVF: a mantissa longer than the 800-digit fallback buffer
-// exposes a historical range-detection bug. Go 1.27 reports the mathematical
-// overflow; Sonic still truncates the mantissa and returns a finite value.
+// historically truncated the logical decimal point. Native Sonic now tracks the
+// exact logical decimal point and always reports the mathematical overflow
+// across all Go versions, whereas encoding/json prior to Go 1.27 still exhibits
+// the historical stdlib strconv truncation bug.
 func TestCase_F64_LONG_OVF(t *testing.T) {
 	number := "5" + strings.Repeat("3", 383) + "5" + strings.Repeat("3", 1327) + "e-913"
 	data := []byte("[" + number + "]")
@@ -798,22 +867,34 @@ func TestCase_F64_LONG_OVF(t *testing.T) {
 	se := sonic.ConfigStd.Unmarshal(data, &s)
 	je := json.Unmarshal(data, &j)
 
-	require.NoError(t, se)
-	require.Len(t, s, 1)
-	require.Equal(t, 5.3333333333333336e-114, s[0])
-
 	_, parseErr := strconv.ParseFloat(number, 64)
 	if errors.Is(parseErr, strconv.ErrRange) {
 		require.Error(t, je)
 		require.Len(t, j, 1)
-		if stdUsesJSONV2 {
+		if stdJSONV2Pre1273 {
 			require.True(t, math.IsInf(j[0].(float64), 1))
+		} else if stdUsesJSONV2 {
+			// Go 1.27.3+ stops saturating overflow to +Inf, leaving the allocated float64(0)
+			// in the interface{} element (legacy nojsonv2 leaves the interface{} slot nil).
+			require.Equal(t, float64(0), j[0])
 		} else {
 			require.Nil(t, j[0])
 		}
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.Error(t, se)
+			require.Equal(t, j, s)
+			return
+		}
 	} else {
-		// Go 1.26 and earlier share Sonic's historical finite-value behavior.
+		// Go 1.26 and earlier stdlib strconv.ParseFloat still returns a finite value.
 		require.NoError(t, je)
-		require.Equal(t, s, j)
+		if sonic.APIKind == sonic.UseStdJSON {
+			require.NoError(t, se)
+			require.Equal(t, j, s)
+			return
+		}
 	}
+	require.Error(t, se)
+	require.Len(t, s, 1)
+	require.Nil(t, s[0])
 }

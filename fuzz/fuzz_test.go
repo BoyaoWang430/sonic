@@ -1,3 +1,4 @@
+//go:build go1.18
 // +build go1.18
 
 /*
@@ -19,33 +20,34 @@
 package sonic_fuzz
 
 import (
-    `encoding/json`
-    `testing`
-    _ `unicode/utf8`
-    `os`
-    `runtime`
-    `runtime/debug`
-    `time`
-    `io`
-    `log`
-    `strconv`
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+	_ "unicode/utf8"
 
-    `github.com/bytedance/sonic`
-    `github.com/stretchr/testify/require`
-    `github.com/davecgh/go-spew/spew`
-    `github.com/bytedance/gopkg/util/gctuner`
+	"github.com/bytedance/sonic"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/require"
 )
 
 func FuzzMain(f *testing.F) {
-    for _, corp := range(corpus()) {
-        f.Add(corp)
-    }
-    f.Fuzz(fuzzMain)
+	for _, corp := range corpus() {
+		f.Add(corp)
+	}
+	f.Fuzz(fuzzMain)
 }
 
 type testFuzzCase struct {
 	data []byte
-	newf func () interface{}
+	newf func() interface{}
 }
 
 func testJson(t *testing.T, data []byte, newf func() interface{}) {
@@ -53,23 +55,96 @@ func testJson(t *testing.T, data []byte, newf func() interface{}) {
 	jerr := json.Unmarshal(data, jv)
 	sv := newf()
 	serr := sonic.Unmarshal(data, sv)
+	// Case F64-LONG-OVF (see compatibility/catalog_test.go): Go < 1.27 stdlib
+	// strconv.ParseFloat truncates >800-digit mantissas and misclassifies mathematical
+	// float64 overflow (e.g. 1712-digit 533...e-913 == ~5.33e+798) as finite, whereas
+	// Go 1.27+ stdlib and Native/Scalar Sonic (UseSonicJSON) report range overflow.
+	if trimmed := strings.TrimSpace(string(data)); strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+		if len(inner) > 850 && !strings.ContainsAny(inner, ",{}[]\"") {
+			if _, perr := strconv.ParseFloat(inner, 64); !errors.Is(perr, strconv.ErrRange) && jerr == nil && sonic.APIKind == sonic.UseSonicJSON {
+				require.Error(t, serr)
+				return
+			}
+		}
+	}
 	require.Equal(t, jerr == nil, serr == nil)
 	spew.Dump(jv, sv)
-	require.Equal(t, jv, sv)
+	// Failed decodes need not leave identical partial destinations. In
+	// particular, jsonv2 can retain +Inf after range failure while optdec
+	// rejects the document before FromDom writes any values.
+	if jerr == nil {
+		require.Equal(t, jv, sv)
+	}
 }
 
 var testFuzzCases = []testFuzzCase{
 	{
 		data: []byte(`{"x":"","":"","$$$$$ſ":"","RRRRRſ":"","ppppſ":"","ŝ":"","Ţ":"","ţ":"","Ť":"","Ũ":"","Ŭ":"","Ű":"","ų":"","Ŷ":"","Ÿ":"","ź":"","Ż":"","ſ":"","ſſ":"","ǿ":"","ɿ":"","տ":"","ٿſ":"","ڵ":""}`),
 		newf: func() interface{} {
-			return new(struct { F0 ***string; F1 string "json:\"ڵ,omitempty\""; F2 *string; F3 string; p4 string; F4 **string; F5 string; F6 *string "json:\"-\""; F7 ***string; F8 string; p9 string; F9 string; p10 string; F10 **string "json:\"Ŷ,\""; F11 **string "json:\"Ż,omitempty\""; F12 **string "json:\"ſ,\""; F13 ***string; F14 *string; p15 *string; F15 string "json:\"-\""; p16 string; F16 **string "json:\"ſſ,omitempty\""; F17 **string "json:\"ɿ,omitempty\""; p18 **string; F18 *string "json:\"-\""; F19 **string "json:\"RRRRRſ,omitempty\""; F20 ***string; p21 ***string; F21 string "json:\"ź,omitempty\""; p22 string })
+			return new(struct {
+				F0  ***string
+				F1  string "json:\"ڵ,omitempty\""
+				F2  *string
+				F3  string
+				p4  string
+				F4  **string
+				F5  string
+				F6  *string "json:\"-\""
+				F7  ***string
+				F8  string
+				p9  string
+				F9  string
+				p10 string
+				F10 **string "json:\"Ŷ,\""
+				F11 **string "json:\"Ż,omitempty\""
+				F12 **string "json:\"ſ,\""
+				F13 ***string
+				F14 *string
+				p15 *string
+				F15 string "json:\"-\""
+				p16 string
+				F16 **string "json:\"ſſ,omitempty\""
+				F17 **string "json:\"ɿ,omitempty\""
+				p18 **string
+				F18 *string  "json:\"-\""
+				F19 **string "json:\"RRRRRſ,omitempty\""
+				F20 ***string
+				p21 ***string
+				F21 string "json:\"ź,omitempty\""
+				p22 string
+			})
 		},
 	},
 	{
 		data: []byte(`{"":"","$$$$$ſ":"","RRRRRſ":"","ppppſ":"","ŝ":"","Ţ":"","ţ":"","Ť":"","Ũ":"","Ŭ":"","Ű":"","ų":"","Ŷ":"","Ÿ":"","ź":"","Ż":"","ſ":"","ſſ":"","ǿ":"","ɿ":"","տ":"","ٿſ":"","ڵ":""}`),
-		newf:  func() interface{} {
-				return new(struct { F6 **string "json:\"x,\""; F7 string; p8 string; F8 *string; F9 string "json:\"ٿſ,omitempty\""; p10 string; F10 **string "json:\"-\""; F11 string "json:\"$$$$$ſ,\""; p12 string; F12 *string; p13 *string; F13 *string "json:\"Ű,\""; p14 *string; F14 **string; F15 string "json:\"Ż,omitempty\""; F16 string "json:\"-\""; p17 string; F17 **string "json:\"-\""; F18 string "json:\"ppppſ,\""; F19 ***string "json:\"Ţ,omitempty\""; p20 ***string; F20 ***string; F21 *string })
-			},
+		newf: func() interface{} {
+			return new(struct {
+				F6  **string "json:\"x,\""
+				F7  string
+				p8  string
+				F8  *string
+				F9  string "json:\"ٿſ,omitempty\""
+				p10 string
+				F10 **string "json:\"-\""
+				F11 string   "json:\"$$$$$ſ,\""
+				p12 string
+				F12 *string
+				p13 *string
+				F13 *string "json:\"Ű,\""
+				p14 *string
+				F14 **string
+				F15 string "json:\"Ż,omitempty\""
+				F16 string "json:\"-\""
+				p17 string
+				F17 **string  "json:\"-\""
+				F18 string    "json:\"ppppſ,\""
+				F19 ***string "json:\"Ţ,omitempty\""
+				p20 ***string
+				F20 ***string
+				F21 *string
+			})
+		},
 	},
 	{
 		// FIXME: encoding/json has bugs because the limited dbuf capacity is 800?
@@ -78,7 +153,7 @@ var testFuzzCases = []testFuzzCase{
 	},
 	{
 		data: []byte("10000000000000000000"),
-		newf: func () interface{} { return new(uint64) },
+		newf: func() interface{} { return new(uint64) },
 	},
 }
 
@@ -87,214 +162,211 @@ func TestFuzzCases(t *testing.T) {
 	for _, c := range testFuzzCases {
 		testJson(t, c.data, c.newf)
 	}
-    fuzzMain(t, []byte("[1\x00"))
-    fuzzMain(t, []byte("\"\\uDE1D\\uDE1D\\uDEDD\\uDE1D\\uDE1D\\uDE1D\\uDE1D\\uDEDD\\uDE1D\""))
-    // fuzzMain(t, []byte(`{"":null}`))
+	fuzzMain(t, []byte("[1\x00"))
+	fuzzMain(t, []byte("\"\\uDE1D\\uDE1D\\uDEDD\\uDE1D\\uDE1D\\uDE1D\\uDE1D\\uDEDD\\uDE1D\""))
+	// fuzzMain(t, []byte(`{"":null}`))
 }
 
 var target = sonic.ConfigStd
 
 func fuzzInvalidJson(t *testing.T, data []byte) {
-    for _, typ := range []func() interface{}{
-        func() interface{} { return new(interface{}) },
-        func() interface{} { return new(map[string]interface{}) },
-        func() interface{} { return new([]interface{}) },
-        func() interface{} { return new(string) },
-        func() interface{} { return new(int64) },
-        func() interface{} { return new(uint64) },
-        func() interface{} { return new(float64) },
-        func() interface{} { return new(json.Number) },
-        func() interface{} { return new(S) },
-    } {
-        // to check memory corruption
-        var sv = typ()
-        _ = sonic.Unmarshal(data, sv)
-    }
+	for _, typ := range []func() interface{}{
+		func() interface{} { return new(interface{}) },
+		func() interface{} { return new(map[string]interface{}) },
+		func() interface{} { return new([]interface{}) },
+		func() interface{} { return new(string) },
+		func() interface{} { return new(int64) },
+		func() interface{} { return new(uint64) },
+		func() interface{} { return new(float64) },
+		func() interface{} { return new(json.Number) },
+		func() interface{} { return new(S) },
+	} {
+		// to check memory corruption
+		var sv = typ()
+		_ = sonic.Unmarshal(data, sv)
+	}
 }
 
 func fuzzMain(t *testing.T, data []byte) {
-    fuzzValidate(t, data)
-    fuzzHtmlEscape(t, data)
-    // fuzz ast get api, should not panic here.
-    fuzzAst(t, data)
+	fuzzValidate(t, data)
+	fuzzHtmlEscape(t, data)
+	// fuzz ast get api, should not panic here.
+	fuzzAst(t, data)
 
-    // Only fuzz the validate json here.
-    if !json.Valid(data) {
-        fuzzInvalidJson(t, data)
-        return
-    }
+	// Only fuzz the validate json here.
+	if !json.Valid(data) {
+		fuzzInvalidJson(t, data)
+		return
+	}
 
-    fuzzStream(t, data)
-    for i, typ := range []func() interface{}{
-        func() interface{} { return new(interface{}) },
-        func() interface{} { return new(map[string]interface{}) },
-        func() interface{} { return new([]interface{}) },
-        func() interface{} { return new(string) },
-        func() interface{} { return new(int64) },
-        func() interface{} { return new(uint64) },
-        func() interface{} { return new(float64) },
-        // func() interface{} { return new(json.Number) },
-        // func() interface{} { return new(S) },
-    } {
-        var sv = typ()
-        var jv = typ()
-        serr := target.Unmarshal(data, sv)
-        jerr := json.Unmarshal(data, jv)
-        require.Equal(t, serr != nil, jerr != nil, 
-                dump(data, jv, jerr, sv, serr))
-        if jerr != nil {
-            continue
-        }
-        require.Equal(t, sv, jv, dump(string(data), jv, jerr, sv, serr))
-    
-        v := jv
-        sout, serr := target.Marshal(v)
-        jout, jerr := json.Marshal(v)
-        require.NoError(t, serr, dump(v, jout, jerr, sout, serr))
-        require.NoError(t, jerr, dump(v, jout, jerr, sout, serr))
+	fuzzStream(t, data)
+	for i, typ := range []func() interface{}{
+		func() interface{} { return new(interface{}) },
+		func() interface{} { return new(map[string]interface{}) },
+		func() interface{} { return new([]interface{}) },
+		func() interface{} { return new(string) },
+		func() interface{} { return new(int64) },
+		func() interface{} { return new(uint64) },
+		func() interface{} { return new(float64) },
+		// func() interface{} { return new(json.Number) },
+		// func() interface{} { return new(S) },
+	} {
+		var sv = typ()
+		var jv = typ()
+		serr := target.Unmarshal(data, sv)
+		jerr := json.Unmarshal(data, jv)
+		require.Equal(t, serr != nil, jerr != nil,
+			dump(data, jv, jerr, sv, serr))
+		if jerr != nil {
+			continue
+		}
+		require.Equal(t, sv, jv, dump(string(data), jv, jerr, sv, serr))
 
-        {
-            sv, jv = typ(), typ()
-            serr := target.Unmarshal(sout, sv)
-            jerr := json.Unmarshal(jout, jv)
-            require.Equalf(t, serr != nil, jerr != nil, dump(data, jv, jerr, sv, serr))
-            if jerr != nil {
-                continue
-            }
-            require.Equal(t, sv, jv, dump(data, jv, jerr, sv, serr))
-        }
+		v := jv
+		sout, serr := target.Marshal(v)
+		jout, jerr := json.Marshal(v)
+		require.NoError(t, serr, dump(v, jout, jerr, sout, serr))
+		require.NoError(t, jerr, dump(v, jout, jerr, sout, serr))
 
-        // fuzz ast MarshalJSON API
-        if i == 0 {
-            root, aerr := sonic.Get(data)
-            require.Equal(t, aerr, nil)
-            aerr = root.LoadAll()
-            require.Equal(t, aerr, nil, dump(data, jv, jerr, root, aerr))
-            aout, aerr := root.MarshalJSON()
-            require.Equal(t, aerr, nil)
-            sv = typ()
-            serr := json.Unmarshal(aout, sv)
-            require.Equal(t, serr, nil)
-            require.Equal(t, sv, jv, dump(data, jv, jerr, sv, serr))
-        }
+		{
+			sv, jv = typ(), typ()
+			serr := target.Unmarshal(sout, sv)
+			jerr := json.Unmarshal(jout, jv)
+			require.Equalf(t, serr != nil, jerr != nil, dump(data, jv, jerr, sv, serr))
+			if jerr != nil {
+				continue
+			}
+			require.Equal(t, sv, jv, dump(data, jv, jerr, sv, serr))
+		}
 
-        if m, ok := sv.(*map[string]interface{}); ok {
-            fuzzASTGetFromObject(t, jout, *m)
-            fuzzDynamicStruct(t, jout, *m)
-        }
-        if a, ok := sv.(*[]interface{}); ok {
-            fuzzASTGetFromArray(t, jout, *a)
-        }
-    }
+		// fuzz ast MarshalJSON API
+		if i == 0 {
+			root, aerr := sonic.Get(data)
+			require.Equal(t, aerr, nil)
+			aerr = root.LoadAll()
+			require.Equal(t, aerr, nil, dump(data, jv, jerr, root, aerr))
+			aout, aerr := root.MarshalJSON()
+			require.Equal(t, aerr, nil)
+			sv = typ()
+			serr := json.Unmarshal(aout, sv)
+			require.Equal(t, serr, nil)
+			require.Equal(t, sv, jv, dump(data, jv, jerr, sv, serr))
+		}
+
+		if m, ok := sv.(*map[string]interface{}); ok {
+			fuzzASTGetFromObject(t, jout, *m)
+			fuzzDynamicStruct(t, jout, *m)
+		}
+		if a, ok := sv.(*[]interface{}); ok {
+			fuzzASTGetFromArray(t, jout, *a)
+		}
+	}
 }
-
 
 type S struct {
-    A int    `json:",omitempty"`
-    B string `json:"B1,omitempty"`
-    C float64
-    D bool
-    E uint8
-    // F []byte // unmarshal []byte is different with encoding/json
-    G interface{}
-    H map[string]interface{}
-    I map[string]string
-    J []interface{}
-    K []string
-    L S1
-    M *S1
-    N *int
-    O **int
-    P int `json:",string"`
-    Q float64 `json:",string"`
-    R int `json:"-"`
-    T struct {}
-    U [2]int
-    V uintptr
-    W json.Number
-    // X json.RawMessage
-    Y Marshaller 
-    Z TextMarshaller
+	A int    `json:",omitempty"`
+	B string `json:"B1,omitempty"`
+	C float64
+	D bool
+	E uint8
+	// F []byte // unmarshal []byte is different with encoding/json
+	G interface{}
+	H map[string]interface{}
+	I map[string]string
+	J []interface{}
+	K []string
+	L S1
+	M *S1
+	N *int
+	O **int
+	P int     `json:",string"`
+	Q float64 `json:",string"`
+	R int     `json:"-"`
+	T struct{}
+	U [2]int
+	V uintptr
+	W json.Number
+	// X json.RawMessage
+	Y Marshaller
+	Z TextMarshaller
 }
 
-
 type S1 struct {
-    A int
-    B string
+	A int
+	B string
 }
 
 type Marshaller struct {
-    v string
+	v string
 }
 
 func (m *Marshaller) MarshalJSON() ([]byte, error) {
-    return json.Marshal(m.v)
+	return json.Marshal(m.v)
 }
 
 func (m *Marshaller) UnmarshalJSON(data []byte) error {
-    return json.Unmarshal(data, &m.v)
+	return json.Unmarshal(data, &m.v)
 }
 
 type TextMarshaller struct {
-    v int
+	v int
 }
 
 func (k *TextMarshaller) MarshalText() ([]byte, error) {
-    return json.Marshal(k.v)
+	return json.Marshal(k.v)
 }
 
-func (k *TextMarshaller)  UnmarshalText(data []byte) error {
-    return json.Unmarshal(data, &k.v)
+func (k *TextMarshaller) UnmarshalText(data []byte) error {
+	return json.Unmarshal(data, &k.v)
 }
-
 
 func dump(args ...interface{}) string {
-    return spew.Sdump(args)
+	return spew.Sdump(args)
 }
 
 func fdump(w io.Writer, args ...interface{}) {
-    spew.Fdump(w, args)
+	spew.Fdump(w, args)
 }
 
 const (
-    MemoryLimitEnv = "SONIC_FUZZ_MEM_LIMIT"
-    AsynyncGCEnv   = "SONIC_NO_ASYNC_GC"
-    KB      uint64 = 1024
-    MB      uint64 = 1024 * KB
-    GB      uint64 = 1024 * MB
+	MemoryLimitEnv        = "SONIC_FUZZ_MEM_LIMIT"
+	AsynyncGCEnv          = "SONIC_NO_ASYNC_GC"
+	KB             uint64 = 1024
+	MB             uint64 = 1024 * KB
+	GB             uint64 = 1024 * MB
 )
 
 func setMemLimit(limit uint64) {
-    threshold := uint64(float64(limit) * 0.7)
-    numWorker := uint64(runtime.GOMAXPROCS(0))
-    if os.Getenv(MemoryLimitEnv) != "" {
-        if memGB, err := strconv.ParseUint(os.Getenv(MemoryLimitEnv), 10, 64); err == nil {
-            limit = memGB * GB
-        }
-    }
-    gctuner.Tuning(threshold / numWorker)
-    log.Printf("[%d] Memory Limit: %d GB, Memory Threshold: %d MB\n", os.Getpid(), limit/GB, threshold/MB)
-    log.Printf("[%d] Memory Threshold Per Worker: %d MB\n", os.Getpid(), threshold/numWorker/MB)
+	threshold := uint64(float64(limit) * 0.7)
+	numWorker := uint64(runtime.GOMAXPROCS(0))
+	if os.Getenv(MemoryLimitEnv) != "" {
+		if memGB, err := strconv.ParseUint(os.Getenv(MemoryLimitEnv), 10, 64); err == nil {
+			limit = memGB * GB
+		}
+	}
+	debug.SetMemoryLimit(int64(threshold / numWorker))
+	log.Printf("[%d] Memory Limit: %d GB, Memory Threshold: %d MB\n", os.Getpid(), limit/GB, threshold/MB)
+	log.Printf("[%d] Memory Threshold Per Worker: %d MB\n", os.Getpid(), threshold/numWorker/MB)
 }
 
 func enableSyncGC() {
-    var debugAsyncGC = os.Getenv("AsynyncGCEnv") == ""
-    go func ()  {
-        if !debugAsyncGC {
-            return 
-        }
-        log.Printf("Begin GC looping...")
-        for {
-            runtime.GC()
-            debug.FreeOSMemory() 
-        }
-    }()
+	var debugAsyncGC = os.Getenv("AsynyncGCEnv") == ""
+	go func() {
+		if !debugAsyncGC {
+			return
+		}
+		log.Printf("Begin GC looping...")
+		for {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}()
 }
 
 func TestMain(m *testing.M) {
-    // Avoid OOM
-    setMemLimit(12 * GB)
-    enableSyncGC()
-    time.Sleep(time.Millisecond)
-    m.Run()
+	// Avoid OOM
+	setMemLimit(12 * GB)
+	enableSyncGC()
+	time.Sleep(time.Millisecond)
+	m.Run()
 }

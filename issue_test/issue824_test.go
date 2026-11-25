@@ -27,7 +27,7 @@ import (
 func TestFloatMap(t *testing.T) {
 	js, err := sonic.ConfigStd.Marshal(map[float64]string{1: ""})
 
-	if stdUsesJSONV2 {
+	if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 		require.Error(t, err)
 		return
 	}

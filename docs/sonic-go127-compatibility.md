@@ -1,5 +1,7 @@
 # Sonic and Go 1.27 Compatibility
 
+> **Historical Architecture Note (Updated November 2026)**: Sections below discussing `JIT`, `loader/funcdata_go127.go`, `moduledata`, and `GoMapIterator` linkname shims record the **historical July 2026 pre-convergence baseline**. Current Sonic has removed `JIT`, `loader`, and all `//go:linkname` private runtime dependencies (see [`README.md`](../README.md) and [`INTRODUCTION.md`](INTRODUCTION.md)). The JSON behavioral case catalog in [`compatibility/`](../compatibility/) remains active.
+
 Last updated: July 30, 2026
 Test module: [`compatibility/`](../compatibility/)
 
@@ -106,9 +108,9 @@ a promise that the final Go 1.27 implementation will keep the same behavior.
 
 | Case and test | Input or type | SonicStd | GoStd127 | LegacyStd | Compatibility impact |
 |---|---|---|---|---|---|
-| [`F32-OVF`](../compatibility/catalog_test.go#L40) | Value above float32 range | Error; destination remains `0` | Error; destination becomes `+Inf` | Error; destination remains `0` | Error-time mutation |
-| [`F64-OVF`](../compatibility/catalog_test.go#L58) | `1e1000` | Error; destination remains `0` | Error; destination becomes `+Inf` | Error; destination remains `0` | Error-time mutation |
-| [`F64-LONG-OVF`](../compatibility/catalog_test.go#L793) | 1,712-digit mantissa followed by `e-913` | No error; incorrectly returns a finite value near `5.33e-114` | Range error; element becomes `+Inf` | Range error; element remains `nil` | Historical range-detection bug exposed by Go 1.27 |
+| [`F32-OVF`](../compatibility/catalog_test.go#L40) | Value above float32 range | Error; destination remains `0` | Error; `+Inf` (< 1.27.3) or `0` (>= 1.27.3) | Error; destination remains `0` | Error-time mutation (fixed in Go 1.27.3) |
+| [`F64-OVF`](../compatibility/catalog_test.go#L58) | `1e1000` | Error; destination remains `0` | Error; `+Inf` (< 1.27.3) or `0` (>= 1.27.3) | Error; destination remains `0` | Error-time mutation (fixed in Go 1.27.3) |
+| [`F64-LONG-OVF`](../compatibility/catalog_test.go#L875) | 1,712-digit mantissa followed by `e-913` | Fixed: range error; element remains `nil` (historical `<= v1.15.2` returned finite `5.33e-114`) | Range error; element becomes `+Inf` (< 1.27.3) or `float64(0)` (>= 1.27.3) | Range error on Go 1.27 `nojsonv2`; Go `<= 1.26` stdlib returns finite `5.33e-114` | Resolved in native Sonic |
 | [`MAP-F64-ENC`](../compatibility/catalog_test.go#L80) | `map[float64]string` | Unsupported | Encodes successfully | Unsupported | Accepted type set |
 | [`MAP-PTR-ENC`](../compatibility/catalog_test.go#L98) | `map[*int]*int` | Unsupported | Encodes successfully | Unsupported | Accepted type set |
 | [`MAP-F64-DEC`](../compatibility/catalog_test.go#L118) | Float map keys | Decodes successfully | Decodes successfully | Error | Accepted type set |
@@ -493,37 +495,20 @@ env -u GOROOT GOTOOLCHAIN=go1.27rc2 \
   go test ./compatibility/ -count=1
 
 # Go 1.27 legacy encoding/json backend
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOEXPERIMENT=nojsonv2 \
-  go test ./compatibility/ -count=1
-
-# Sonic optimized paths
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 \
-  SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
-  go test ./compatibility/ -count=1
-
-# Sonic optimized paths with the legacy encoding/json backend
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOEXPERIMENT=nojsonv2 \
-  SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
+env -u GOROOT GOTOOLCHAIN=go1.27.0 GOEXPERIMENT=nojsonv2 \
   go test ./compatibility/ -count=1
 ```
 
 The broader Go 1.27 validation set is:
 
 ```sh
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOMAXPROCS=4 \
+env -u GOROOT GOTOOLCHAIN=go1.27.0 GOMAXPROCS=4 \
   go test ./... -count=1
 
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOMAXPROCS=4 \
-  SONIC_USE_OPTDEC=1 SONIC_USE_FASTMAP=1 SONIC_ENCODER_USE_VM=1 \
-  go test ./... -count=1
-
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOMAXPROCS=4 \
-  go test -race ./loader/... -count=1
-
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOMAXPROCS=4 \
+env -u GOROOT GOTOOLCHAIN=go1.27.0 GOMAXPROCS=4 \
   go test -race ./issue_test -count=1
 
-env -u GOROOT GOTOOLCHAIN=go1.27rc2 GOEXPERIMENT=nojsonv2 GOMAXPROCS=4 \
+env -u GOROOT GOTOOLCHAIN=go1.27.0 GOEXPERIMENT=nojsonv2 GOMAXPROCS=4 \
   go test -race ./issue_test -count=1
 ```
 

@@ -1,5 +1,14 @@
 # JSON Test Suite
 
+> **Sonic Integration Note**: In this repository, the upstream corpus below is
+> packaged as `testdata.json.gz` and consumed by `TestUnmarshalJSONSuite` in
+> [`compat_test.go`](../../compat_test.go#L219-L247). That test compares
+> accept/reject parity between `sonic.ConfigStd.Unmarshal` and the active Go
+> standard library `encoding/json.Unmarshal` for `json.RawMessage` and `any`
+> targets; the upstream `y_`/`n_`/`i_` classification notes below describe the
+> third-party fixture corpus itself rather than a universal specification across
+> all Sonic presets, backends, or target Go types.
+
 ["Parsing JSON is a Minefield 💣"](https://seriot.ch/projects/parsing_json.html)
 (posted 2016-10-26) performed one of the first thorough comparisons of
 JSON parser implementations and their behavior on various edge-cases.

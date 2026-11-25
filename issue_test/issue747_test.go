@@ -51,6 +51,12 @@ func TestIssue747(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sv, jv := tt.newfn(), tt.newfn()
 			serr := sonic.Unmarshal([]byte(tt.input), &sv)
+			jerr := json.Unmarshal([]byte(tt.input), &jv)
+			if sonic.APIKind == sonic.UseStdJSON {
+				assert.Equal(t, jerr == nil, serr == nil)
+				assert.Equal(t, jv, sv)
+				return
+			}
 			assert.Equal(t, tt.expected, sv)
 			assert.NoError(t, serr)
 
@@ -59,7 +65,6 @@ func TestIssue747(t *testing.T) {
 			}
 
 			// Note: it is different from legacy encoding/json.
-			jerr := json.Unmarshal([]byte(tt.input), &jv)
 			assert.NotEqual(t, jerr == nil, serr == nil)
 			assert.NotEqual(t, jv, sv)
 		})

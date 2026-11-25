@@ -36,7 +36,7 @@ func TestIssue670_JSONUnmarshaler(t *testing.T) {
 	// match
 	eo := []byte(`{"D":"2021-08-26","E":1}`)
 	et := reflect.TypeOf(Issue670JSONMarshaler{})
-	if stdUsesJSONV2 {
+	if stdUsesJSONV2 && sonic.APIKind == sonic.UseSonicJSON {
 		date := Date(time.Date(2021, time.August, 26, 0, 0, 0, 0, time.UTC).Unix())
 		assertSonicUnmarshalResult(t, eo, false, Issue670JSONMarshaler{D: date, E: 1})
 

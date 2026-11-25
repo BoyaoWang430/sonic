@@ -17,15 +17,29 @@
 package unit_test
 
 import (
+    `encoding/json`
     `io`
     `strings`
     `testing`
 
+    `github.com/bytedance/sonic`
     `github.com/bytedance/sonic/decoder`
     jsoniter "github.com/json-iterator/go"
     `github.com/stretchr/testify/assert`
     `github.com/stretchr/testify/require`
 )
+
+type refStreamDec interface {
+    Decode(val interface{}) error
+    More() bool
+}
+
+func newRefStreamDecoder(r io.Reader) refStreamDec {
+    if sonic.APIKind == sonic.UseStdJSON {
+        return json.NewDecoder(r)
+    }
+    return jsoniter.NewDecoder(r)
+}
 
 var (
     defaultBufferSize uint = 4096
@@ -39,7 +53,7 @@ func TestDecodeSingle(t *testing.T) {
 
     var r1 = strings.NewReader(str)
     var v1 map[string]interface{}
-    var d1 = jsoniter.NewDecoder(r1)
+    var d1 = newRefStreamDecoder(r1)
     var r2 = strings.NewReader(str)
     var v2 map[string]interface{}
     var d2 = decoder.NewStreamDecoder(r2)
@@ -64,7 +78,7 @@ func TestDecodeMulti(t *testing.T) {
 
     var r1 = strings.NewReader(str)
     var v1 map[string]interface{}
-    var d1 = jsoniter.NewDecoder(r1)
+    var d1 = newRefStreamDecoder(r1)
     var r2 = strings.NewReader(str)
     var v2 map[string]interface{}
     var d2 = decoder.NewStreamDecoder(r2)
@@ -156,7 +170,7 @@ func TestDecodeHalt(t *testing.T) {
     var r2 = NewHaltReader(str, testHalts())
     var v1 map[string]interface{}
     var v2 map[string]interface{}
-    var d1 = jsoniter.NewDecoder(r1)
+    var d1 = newRefStreamDecoder(r1)
     var d2 = decoder.NewStreamDecoder(r2)
 
     require.Equal(t, d1.More(), d2.More())
@@ -200,7 +214,7 @@ func TestMore(t *testing.T) {
     var d2 = decoder.NewStreamDecoder(r2)
     var r1 = NewHaltReader(str, testHalts())
     var v1 map[string]interface{}
-    var d1 = jsoniter.NewDecoder(r1)
+    var d1 = newRefStreamDecoder(r1)
     require.Nil(t, d1.Decode(&v1))
     require.Nil(t, d2.Decode(&v2))
     require.Equal(t, d1.More(), d2.More())
